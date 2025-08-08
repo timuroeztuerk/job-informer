@@ -48,6 +48,7 @@ class Config:
     enable_linkedin: bool
     enable_indeed: bool
     dry_run: bool
+    auto_migrate_csv: bool
     
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> 'Config':
@@ -95,7 +96,8 @@ class Config:
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
             enable_indeed=_get_bool('ENABLE_INDEED', 'false'),
-            dry_run=_get_bool('DRY_RUN', 'false')
+            dry_run=_get_bool('DRY_RUN', 'false'),
+            auto_migrate_csv=_get_bool('AUTO_MIGRATE_CSV', 'false')
         )
     
     def validate_for_mode(self, mode: str) -> None:
@@ -110,11 +112,10 @@ class Config:
 
         # Modes that require email configuration
         email_required_modes = {
-            'run-once', 'test-email', 'quick-test', 'summary-full',
-            'summary-latest', 'filter-historical', 'market-report', 'schedule'
+            'run-once', 'test', 'summary', 'market-report', 'schedule'
         }
         # Modes that require Gemini
-        gemini_required_modes = {'market-report', 'test-ai'}
+        gemini_required_modes = {'market-report', 'test'}
 
         if mode in email_required_modes:
             if not self.email_address:
@@ -173,5 +174,9 @@ class Config:
             'log_file': self.log_file,
             'gemini_api_key': '***HIDDEN***',  # Don't expose API key
             'gemini_model': self.gemini_model,
-            'gemini_analysis_prompt': self.gemini_analysis_prompt
+            'gemini_analysis_prompt': self.gemini_analysis_prompt,
+            'enable_linkedin': self.enable_linkedin,
+            'enable_indeed': self.enable_indeed,
+            'dry_run': self.dry_run,
+            'auto_migrate_csv': self.auto_migrate_csv
         }

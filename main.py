@@ -40,7 +40,7 @@ def main():
     
     parser.add_argument(
         '--mode',
-        choices=['run-once', 'test-email', 'quick-test', 'summary-full', 'summary-latest', 'filter-historical', 'market-report', 'test-ai', 'schedule', 'db-summary', 'migrate-csv'],
+        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge'],
         default='run-once',
         help='Execution mode (default: run-once)'
     )
@@ -91,29 +91,31 @@ def main():
         
         # Execute based on mode
         scheduler = TaskScheduler(config)
+
+        # Optional automatic CSV migration when enabled via env flag
+        try:
+            if getattr(config, 'auto_migrate_csv', False):
+                logger.info("AUTO_MIGRATE_CSV is enabled — migrating CSV files to database before running mode")
+                migrate_csv_files(scheduler)
+        except Exception as e:
+            logger.warning(f"Automatic CSV migration skipped due to error: {e}")
         
-        if args.mode == 'test-email':
-            test_email_configuration(scheduler)
-        elif args.mode == 'run-once':
+        if args.mode == 'run-once':
             run_job_search_once(scheduler)
-        elif args.mode == 'quick-test':
-            run_quick_test(scheduler)
-        elif args.mode == 'summary-full':
-            run_full_summary(scheduler)
-        elif args.mode == 'summary-latest':
+        elif args.mode == 'test':
+            run_all_tests(scheduler)
+        elif args.mode == 'summary':
             run_latest_summary(scheduler)
-        elif args.mode == 'filter-historical':
-            filter_historical_jobs(scheduler)
         elif args.mode == 'market-report':
             generate_market_report(scheduler)
-        elif args.mode == 'test-ai':
-            test_ai_connection(scheduler)
         elif args.mode == 'schedule':
             start_schedule(scheduler)
         elif args.mode == 'db-summary':
             show_database_summary(scheduler)
         elif args.mode == 'migrate-csv':
             migrate_csv_files(scheduler)
+        elif args.mode == 'purge':
+            purge_unwanted_jobs(scheduler)
         else:
             logger.error(f"Unsupported mode: {args.mode}")
             sys.exit(1)
@@ -168,6 +170,26 @@ def run_quick_test(scheduler: TaskScheduler):
         sys.exit(1)
 
 
+def run_all_tests(scheduler: TaskScheduler):
+    """Run combined tests: config/email test, scraper init, and AI connection"""
+    logger.info("=== Running Combined Tests ===")
+    overall_success = True
+    
+    # Quick test includes config validation, email test, and scraper init
+    if not scheduler.run_quick_test():
+        overall_success = False
+    
+    # AI connection test
+    if not scheduler.test_ai_connection():
+        overall_success = False
+    
+    if overall_success:
+        logger.success("=== All Tests Passed ===")
+    else:
+        logger.error("=== Tests Failed ===")
+        sys.exit(1)
+
+
 def run_full_summary(scheduler: TaskScheduler):
     """Generate and send full summary report"""
     logger.info("=== Generating Full Summary ===")
@@ -194,17 +216,6 @@ def run_latest_summary(scheduler: TaskScheduler):
         sys.exit(1)
 
 
-def filter_historical_jobs(scheduler: TaskScheduler):
-    """Filter historical jobs and send filtered results"""
-    logger.info("=== Filtering Historical Jobs ===")
-    
-    success = scheduler.filter_and_send_historical_jobs()
-    
-    if success:
-        logger.success("=== Filtered Historical Jobs Sent Successfully ===")
-    else:
-        logger.error("=== Historical Jobs Filtering Failed ===")
-        sys.exit(1)
 
 
 def generate_market_report(scheduler: TaskScheduler):
@@ -281,6 +292,19 @@ def migrate_csv_files(scheduler: TaskScheduler):
         total_migrated += migrated
     
     logger.success(f"Migration complete: {total_migrated} total jobs migrated")
+
+
+def purge_unwanted_jobs(scheduler: TaskScheduler):
+    """Purge unwanted jobs from the database based on current filters"""
+    logger.info("=== Purging Unwanted Jobs from Database ===")
+    success = scheduler.purge_unwanted_jobs()
+    
+    if success:
+        logger.success("=== Database Purge Completed Successfully ===")
+    else:
+        logger.error("=== Database Purge Failed ===")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

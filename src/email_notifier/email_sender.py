@@ -334,7 +334,7 @@ class EmailSender:
             with self.create_connection() as server:
                 server.send_message(msg)
             
-            logger.success(f"Job report email sent successfully to {self.recipient_email}")
+            logger.debug(f"Job report email sent successfully to {self.recipient_email}")
             return True
             
         except Exception as e:
@@ -414,7 +414,7 @@ class EmailSender:
             with self.create_connection() as server:
                 server.send_message(msg)
             
-            logger.success("Error notification sent successfully")
+            logger.debug("Error notification sent successfully")
             return True
             
         except Exception as e:
@@ -643,7 +643,7 @@ class EmailSender:
             with self.create_connection() as server:
                 server.send_message(msg)
             
-            logger.success("Test email sent successfully")
+            logger.debug("Test email sent successfully")
             return True
             
         except Exception as e:
@@ -873,7 +873,7 @@ class EmailSender:
             with self.create_connection() as server:
                 server.send_message(msg)
             
-            logger.success(f"Email with attachment sent successfully")
+            logger.debug(f"Email with attachment sent successfully")
             return True
             
         except Exception as e:

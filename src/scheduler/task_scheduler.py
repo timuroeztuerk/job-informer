@@ -128,8 +128,6 @@ class TaskScheduler:
     
     def generate_full_summary(self) -> bool:
         """Generate and send a summary of all historical job data from database"""
-        logger.info("=== Generating Full Summary Report ===")
-        
         try:
             # Get all jobs from database
             with self.scraper.db._get_connection() as conn:
@@ -150,9 +148,7 @@ class TaskScheduler:
             subject = f"Job Informer Full Summary - {len(unique_jobs_df)} Total Unique Jobs"
             success = self.email_sender.send_job_report(unique_jobs_df, subject)
             
-            if success:
-                logger.success("Full summary report sent successfully")
-            else:
+            if not success:
                 logger.error("Failed to send full summary report")
                 
             return success
@@ -164,8 +160,6 @@ class TaskScheduler:
     
     def generate_latest_summary(self, num_runs: int = 5) -> bool:
         """Generate and send a summary of the latest job runs from database"""
-        logger.info(f"=== Generating Latest Summary Report (last {num_runs} runs) ===")
-        
         try:
             # Get recent jobs from database (last 30 days by default)
             latest_jobs_df = self.scraper.db.get_recent_jobs(days=30)
@@ -178,16 +172,22 @@ class TaskScheduler:
             
             # Remove duplicates (database should already be deduplicated, but just in case)
             unique_jobs_df = latest_jobs_df.drop_duplicates(subset=['job_id'], keep='first')
-            
-            logger.info(f"Latest summary: {len(unique_jobs_df)} unique jobs from database")
-            
-            # Send email with latest summary
-            subject = f"Job Informer Latest Summary - {len(unique_jobs_df)} Recent Jobs"
-            success = self.email_sender.send_job_report(unique_jobs_df, subject)
-            
-            if success:
-                logger.success("Latest summary report sent successfully")
+
+            # Randomly sample up to 50 jobs for the summary email
+            total_available = len(unique_jobs_df)
+            sample_size = min(50, total_available)
+            if sample_size > 0:
+                limited_df = unique_jobs_df.sample(n=sample_size, replace=False, random_state=None)
             else:
+                limited_df = unique_jobs_df
+
+            logger.info(f"Latest summary: sending random {len(limited_df)} of {total_available} jobs")
+
+            # Send email with limited summary
+            subject = f"Job Informer Summary - {len(limited_df)} Random Jobs (of {total_available})"
+            success = self.email_sender.send_job_report(limited_df, subject)
+            
+            if not success:
                 logger.error("Failed to send latest summary report")
                 
             return success
@@ -199,8 +199,6 @@ class TaskScheduler:
     
     def filter_and_send_historical_jobs(self) -> bool:
         """Apply current filters to historical data from database and send filtered results"""
-        logger.info("=== Filtering Historical Jobs ===")
-        
         try:
             # Get all jobs from database and apply current filters
             with self.scraper.db._get_connection() as conn:
@@ -227,9 +225,7 @@ class TaskScheduler:
             subject = f"Job Informer Filtered Historical Data - {len(filtered_jobs_df)} Jobs After Filtering"
             success = self.email_sender.send_job_report(filtered_jobs_df, subject)
             
-            if success:
-                logger.success("Filtered historical data report sent successfully")
-            else:
+            if not success:
                 logger.error("Failed to send filtered historical data report")
                 
             return success
@@ -241,8 +237,6 @@ class TaskScheduler:
     
     def generate_market_report(self) -> bool:
         """Generate and send AI-powered job market analysis report"""
-        logger.info("=== Generating AI Market Report ===")
-        
         try:
             # Load all historical job data and apply current filters
             filtered_jobs_df = self.scraper.filter_historical_jobs()
@@ -268,9 +262,7 @@ class TaskScheduler:
             subject = f"AI Job Market Analysis Report - {len(filtered_jobs_df)} Filtered Jobs Analyzed"
             success = self.email_sender.send_market_report(market_report, subject, len(filtered_jobs_df))
             
-            if success:
-                logger.success("AI market analysis report sent successfully")
-            else:
+            if not success:
                 logger.error("Failed to send market analysis report")
                 
             return success
@@ -282,8 +274,6 @@ class TaskScheduler:
     
     def test_ai_connection(self) -> bool:
         """Test AI (Gemini) API connection"""
-        logger.info("Testing AI (Gemini) API connection...")
-        
         try:
             success = self.analyst.test_api_connection()
             
@@ -297,6 +287,95 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"Error testing AI connection: {e}")
             return False
+
+    def purge_unwanted_jobs(self) -> bool:
+        """Purge unwanted jobs from the database based on current filters"""
+        try:
+            # Get all jobs from database
+            with self.scraper.db._get_connection() as conn:
+                all_jobs_df = pd.read_sql_query("SELECT * FROM jobs ORDER BY scraped_at DESC", conn)
+            
+            if all_jobs_df.empty:
+                logger.warning("No jobs found in database to purge")
+                return True
+            
+            original_count = len(all_jobs_df)
+            logger.info(f"Found {original_count} jobs in database")
+
+            # 1) Remove jobs matching current unwanted keywords
+            filtered_jobs_df = self.scraper.filter_unwanted_jobs(all_jobs_df.copy())
+            unwanted_mask = ~all_jobs_df.index.isin(filtered_jobs_df.index)
+            unwanted_jobs = all_jobs_df[unwanted_mask]
+            unwanted_ids = set(unwanted_jobs['job_id'].tolist())
+
+            # 2) Remove duplicates: keep most recent per normalized (title, company, location, source)
+            norm_df = all_jobs_df.copy()
+            for col in ['title', 'company', 'location', 'source']:
+                if col in norm_df.columns:
+                    norm_df[f'{col}_norm'] = norm_df[col].astype(str).str.strip().str.lower()
+                else:
+                    norm_df[f'{col}_norm'] = ''
+            # Parse scraped_at for recency sort
+            if 'scraped_at' in norm_df.columns:
+                try:
+                    norm_df['scraped_at'] = pd.to_datetime(norm_df['scraped_at'], errors='coerce')
+                except Exception:
+                    pass
+            norm_df['_order'] = norm_df['scraped_at']
+            try:
+                norm_df['_order'] = norm_df['_order'].fillna(pd.Timestamp(0))
+            except Exception:
+                pass
+
+            norm_df_sorted = norm_df.sort_values(by=['_order'], ascending=False)
+            keep_idx = norm_df_sorted.drop_duplicates(
+                subset=['title_norm', 'company_norm', 'location_norm', 'source_norm'], keep='first'
+            ).index
+            dup_mask = ~norm_df.index.isin(keep_idx)
+            duplicate_jobs = all_jobs_df[dup_mask]
+            duplicate_ids = set(duplicate_jobs['job_id'].tolist())
+
+            # Union of all job_ids to delete
+            to_delete_ids = list(unwanted_ids.union(duplicate_ids))
+
+            if not to_delete_ids:
+                logger.info("No unwanted or duplicate jobs found - database is clean")
+                return True
+
+            logger.info(
+                f"Will remove {len(to_delete_ids)} jobs (unwanted: {len(unwanted_ids)}, duplicates: {len(duplicate_ids)})"
+            )
+
+            # Delete selected jobs
+            with self.scraper.db._get_connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.executemany("DELETE FROM jobs WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Error during deletion: {e}")
+                    return False
+
+                # Verify deletion
+                cursor.execute("SELECT COUNT(*) FROM jobs")
+                final_count = cursor.fetchone()[0]
+
+            logger.info(
+                f"Purge complete: {len(to_delete_ids)} jobs removed (unwanted: {len(unwanted_ids)}, duplicates: {len(duplicate_ids)}). Remaining: {final_count}"
+            )
+
+            if len(to_delete_ids) > 0:
+                # Show examples
+                sample_display = pd.concat([unwanted_jobs, duplicate_jobs], ignore_index=True).head(3)
+                if not sample_display.empty:
+                    logger.info("Examples of removed jobs:")
+                    for _, job in sample_display.iterrows():
+                        logger.info(f"  - {job['title']} at {job['company']}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error purging unwanted jobs: {e}")
             return False
 
     def _seconds_until_next_time(self, hhmm: str, tz: str) -> int:

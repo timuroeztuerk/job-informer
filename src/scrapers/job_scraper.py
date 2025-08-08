@@ -18,6 +18,7 @@ import pandas as pd
 from loguru import logger
 from ..config.settings import Config
 from ..utils.database import JobDatabase
+from ..utils.data_utils import build_job_ids, build_normalized_keys
 import os
 import glob
 from pathlib import Path
@@ -223,20 +224,24 @@ class JobScraper:
         
         original_count = len(current_df)
         
-        # Build job_ids vectorized for current data
-        current_job_ids = self._build_job_ids_vectorized(current_df)
-        
-        # Get existing job_ids from database (fast indexed lookup)
+        # Build normalized keys for current data (canonical URL or source|title|company)
+        current_keys = build_normalized_keys(current_df)
+
+        # Build normalized keys for existing DB rows
         with self.db._get_connection() as conn:
-            existing_job_ids = set(pd.read_sql_query(
-                "SELECT job_id FROM jobs", conn
-            )['job_id'].tolist())
+            existing_df = pd.read_sql_query(
+                "SELECT url, title, company, source FROM jobs",
+                conn
+            )
+        if existing_df.empty:
+            filtered_df = current_df
+        else:
+            existing_keys = set(build_normalized_keys(existing_df).tolist())
+            # Keep only rows whose normalized key is not present in DB
+            mask = ~current_keys.isin(existing_keys)
+            filtered_df = current_df[mask]
         
-        # Vectorized filtering: keep jobs not in database
-        mask = ~current_job_ids.isin(existing_job_ids)
-        current_df = current_df[mask]
-        
-        filtered_count = len(current_df)
+        filtered_count = len(filtered_df)
         removed_count = original_count - filtered_count
         
         if removed_count > 0:
@@ -244,7 +249,7 @@ class JobScraper:
         else:
             logger.info("No database duplicates found - all jobs are new!")
         
-        return current_df
+        return filtered_df
     
     def get_all_csv_files(self) -> List[str]:
         """Get all CSV files in the data directory sorted by date (newest first)"""
@@ -429,27 +434,8 @@ class JobScraper:
         return df
 
     def _build_job_ids_vectorized(self, df: pd.DataFrame) -> pd.Series:
-        """Build stable identifiers for all jobs in dataframe using vectorized operations"""
-        if df.empty:
-            return pd.Series(dtype='string')
-        
-        # Normalize and clean all string columns
-        df_clean = df.copy()
-        for col in ['url', 'title', 'company', 'location', 'source']:
-            if col in df_clean.columns:
-                df_clean[col] = df_clean[col].astype(str).str.strip().str.lower()
-            else:
-                df_clean[col] = ''
-        
-        # Vectorized job_id building: use URL if available, otherwise concatenate fields
-        url_available = df_clean['url'].str.len() > 0
-        fallback_id = (df_clean['title'] + '|' + 
-                      df_clean['company'] + '|' + 
-                      df_clean['location'] + '|' + 
-                      df_clean['source'])
-        
-        job_ids = np.where(url_available, df_clean['url'], fallback_id)
-        return pd.Series(job_ids, index=df.index)
+        """Build stable identifiers using normalized URLs; fallback to source|title|company."""
+        return build_job_ids(df)
     
     def save_jobs_to_csv(self, df: pd.DataFrame, filename: Optional[str] = None) -> str:
         """Save jobs data to CSV file"""

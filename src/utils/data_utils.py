@@ -5,6 +5,7 @@ Helper functions for processing job data
 
 import pandas as pd
 from typing import Dict, List, Optional
+from urllib.parse import urlparse, parse_qs
 import re
 from datetime import datetime
 
@@ -198,3 +199,94 @@ def export_jobs_to_formats(jobs_df: pd.DataFrame, base_filename: str) -> List[st
     exported_files.append(json_file)
     
     return exported_files
+
+
+# -----------------------
+# Job identity utilities
+# -----------------------
+
+def normalize_job_url(url: str, source: str) -> str:
+    """Normalize a job URL to a stable identifier-like form.
+    Removes tracking params; for known sources extracts canonical IDs.
+    Returns empty string if url is falsy.
+    """
+    if not url:
+        return ''
+    try:
+        parsed = urlparse(str(url))
+        netloc = parsed.netloc.lower()
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
+        # LinkedIn: prefer /jobs/view/<id>
+        if 'linkedin.' in netloc:
+            # Extract numeric id from /jobs/view/<id>
+            if '/jobs/view/' in path:
+                parts = path.split('/jobs/view/')[-1].split('/')
+                if parts and parts[0].isdigit():
+                    return f"linkedin:{parts[0]}"
+            # Fallback: try currentJobId param
+            job_ids = query.get('currentJobId') or query.get('jobId') or []
+            if job_ids:
+                return f"linkedin:{job_ids[0]}"
+            # Generic fallback: scheme://host/path without query/fragment
+            return f"{netloc}{path}".rstrip('/')
+
+        # Indeed: viewjob?jk=<id>
+        if 'indeed.' in netloc:
+            jk = query.get('jk', [])
+            if jk:
+                return f"indeed:{jk[0]}"
+            return f"{netloc}{path}".rstrip('/')
+
+        # Generic: host + path without query/fragment
+        return f"{netloc}{path}".rstrip('/')
+    except Exception:
+        return str(url).strip()
+
+
+def build_job_ids(df: pd.DataFrame) -> pd.Series:
+    """Build stable job_id Series for a DataFrame of jobs using normalized URLs when available.
+    Falls back to normalized (title|company|source) if URL is missing.
+    """
+    if df.empty:
+        return pd.Series(dtype='string')
+    clean = df.copy()
+    for col in ['url', 'title', 'company', 'location', 'source']:
+        if col in clean.columns:
+            clean[col] = clean[col].astype(str).str.strip()
+        else:
+            clean[col] = ''
+
+    # Compute normalized URL ids
+    norm_urls = clean.apply(lambda r: normalize_job_url(r.get('url', ''), r.get('source', '')), axis=1)
+    title_norm = clean['title'].str.lower()
+    company_norm = clean['company'].str.lower()
+    source_norm = clean['source'].str.lower()
+
+    fallback_ids = source_norm + '|' + title_norm + '|' + company_norm
+    use_url_mask = norm_urls.str.len() > 0
+    job_ids = norm_urls.where(use_url_mask, fallback_ids)
+    return pd.Series(job_ids.values, index=df.index)
+
+
+def build_normalized_keys(df: pd.DataFrame) -> pd.Series:
+    """Build normalized deduplication keys for cross-run duplicate detection.
+    Prefer normalized URL; otherwise use (source|title|company) ignoring location.
+    """
+    if df.empty:
+        return pd.Series(dtype='string')
+    clean = df.copy()
+    for col in ['url', 'title', 'company', 'source']:
+        if col in clean.columns:
+            clean[col] = clean[col].astype(str).str.strip()
+        else:
+            clean[col] = ''
+    norm_urls = clean.apply(lambda r: normalize_job_url(r.get('url', ''), r.get('source', '')), axis=1)
+    title_norm = clean['title'].str.lower()
+    company_norm = clean['company'].str.lower()
+    source_norm = clean['source'].str.lower()
+    fallback = source_norm + '|' + title_norm + '|' + company_norm
+    use_url_mask = norm_urls.str.len() > 0
+    keys = norm_urls.where(use_url_mask, fallback)
+    return pd.Series(keys.values, index=df.index)

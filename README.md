@@ -72,13 +72,9 @@ python main.py --mode run-once
 ### Available Modes
 
 - **`run-once`** (default): Execute job search immediately and send results via email
-- **`test-email`**: Test your email configuration by sending a test message
-- **`quick-test`**: Run all functionality tests to verify setup
-- **`summary-full`**: Generate and send summary report of all historical job data
-- **`summary-latest`**: Generate and send summary report of recent job searches (last 5 runs)
-- **`filter-historical`**: Apply current filtering criteria to all historical job data
+- **`test`**: Run combined tests (config/email, scraper init, AI connection)
+- **`summary`**: Send a summary of recent jobs (limited to 50 most recent)
 - **`market-report`**: Generate and send AI-powered job market analysis report
-- **`test-ai`**: Test the Gemini AI API connection
 - **`db-summary`**: Show a summary of the database
 - **`migrate-csv`**: Migrate CSV files to the database
 
@@ -88,29 +84,24 @@ python main.py --mode run-once
 # Basic job search
 python main.py
 
-# Test email configuration
-python main.py --mode test-email
+# Run combined tests
+python main.py --mode test
 
 # Search with custom keywords and locations
 python main.py --keywords "Data Analyst" --locations "Berlin, Remote"
 
-# Run quick functionality test
-python main.py --mode quick-test
-
-# Generate full summary of all historical data
-python main.py --mode summary-full
-
-# Generate AI-powered market analysis report
-python main.py --mode market-report
-
-# Test AI API connection
-python main.py --mode test-ai
-
-# Filter all historical data with current criteria
-python main.py --mode filter-historical
+# Send a summary of recent jobs (up to 50)
+python main.py --mode summary
 
 # Use custom config file
 python main.py --config /path/to/custom/.env
+
+# Migrate CSV files to the database (manual)
+python main.py --mode migrate-csv
+
+# Or enable automatic CSV migration on startup
+export AUTO_MIGRATE_CSV=true
+python main.py --mode run-once
 ```
 
 ### Advanced Usage
@@ -201,6 +192,7 @@ job-informer/
 | `SCHEDULE_TIME` | Daily schedule time (HH:MM) | `09:00` | No |
 | `LOG_LEVEL` | Logging level | `INFO` | No |
 | `LOG_FILE` | Log file path | `logs/job_informer.log` | No |
+| `AUTO_MIGRATE_CSV` | Migrate existing CSVs to SQLite automatically on startup | `false` | No |
 
 ### Email Setup (Gmail)
 
