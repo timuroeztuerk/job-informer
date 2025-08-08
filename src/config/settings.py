@@ -7,6 +7,7 @@ import os
 from dotenv import load_dotenv
 from typing import Optional
 from dataclasses import dataclass
+import re
 
 
 @dataclass
@@ -42,6 +43,11 @@ class Config:
     gemini_api_key: str
     gemini_model: str
     gemini_analysis_prompt: str
+
+    # Feature Toggles
+    enable_linkedin: bool
+    enable_indeed: bool
+    dry_run: bool
     
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> 'Config':
@@ -51,6 +57,10 @@ class Config:
         else:
             load_dotenv()  # Load from .env file in current directory
         
+        def _get_bool(name: str, default: str = 'false') -> bool:
+            value = os.getenv(name, default)
+            return bool(re.match(r"^(1|true|yes|y|on)$", str(value).strip(), re.IGNORECASE))
+
         return cls(
             # Email Configuration
             smtp_server=os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
@@ -80,39 +90,56 @@ class Config:
             # AI Analysis Configuration
             gemini_api_key=os.getenv('GEMINI_API_KEY', ''),
             gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-exp'),
-            gemini_analysis_prompt=os.getenv('GEMINI_ANALYSIS_PROMPT', 'Analyze the following job market data and provide comprehensive insights.')
+            gemini_analysis_prompt=os.getenv('GEMINI_ANALYSIS_PROMPT', 'Analyze the following job market data and provide comprehensive insights.'),
+
+            # Feature Toggles
+            enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
+            enable_indeed=_get_bool('ENABLE_INDEED', 'false'),
+            dry_run=_get_bool('DRY_RUN', 'false')
         )
     
-    def validate(self) -> None:
-        """Validate configuration values"""
+    def validate_for_mode(self, mode: str) -> None:
+        """Validate configuration values depending on execution mode"""
         errors = []
-        
-        if not self.email_address:
-            errors.append("EMAIL_ADDRESS is required")
-        
-        if not self.email_password:
-            errors.append("EMAIL_PASSWORD is required")
-            
-        if not self.recipient_email:
-            errors.append("RECIPIENT_EMAIL is required")
-        
-        if not self.search_keywords:
-            errors.append("SEARCH_KEYWORDS is required")
-            
-        if not self.search_locations:
-            errors.append("SEARCH_LOCATIONS is required")
-        
+
+        # Common validations
         if self.request_delay < 0:
             errors.append("REQUEST_DELAY must be positive")
-            
         if self.max_retries < 0:
             errors.append("MAX_RETRIES must be positive")
-        
-        if not self.gemini_api_key:
-            errors.append("GEMINI_API_KEY is required for AI analysis features")
-        
+
+        # Modes that require email configuration
+        email_required_modes = {
+            'run-once', 'test-email', 'quick-test', 'summary-full',
+            'summary-latest', 'filter-historical', 'market-report', 'schedule'
+        }
+        # Modes that require Gemini
+        gemini_required_modes = {'market-report', 'test-ai'}
+
+        if mode in email_required_modes:
+            if not self.email_address:
+                errors.append("EMAIL_ADDRESS is required")
+            if not self.email_password:
+                errors.append("EMAIL_PASSWORD is required")
+            if not self.recipient_email:
+                errors.append("RECIPIENT_EMAIL is required")
+
+        if mode in {'run-once', 'schedule'}:
+            if not self.search_keywords:
+                errors.append("SEARCH_KEYWORDS is required")
+            if not self.search_locations:
+                errors.append("SEARCH_LOCATIONS is required")
+
+        if mode in gemini_required_modes:
+            if not self.gemini_api_key:
+                errors.append("GEMINI_API_KEY is required for AI analysis features")
+
         if errors:
             raise ValueError(f"Configuration validation failed: {', '.join(errors)}")
+
+    # Backward compatibility
+    def validate(self) -> None:
+        self.validate_for_mode('run-once')
     
     def get_keywords_list(self) -> list:
         """Get search keywords as a list"""

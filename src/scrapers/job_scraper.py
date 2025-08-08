@@ -17,9 +17,14 @@ import time
 import pandas as pd
 from loguru import logger
 from ..config.settings import Config
+from ..utils.database import JobDatabase
 import os
 import glob
 from pathlib import Path
+from urllib.parse import quote_plus
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+import numpy as np
 
 
 class JobScraper:
@@ -28,10 +33,17 @@ class JobScraper:
     def __init__(self, config: Config):
         self.config = config
         self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': config.user_agent
-        })
+        self.session.headers.update({'User-Agent': config.user_agent})
+        # Configure retries for robustness
+        retries = Retry(total=self.config.max_retries, backoff_factor=1.2,
+                        status_forcelist=[429, 500, 502, 503, 504],
+                        allowed_methods=["GET", "HEAD"])
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
         self.jobs_data: List[Dict] = []
+        # Initialize database for fast deduplication
+        self.db = JobDatabase()
         
     def setup_driver(self) -> webdriver.Chrome:
         """Setup Chrome WebDriver with appropriate options"""
@@ -55,14 +67,8 @@ class JobScraper:
             
             # Build Indeed search URL
             base_url = "https://www.indeed.com/jobs"
-            params = {
-                'q': keywords,
-                'l': location,
-                'sort': 'date'
-            }
-            
             # Construct URL with parameters
-            url = f"{base_url}?q={keywords.replace(' ', '+')}&l={location.replace(' ', '+')}&sort=date"
+            url = f"{base_url}?q={quote_plus(keywords)}&l={quote_plus(location)}&sort=date"
             driver.get(url)
             
             # Wait for job listings to load
@@ -119,9 +125,24 @@ class JobScraper:
             # This is a basic implementation that works for public job listings
             # Adding f_TPR=r86400 parameter for jobs posted in last 24 hours (86400 seconds = 1 day)
             # Adding f_JT=F parameter for full-time jobs only
-            url = f"https://www.linkedin.com/jobs/search/?keywords={keywords}&location={location}&f_TPR=r86400&f_JT=F"
-            
-            response = self.session.get(url)
+            url = f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(keywords)}&location={quote_plus(location)}&f_TPR=r86400&f_JT=F"
+
+            # Simple retry loop in addition to session retries
+            last_exc = None
+            for attempt in range(self.config.max_retries + 1):
+                try:
+                    response = self.session.get(url, timeout=20)
+                    if response.status_code == 200:
+                        break
+                    logger.warning(f"LinkedIn HTTP {response.status_code} on attempt {attempt+1}")
+                except requests.RequestException as e:
+                    last_exc = e
+                    logger.warning(f"LinkedIn request error on attempt {attempt+1}: {e}")
+                time.sleep(min(5, 1.5 * (attempt + 1)))
+            else:
+                if last_exc:
+                    raise last_exc
+                raise RuntimeError("LinkedIn request failed after retries")
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # LinkedIn's structure changes frequently, this is a basic example
@@ -186,6 +207,9 @@ class JobScraper:
         
         try:
             historical_df = pd.read_csv(recent_file)
+            # Coerce scraped_at to datetime if present
+            if 'scraped_at' in historical_df.columns:
+                historical_df['scraped_at'] = pd.to_datetime(historical_df['scraped_at'], errors='coerce')
             logger.info(f"Loaded {len(historical_df)} historical jobs from {recent_file}")
             return historical_df
         except Exception as e:
@@ -193,42 +217,32 @@ class JobScraper:
             return pd.DataFrame()
     
     def remove_historical_duplicates(self, current_df: pd.DataFrame) -> pd.DataFrame:
-        """Remove jobs that already exist in historical data"""
+        """Remove jobs that already exist in database using fast SQLite lookup"""
         if current_df.empty:
-            return current_df
-        
-        # Load historical jobs
-        historical_df = self.load_historical_jobs()
-        
-        if historical_df.empty:
-            logger.info("No historical data to compare against")
             return current_df
         
         original_count = len(current_df)
         
-        # Create a set of historical job identifiers (title + company)
-        if 'title' in historical_df.columns and 'company' in historical_df.columns:
-            historical_jobs = set()
-            for _, row in historical_df.iterrows():
-                job_id = f"{row['title'].strip().lower()}|{row['company'].strip().lower()}"
-                historical_jobs.add(job_id)
-            
-            # Filter out current jobs that match historical ones
-            def is_new_job(row):
-                current_job_id = f"{row['title'].strip().lower()}|{row['company'].strip().lower()}"
-                return current_job_id not in historical_jobs
-            
-            current_df = current_df[current_df.apply(is_new_job, axis=1)]
-            
-            filtered_count = len(current_df)
-            removed_count = original_count - filtered_count
-            
-            if removed_count > 0:
-                logger.info(f"Removed {removed_count} jobs that were found in previous runs")
-            else:
-                logger.info("No historical duplicates found - all jobs are new!")
+        # Build job_ids vectorized for current data
+        current_job_ids = self._build_job_ids_vectorized(current_df)
+        
+        # Get existing job_ids from database (fast indexed lookup)
+        with self.db._get_connection() as conn:
+            existing_job_ids = set(pd.read_sql_query(
+                "SELECT job_id FROM jobs", conn
+            )['job_id'].tolist())
+        
+        # Vectorized filtering: keep jobs not in database
+        mask = ~current_job_ids.isin(existing_job_ids)
+        current_df = current_df[mask]
+        
+        filtered_count = len(current_df)
+        removed_count = original_count - filtered_count
+        
+        if removed_count > 0:
+            logger.info(f"Removed {removed_count} jobs that already exist in database")
         else:
-            logger.warning("Historical data missing required columns (title, company)")
+            logger.info("No database duplicates found - all jobs are new!")
         
         return current_df
     
@@ -266,6 +280,8 @@ class JobScraper:
         for i, csv_file in enumerate(csv_files):
             try:
                 df = pd.read_csv(csv_file)
+                if 'scraped_at' in df.columns:
+                    df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
                 all_jobs.append(df)
                 logger.debug(f"Loaded {len(df)} jobs from {csv_file} ({i+1}/{total_files})")
             except Exception as e:
@@ -301,6 +317,8 @@ class JobScraper:
         for i, csv_file in enumerate(recent_files):
             try:
                 df = pd.read_csv(csv_file)
+                if 'scraped_at' in df.columns:
+                    df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
                 recent_jobs.append(df)
                 logger.debug(f"Loaded {len(df)} jobs from {csv_file} ({i+1}/{actual_runs})")
             except Exception as e:
@@ -345,17 +363,24 @@ class JobScraper:
         return unique_filtered_df
     
     def scrape_all_sources(self, keywords: List[str], locations: List[str]) -> pd.DataFrame:
-        """Scrape jobs from LinkedIn only"""
-        all_jobs = []
-        
+        """Scrape jobs from enabled sources"""
+        all_jobs: List[Dict] = []
+
+        if not (self.config.enable_linkedin or self.config.enable_indeed):
+            logger.warning("No sources enabled. Enable at least one of ENABLE_LINKEDIN or ENABLE_INDEED.")
+            return pd.DataFrame()
+
         for keyword in keywords:
             for location in locations:
                 # Add delay between requests
                 time.sleep(self.config.request_delay)
-                
-                # Scrape LinkedIn only
-                linkedin_jobs = self.scrape_linkedin(keyword, location)
-                all_jobs.extend(linkedin_jobs)
+
+                if self.config.enable_linkedin:
+                    linkedin_jobs = self.scrape_linkedin(keyword, location)
+                    all_jobs.extend(linkedin_jobs)
+                if self.config.enable_indeed:
+                    indeed_jobs = self.scrape_indeed(keyword, location)
+                    all_jobs.extend(indeed_jobs)
         
         # Convert to DataFrame and process
         df = pd.DataFrame(all_jobs)
@@ -363,8 +388,9 @@ class JobScraper:
             # Filter out jobs with unwanted keywords in title
             df = self.filter_unwanted_jobs(df)
             
-            # Remove duplicates within current results
-            df = df.drop_duplicates(subset=['title', 'company'], keep='first')
+            # Build job_ids vectorized and drop duplicates
+            df['job_id'] = self._build_job_ids_vectorized(df)
+            df = df.drop_duplicates(subset=['job_id'], keep='first')
             logger.info(f"Current run found {len(df)} unique jobs after filtering")
             
             # Remove jobs that were found in previous runs
@@ -385,10 +411,14 @@ class JobScraper:
         
         # Get unwanted keywords from configuration
         unwanted_keywords = self.config.get_unwanted_keywords_list()
-        
-        for keyword in unwanted_keywords:
-            mask = ~df['title'].str.contains(keyword, case=False, na=False)
-            df = df[mask]
+
+        if unwanted_keywords:
+            # Build a single regex pattern with word boundaries for all keywords
+            import re
+            escaped = [rf"\b{re.escape(k)}\b" for k in unwanted_keywords if k]
+            if escaped:
+                pattern = "|".join(escaped)
+                df = df[~df['title'].str.contains(pattern, case=False, na=False, regex=True)]
         
         filtered_count = len(df)
         removed_count = original_count - filtered_count
@@ -397,6 +427,29 @@ class JobScraper:
             logger.info(f"Filtered out {removed_count} jobs containing unwanted keywords")
             
         return df
+
+    def _build_job_ids_vectorized(self, df: pd.DataFrame) -> pd.Series:
+        """Build stable identifiers for all jobs in dataframe using vectorized operations"""
+        if df.empty:
+            return pd.Series(dtype='string')
+        
+        # Normalize and clean all string columns
+        df_clean = df.copy()
+        for col in ['url', 'title', 'company', 'location', 'source']:
+            if col in df_clean.columns:
+                df_clean[col] = df_clean[col].astype(str).str.strip().str.lower()
+            else:
+                df_clean[col] = ''
+        
+        # Vectorized job_id building: use URL if available, otherwise concatenate fields
+        url_available = df_clean['url'].str.len() > 0
+        fallback_id = (df_clean['title'] + '|' + 
+                      df_clean['company'] + '|' + 
+                      df_clean['location'] + '|' + 
+                      df_clean['source'])
+        
+        job_ids = np.where(url_available, df_clean['url'], fallback_id)
+        return pd.Series(job_ids, index=df.index)
     
     def save_jobs_to_csv(self, df: pd.DataFrame, filename: Optional[str] = None) -> str:
         """Save jobs data to CSV file"""

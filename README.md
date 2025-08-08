@@ -21,8 +21,11 @@ An automated job monitoring and notification system that scrapes job postings fr
 ### 1. Installation
 
 ```bash
-# Set up the project
-python setup.py
+# Set up the project (create venv, install deps, and copy .env.example)
+python -m venv .venv
+source .venv/bin/activate  # or .venv\\Scripts\\activate on Windows
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
 ### 2. Configuration
@@ -76,6 +79,8 @@ python main.py --mode run-once
 - **`filter-historical`**: Apply current filtering criteria to all historical job data
 - **`market-report`**: Generate and send AI-powered job market analysis report
 - **`test-ai`**: Test the Gemini AI API connection
+- **`db-summary`**: Show a summary of the database
+- **`migrate-csv`**: Migrate CSV files to the database
 
 ### Command Examples
 
@@ -272,10 +277,8 @@ python main.py --mode schedule
 ```
 
 ### Docker (Coming Soon)
-```dockerfile
-# Dockerfile support planned
-FROM python:3.9-slim
-# ... (Docker configuration)
+```
+Docker support planned
 ```
 
 ### Cloud Deployment

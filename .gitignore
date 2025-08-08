@@ -46,3 +46,4 @@ venv.bak/
 logs/
 screenshots/
 *.log
+agentic-changes/

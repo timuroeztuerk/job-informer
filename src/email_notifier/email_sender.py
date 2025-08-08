@@ -11,6 +11,7 @@ from email import encoders
 import pandas as pd
 from typing import List, Dict, Optional
 from jinja2 import Template
+import html
 import os
 from loguru import logger
 from ..config.settings import Config
@@ -258,7 +259,12 @@ class EmailSender:
         if not jobs_df.empty:
             for _, job in jobs_df.iterrows():
                 job_url = job.get('url', '')
-                title_html = f'<a href="{job_url}" target="_blank">{job["title"]}</a>' if job_url else job['title']
+                safe_title = html.escape(str(job['title']))
+                safe_company = html.escape(str(job['company']))
+                safe_location = html.escape(str(job['location']))
+                safe_salary = html.escape(str(job['salary']))
+                safe_source = html.escape(str(job['source']))
+                title_html = f'<a href="{html.escape(job_url)}" target="_blank">{safe_title}</a>' if job_url else safe_title
                 
                 html_template += f"""
                 <div class="job-card">
@@ -266,18 +272,18 @@ class EmailSender:
                   <div class="job-details">
                     <div class="job-detail">
                       <span class="icon">🏢</span>
-                      <span>{job['company']}</span>
+                      <span>{safe_company}</span>
                     </div>
                     <div class="job-detail">
                       <span class="icon">📍</span>
-                      <span>{job['location']}</span>
+                      <span>{safe_location}</span>
                     </div>
                     <div class="job-detail job-salary">
                       <span class="icon">💰</span>
-                      <span>{job['salary']}</span>
+                      <span>{safe_salary}</span>
                     </div>
                   </div>
-                  <div class="job-source">{job['source']}</div>
+                  <div class="job-source">{safe_source}</div>
                 </div>
                 """
         else:
@@ -353,12 +359,12 @@ class EmailSender:
         if not jobs_df.empty:
             for _, job in jobs_df.iterrows():
                 text_lines.extend([
-                    f"Title: {job['title']}",
-                    f"Company: {job['company']}",
-                    f"Location: {job['location']}",
-                    f"Salary: {job['salary']}",
-                    f"Source: {job['source']}",
-                    f"URL: {job.get('url', 'N/A')}",
+                    f"Title: {str(job['title'])}",
+                    f"Company: {str(job['company'])}",
+                    f"Location: {str(job['location'])}",
+                    f"Salary: {str(job['salary'])}",
+                    f"Source: {str(job['source'])}",
+                    f"URL: {str(job.get('url', 'N/A'))}",
                     "-" * 30,
                 ])
         else:

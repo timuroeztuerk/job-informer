@@ -40,7 +40,7 @@ def main():
     
     parser.add_argument(
         '--mode',
-        choices=['run-once', 'test-email', 'quick-test', 'summary-full', 'summary-latest', 'filter-historical', 'market-report', 'test-ai'],
+        choices=['run-once', 'test-email', 'quick-test', 'summary-full', 'summary-latest', 'filter-historical', 'market-report', 'test-ai', 'schedule', 'db-summary', 'migrate-csv'],
         default='run-once',
         help='Execution mode (default: run-once)'
     )
@@ -77,8 +77,8 @@ def main():
         if args.schedule_time:
             config.schedule_time = args.schedule_time
         
-        # Validate configuration
-        config.validate()
+        # Validate configuration for the selected mode
+        config.validate_for_mode(args.mode)
         
         # Setup logging
         setup_logging(config.log_level, config.log_file)
@@ -108,6 +108,12 @@ def main():
             generate_market_report(scheduler)
         elif args.mode == 'test-ai':
             test_ai_connection(scheduler)
+        elif args.mode == 'schedule':
+            start_schedule(scheduler)
+        elif args.mode == 'db-summary':
+            show_database_summary(scheduler)
+        elif args.mode == 'migrate-csv':
+            migrate_csv_files(scheduler)
         else:
             logger.error(f"Unsupported mode: {args.mode}")
             sys.exit(1)
@@ -226,6 +232,55 @@ def test_ai_connection(scheduler: TaskScheduler):
         logger.error("=== AI Connection Test Failed ===")
         sys.exit(1)
 
+
+def start_schedule(scheduler: TaskScheduler):
+    """Start daily schedule loop"""
+    logger.info("=== Starting Schedule Mode ===")
+    success = scheduler.start_daily_schedule()
+    if not success:
+        logger.error("=== Schedule loop terminated with errors ===")
+        sys.exit(1)
+
+
+def show_database_summary(scheduler: TaskScheduler):
+    """Show database summary statistics"""
+    logger.info("=== Database Summary ===")
+    summary = scheduler.scraper.db.get_job_summary()
+    
+    print(f"\n📊 Job Database Summary:")
+    print(f"Total jobs: {summary['total_jobs']:,}")
+    print(f"Recent jobs (7 days): {summary['recent_jobs_7_days']:,}")
+    print(f"Date range: {summary['date_range']['earliest']} to {summary['date_range']['latest']}")
+    
+    print(f"\n📈 Jobs by source:")
+    for source, count in summary['jobs_by_source'].items():
+        print(f"  {source}: {count:,}")
+    
+    print(f"\n🏢 Top companies:")
+    for company, count in list(summary['top_companies'].items())[:5]:
+        print(f"  {company}: {count:,}")
+    
+    logger.success("Database summary displayed")
+
+
+def migrate_csv_files(scheduler: TaskScheduler):
+    """Migrate existing CSV files to SQLite database"""
+    logger.info("=== Migrating CSV Files to Database ===")
+    
+    data_dir = Path("data")
+    csv_files = list(data_dir.glob("jobs_*.csv"))
+    
+    if not csv_files:
+        logger.warning("No CSV files found to migrate")
+        return
+    
+    total_migrated = 0
+    for csv_file in csv_files:
+        logger.info(f"Migrating {csv_file.name}...")
+        migrated = scheduler.scraper.db.migrate_csv_to_sqlite(str(csv_file))
+        total_migrated += migrated
+    
+    logger.success(f"Migration complete: {total_migrated} total jobs migrated")
 
 if __name__ == "__main__":
     main()
