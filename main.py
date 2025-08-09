@@ -8,6 +8,7 @@ import argparse
 import sys
 import os
 from pathlib import Path
+import pandas as pd
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -40,7 +41,7 @@ def main():
     
     parser.add_argument(
         '--mode',
-        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge'],
+        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge', 'backfill-descriptions'],
         default='run-once',
         help='Execution mode (default: run-once)'
     )
@@ -84,6 +85,7 @@ def main():
         setup_logging(config.log_level, config.log_file)
         
         logger.info("Starting Job Informer application")
+        logger.info("Providing periodic feedback during waits and backoffs")
         logger.info(f"Mode: {args.mode}")
         
         # Create data directory
@@ -116,6 +118,8 @@ def main():
             migrate_csv_files(scheduler)
         elif args.mode == 'purge':
             purge_unwanted_jobs(scheduler)
+        elif args.mode == 'backfill-descriptions':
+            backfill_descriptions(scheduler)
         else:
             logger.error(f"Unsupported mode: {args.mode}")
             sys.exit(1)
@@ -271,6 +275,14 @@ def show_database_summary(scheduler: TaskScheduler):
     for company, count in list(summary['top_companies'].items())[:5]:
         print(f"  {company}: {count:,}")
     
+    # City/description coverage breakdown (full DB)
+    try:
+        with scheduler.scraper.db._get_connection() as conn:
+            all_jobs_df = pd.read_sql_query("SELECT location, description FROM jobs", conn)
+        scheduler._print_city_and_description_summary(all_jobs_df, title="DB City & Description Coverage")
+    except Exception as e:
+        logger.warning(f"Could not compute DB city/description summary: {e}")
+
     logger.success("Database summary displayed")
 
 
@@ -303,6 +315,17 @@ def purge_unwanted_jobs(scheduler: TaskScheduler):
         logger.success("=== Database Purge Completed Successfully ===")
     else:
         logger.error("=== Database Purge Failed ===")
+        sys.exit(1)
+
+
+def backfill_descriptions(scheduler: TaskScheduler):
+    """Backfill missing job descriptions in the database"""
+    logger.info("=== Backfilling Missing Job Descriptions ===")
+    success = scheduler.backfill_missing_descriptions()
+    if success:
+        logger.success("=== Backfill Completed Successfully ===")
+    else:
+        logger.error("=== Backfill Failed ===")
         sys.exit(1)
 
 

@@ -23,6 +23,78 @@ class TaskScheduler:
         self.scraper = JobScraper(config)
         self.email_sender = EmailSender(config)
         self.analyst = MarketAnalyst(config)
+        self._wait_tick_seconds = 1.0
+
+    def _log_wait(self, message: str) -> None:
+        try:
+            logger.info(message)
+        except Exception:
+            pass
+
+    def _print_city_and_description_summary(self, jobs_df: pd.DataFrame, title: str = "Run Summary") -> None:
+        """Pretty-print a city breakdown and description coverage for the provided jobs."""
+        if jobs_df is None or jobs_df.empty:
+            print(f"\n==== {title} ====\nNo jobs to summarize.\n")
+            return
+
+        df = jobs_df.copy()
+        # Ensure columns exist
+        if 'location' not in df.columns:
+            df['location'] = ''
+        if 'description' not in df.columns:
+            df['description'] = ''
+
+        # Derive city from location (first token before comma)
+        df['city'] = (
+            df['location'].astype(str).str.split(',').str[0].str.strip().replace({'': 'Unknown'})
+        )
+        # Non-empty description
+        desc_series = df['description'].astype(str).fillna('').str.strip()
+        df['_has_desc'] = desc_series.str.len() > 0
+
+        total = len(df)
+        with_desc = int(df['_has_desc'].sum())
+        pct_desc = (with_desc / total * 100.0) if total else 0.0
+
+        print(f"\n==== {title} ====")
+        print(f"Total jobs: {total}")
+        print(f"With descriptions: {with_desc} ({pct_desc:.1f}%)")
+
+        # City breakdown (top 10 by total)
+        grouped = df.groupby('city', as_index=False).agg(
+            total=('city', 'size'),
+            with_desc=('_has_desc', 'sum')
+        )
+        grouped = grouped.assign(
+            pct_desc=grouped.apply(
+                lambda r: (float(r['with_desc']) / float(r['total']) * 100.0) if r['total'] else 0.0,
+                axis=1,
+            )
+        )
+        # Use stable two-pass sort to avoid type-checker mismatch and ensure proper ordering
+        grouped = grouped.sort_values(by='with_desc', ascending=False, kind='mergesort')
+        grouped = grouped.sort_values(by='total', ascending=False, kind='mergesort')
+        grouped = grouped.head(10)
+
+        if not grouped.empty:
+            # Pretty table widths
+            col_city, col_total, col_with, col_pct = 'City', 'Total', 'With Desc', '% Desc'
+            w_city = max(len(col_city), *(len(str(c)) for c in grouped['city'].tolist()))
+            w_total = max(len(col_total), *(len(str(x)) for x in grouped['total'].tolist()))
+            w_with = max(len(col_with), *(len(str(x)) for x in grouped['with_desc'].tolist()))
+            w_pct = max(len(col_pct), 6)
+            header = f"{col_city:<{w_city}} | {col_total:>{w_total}} | {col_with:>{w_with}} | {col_pct:>{w_pct}}"
+            sep = '-' * len(header)
+            print("\nTop cities (by total jobs):")
+            print(header)
+            print(sep)
+            for _, row in grouped.iterrows():
+                city = str(row['city'])
+                tot = int(row['total'])
+                wd = int(row['with_desc'])
+                pct = f"{(row['pct_desc']):.1f}"
+                print(f"{city:<{w_city}} | {tot:>{w_total}} | {wd:>{w_with}} | {pct:>{w_pct}}")
+        print("")
         
     def execute_job_search(self) -> bool:
         """Execute job search and send notifications - manual run"""
@@ -37,22 +109,25 @@ class TaskScheduler:
             jobs_df = self.scraper.scrape_all_sources(keywords, locations)
             
             if not jobs_df.empty:
+                # Terminal summary: city breakdown + description coverage
+                self._print_city_and_description_summary(jobs_df)
                 # Store jobs in SQLite database (fast deduplication)
                 new_jobs_count = self.scraper.db.upsert_jobs(jobs_df)
                 
-                # Export to CSV for backup/email attachment
+                # Save CSV for backup/auditing (no longer attached to email)
                 csv_filename = self.scraper.save_jobs_to_csv(jobs_df)
                 
-                # Send email notification (respect dry run)
+                # Send email with inline list of jobs (HTML + text), no attachment
                 subject = f"Job Search Report - {new_jobs_count} new opportunities found!"
                 if not self.config.dry_run:
-                    # Attach CSV for convenience
-                    self.email_sender.send_with_attachment(subject, "See attached CSV for full results.", csv_filename)
+                    sent = self.email_sender.send_job_report(jobs_df, subject)
+                    if not sent:
+                        logger.warning("Email send returned False")
                 else:
                     logger.info("DRY_RUN is enabled; skipping email send")
                 
                 logger.success(f"Job search completed successfully. Found {new_jobs_count} new jobs.")
-                logger.info(f"Results saved to: {csv_filename}")
+                logger.info(f"Results archived to: {csv_filename}")
                 return True
             else:
                 logger.warning("No jobs found in this search.")
@@ -378,6 +453,56 @@ class TaskScheduler:
             logger.error(f"Error purging unwanted jobs: {e}")
             return False
 
+    def backfill_missing_descriptions(self, batch_size: int = 50, max_batches: int = 10) -> bool:
+        """Fetch and fill descriptions for jobs in DB missing descriptions.
+        Processes up to (batch_size * max_batches) jobs with gentle pacing and rate-limit awareness.
+        """
+        try:
+            total_updated = 0
+            batches_processed = 0
+            while batches_processed < max_batches:
+                self._log_wait(f"Querying DB for up to {batch_size} jobs missing descriptions")
+                to_fill = self.scraper.db.get_jobs_missing_descriptions(limit=batch_size)
+                if to_fill.empty:
+                    logger.info("No jobs with missing descriptions found.")
+                    break
+
+                logger.info(f"Backfill batch {batches_processed+1}: processing {len(to_fill)} jobs without descriptions")
+
+                updates = []
+                for _, row in to_fill.iterrows():
+                    url = str(row.get('url') or '')
+                    source = str(row.get('source') or '')
+                    job_id = str(row.get('job_id'))
+                    if not url:
+                        continue
+                    self._log_wait(f"Fetching description for {job_id} ({source})")
+                    desc = self.scraper.fetch_job_description(url, source)
+                    if desc:
+                        updates.append({'job_id': job_id, 'description': desc})
+                    # gentle pacing between requests with feedback
+                    self._log_wait("Pacing between description requests")
+                    time.sleep(max(0.5, self.config.request_delay))
+
+                if updates:
+                    updated = self.scraper.db.update_job_descriptions(updates)
+                    total_updated += updated
+                    logger.info(f"Updated descriptions for {updated} jobs in this batch (total {total_updated})")
+                else:
+                    logger.info("No descriptions could be fetched in this batch")
+
+                batches_processed += 1
+
+                # brief pause between batches with feedback
+                self._log_wait("Pausing between backfill batches")
+                time.sleep(2.0)
+
+            logger.success(f"Backfill complete. Total descriptions updated: {total_updated}")
+            return True
+        except Exception as e:
+            logger.error(f"Backfill error: {e}")
+            return False
+
     def _seconds_until_next_time(self, hhmm: str, tz: str) -> int:
         tzinfo = zoneinfo.ZoneInfo(tz)
         now = datetime.now(tzinfo)
@@ -394,7 +519,15 @@ class TaskScheduler:
             while True:
                 seconds = self._seconds_until_next_time(self.config.schedule_time, self.config.timezone)
                 logger.info(f"Sleeping for {seconds//3600}h{(seconds%3600)//60}m until next run...")
-                time.sleep(seconds)
+                # Provide periodic feedback while sleeping long intervals
+                remaining = seconds
+                tick = max(1, int(self._wait_tick_seconds))
+                while remaining > 0:
+                    step = min(tick, remaining)
+                    time.sleep(step)
+                    remaining -= step
+                    if remaining > 0 and remaining % 60 == 0:
+                        logger.info(f"Schedule wait — {remaining//60}m remaining")
                 run_id = datetime.now().strftime('%Y%m%d-%H%M%S')
                 logger.info(f"[run_id={run_id}] Executing scheduled job search")
                 try:

@@ -6,6 +6,7 @@ Handles web scraping of job postings from various job sites
 from typing import List, Dict, Optional
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,12 +14,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import time
 import pandas as pd
 from loguru import logger
 from ..config.settings import Config
 from ..utils.database import JobDatabase
-from ..utils.data_utils import build_job_ids, build_normalized_keys
+from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url
 import os
 import glob
 from pathlib import Path
@@ -26,6 +28,8 @@ from urllib.parse import quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
 
 
 class JobScraper:
@@ -36,8 +40,9 @@ class JobScraper:
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': config.user_agent})
         # Configure retries for robustness
+        # Avoid automatic 429 retries to reduce hammering on rate limits
         retries = Retry(total=self.config.max_retries, backoff_factor=1.2,
-                        status_forcelist=[429, 500, 502, 503, 504],
+                        status_forcelist=[500, 502, 503, 504],
                         allowed_methods=["GET", "HEAD"])
         adapter = HTTPAdapter(max_retries=retries)
         self.session.mount('http://', adapter)
@@ -45,137 +50,633 @@ class JobScraper:
         self.jobs_data: List[Dict] = []
         # Initialize database for fast deduplication
         self.db = JobDatabase()
+        # Reusable Selenium driver (lazy init)
+        self._driver: Optional[webdriver.Chrome] = None
+        # Default request timeout (seconds)
+        self.request_timeout: int = getattr(self.config, 'request_timeout', 20)
+        
+        # Default wait feedback granularity (seconds)
+        self._wait_tick_seconds: float = 1.0
+
+    def _sleep_with_feedback(self, seconds: float, label: str = "waiting") -> None:
+        """Sleep with periodic feedback logs so the user knows we're alive."""
+        try:
+            total = max(0.0, float(seconds))
+        except Exception:
+            total = 0.0
+        if total <= 0:
+            return
+        tick = max(0.25, float(getattr(self, '_wait_tick_seconds', 1.0)))
+        remaining = total
+        logger.info(f"{label} — sleeping {total:.1f}s")
+        while remaining > 0:
+            step = min(tick, remaining)
+            time.sleep(step)
+            remaining -= step
+            if remaining > 0:
+                logger.info(f"{label} — {remaining:.1f}s remaining")
+
+    def _get_unwanted_keywords(self) -> List[str]:
+        """Return unwanted keywords list from configuration (cached per call site)."""
+        try:
+            return self.config.get_unwanted_keywords_list()
+        except Exception:
+            return []
+
+    def _title_contains_unwanted_keywords(self, title: str) -> bool:
+        """Fast check for unwanted keywords in a job title (case-insensitive, word boundaries)."""
+        if not title:
+            return False
+        unwanted = self._get_unwanted_keywords()
+        if not unwanted:
+            return False
+        import re
+        escaped = [rf"\b{re.escape(k)}\b" for k in unwanted if k]
+        if not escaped:
+            return False
+        pattern = "|".join(escaped)
+        return re.search(pattern, title, re.IGNORECASE) is not None
+
+    def _build_normalized_key_from_fields(self, source: str, title: str, company: str, url: str) -> str:
+        """Build the same normalized key used for cross-run de-duplication without DataFrame overhead."""
+        normalized_url = normalize_job_url(url or '', source or '')
+        if normalized_url:
+            return normalized_url
+        # Fallback: source|title|company (lowercased, trimmed)
+        safe = lambda s: (s or '').strip().lower()
+        return f"{safe(source)}|{safe(title)}|{safe(company)}"
+
+    def _get_existing_normalized_keys(self) -> set:
+        """Fetch existing jobs' normalized keys from the database for quick membership checks."""
+        try:
+            with self.db._get_connection() as conn:
+                existing_df = pd.read_sql_query(
+                    "SELECT url, title, company, source FROM jobs",
+                    conn
+                )
+            if existing_df.empty:
+                return set()
+            return set(build_normalized_keys(existing_df).tolist())
+        except Exception as e:
+            logger.warning(f"Could not load existing jobs for pre-filtering: {e}")
+            return set()
+
+    # =======================
+    # Description fetching API
+    # =======================
+    def _http_get_with_retries(self, url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
+        """Lightweight GET with retries and basic LinkedIn-aware handling."""
+        if timeout is None:
+            timeout = self.request_timeout
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                headers = {
+                    'User-Agent': self.config.user_agent,
+                    'Accept-Language': random.choice(['en-US,en;q=0.9', 'en-GB,en;q=0.8', 'de-DE,de;q=0.8,en;q=0.7'])
+                }
+                resp = self.session.get(url, headers=headers, timeout=timeout)
+                if resp.status_code == 200:
+                    return resp
+                if resp.status_code == 429:
+                    logger.info("HTTP 429 rate limit encountered while fetching description; backing off")
+                    time.sleep(5 + random.uniform(0, 3))
+                    return None
+                if resp.status_code in (403, 999):
+                    logger.warning(f"Blocked with HTTP {resp.status_code} for {url}")
+                    return None
+                logger.debug(f"HTTP {resp.status_code} on attempt {attempt+1} for {url}")
+            except requests.RequestException as e:
+                last_exc = e
+                logger.debug(f"HTTP error on attempt {attempt+1} for {url}: {e}")
+            time.sleep(min(5, 1.2 * (attempt + 1)))
+        if last_exc:
+            logger.debug(f"Giving up fetching {url}: {last_exc}")
+        return None
+
+    def _extract_linkedin_description(self, job_url: str) -> str:
+        if not job_url:
+            return ''
+        resp = self._http_get_with_retries(job_url, timeout=25)
+        if not resp:
+            return ''
+        try:
+            page = BeautifulSoup(resp.content, 'lxml')
+            # 1) Newer layout
+            desc = page.select_one('div.show-more-less-html__markup')
+            if desc:
+                return desc.get_text(separator=' ', strip=True)
+            # 2) Legacy
+            desc = page.select_one('div.description__text')
+            if desc:
+                return desc.get_text(separator=' ', strip=True)
+            # 3) JSON-LD fallback
+            ld = page.find('script', type='application/ld+json')
+            ld_str = getattr(ld, 'string', None) if ld else None
+            if ld_str:
+                import json
+                try:
+                    data = json.loads(ld_str)
+                    if isinstance(data, dict) and 'description' in data:
+                        return BeautifulSoup(data['description'], 'html.parser').get_text(separator=' ', strip=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"LinkedIn description parse error: {e}")
+        return ''
+
+    def _extract_generic_description(self, job_url: str, source: str) -> str:
+        if not job_url:
+            return ''
+        resp = self._http_get_with_retries(job_url, timeout=20)
+        if not resp:
+            return ''
+        try:
+            page = BeautifulSoup(resp.content, 'lxml')
+            # Try a few common selectors (Indeed and others)
+            selectors = [
+                '#jobDescriptionText',
+                'div#jobDescriptionText',
+                'div.jobsearch-JobComponent-description',
+                'section.jobsearch-jobDescriptionText',
+                'div.job-description',
+                'section.job-description',
+            ]
+            for sel in selectors:
+                desc = page.select_one(sel)
+                if desc:
+                    return desc.get_text(separator=' ', strip=True)
+        except Exception as e:
+            logger.debug(f"Generic description parse error for {source}: {e}")
+        return ''
+
+    def fetch_job_description(self, url: str, source: str) -> str:
+        """Fetch a textual description for a job URL, dispatching by source."""
+        src = (source or '').lower()
+        if 'linkedin' in src or 'linkedin' in (url or '').lower():
+            return self._extract_linkedin_description(url)
+        return self._extract_generic_description(url, source)
+
+    def get_driver(self) -> webdriver.Chrome:
+        """Return a reusable Chrome WebDriver, creating it if needed."""
+        try:
+            if self._driver:
+                # touch the session to ensure it's alive
+                _ = self._driver.current_url
+                return self._driver
+        except Exception:
+            try:
+                driver = self._driver
+                if driver is not None:
+                    driver.quit()
+            except Exception:
+                pass
+            self._driver = None
+        self._driver = self.setup_driver()
+        return self._driver
+
+    def close_driver(self) -> None:
+        """Close and cleanup the reusable driver."""
+        driver = getattr(self, '_driver', None)
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            self._driver = None
+
+    def __del__(self):
+        # Best-effort cleanup
+        try:
+            self.close_driver()
+        except Exception:
+            pass
         
     def setup_driver(self) -> webdriver.Chrome:
-        """Setup Chrome WebDriver with appropriate options"""
+        """Create a new Chrome WebDriver with appropriate options (no reuse)."""
         chrome_options = Options()
         chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument(f'--user-agent={self.config.user_agent}')
-        
+        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        try:
+            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+            })
+        except Exception:
+            pass
         return driver
     
     def scrape_indeed(self, keywords: str, location: str) -> List[Dict]:
         """Scrape job postings from Indeed"""
         logger.info(f"Scraping Indeed for '{keywords}' in '{location}'")
         jobs = []
-        
+        skipped_existing = 0
+        skipped_unwanted = 0
+        existing_keys = self._get_existing_normalized_keys()
+        seen_keys: set = set()
         try:
-            driver = self.setup_driver()
-            
+            driver = self.get_driver()
+
             # Build Indeed search URL
             base_url = "https://www.indeed.com/jobs"
-            # Construct URL with parameters
             url = f"{base_url}?q={quote_plus(keywords)}&l={quote_plus(location)}&sort=date"
             driver.get(url)
-            
-            # Wait for job listings to load
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-jk]"))
-            )
-            
-            # Find job cards
-            job_cards = driver.find_elements(By.CSS_SELECTOR, "[data-jk]")
-            
-            for card in job_cards[:20]:  # Limit to first 20 results
-                try:
-                    title_element = card.find_element(By.CSS_SELECTOR, "h2 a span")
-                    company_element = card.find_element(By.CSS_SELECTOR, "[data-testid='company-name']")
-                    location_element = card.find_element(By.CSS_SELECTOR, "[data-testid='job-location']")
-                    
-                    job_data = {
-                        'title': title_element.text.strip(),
-                        'company': company_element.text.strip(),
-                        'location': location_element.text.strip(),
-                        'source': 'Indeed',
-                        'url': card.find_element(By.CSS_SELECTOR, "h2 a").get_attribute('href'),
-                        'scraped_at': pd.Timestamp.now()
-                    }
-                    
-                    # Try to get salary if available
+
+            max_pages = int(getattr(self.config, 'indeed_max_pages', 2))
+            current_page = 1
+
+            while True:
+                # Wait for job listings to load on the page
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-jk]"))
+                )
+
+                job_cards = driver.find_elements(By.CSS_SELECTOR, "[data-jk]")
+
+                for card in job_cards[:20]:  # Limit to first 20 results
                     try:
-                        salary_element = card.find_element(By.CSS_SELECTOR, "[data-testid='salary-snippet']")
-                        job_data['salary'] = salary_element.text.strip()
-                    except:
-                        job_data['salary'] = 'Not specified'
-                    
-                    jobs.append(job_data)
-                    
-                except Exception as e:
-                    logger.warning(f"Error extracting job data: {e}")
-                    continue
-                    
-            driver.quit()
-            logger.info(f"Scraped {len(jobs)} jobs from Indeed")
-            
+                        title_element = card.find_element(By.CSS_SELECTOR, "h2 a span")
+                        company_element = card.find_element(By.CSS_SELECTOR, "[data-testid='company-name']")
+                        location_element = card.find_element(By.CSS_SELECTOR, "[data-testid='job-location']")
+
+                        job_data = {
+                            'title': title_element.text.strip(),
+                            'company': company_element.text.strip(),
+                            'location': location_element.text.strip(),
+                            'source': 'Indeed',
+                            'url': normalize_job_url(card.find_element(By.CSS_SELECTOR, "h2 a").get_attribute('href') or '', 'Indeed'),
+                            'scraped_at': pd.Timestamp.now()
+                        }
+
+                        # Pre-filter: skip unwanted titles early
+                        if self._title_contains_unwanted_keywords(job_data['title']):
+                            skipped_unwanted += 1
+                            continue
+
+                        # Pre-filter: skip jobs already known in DB or within this run
+                        key = self._build_normalized_key_from_fields(
+                            job_data.get('source', ''), job_data.get('title', ''), job_data.get('company', ''), job_data.get('url', '')
+                        )
+                        if key in existing_keys or key in seen_keys:
+                            skipped_existing += 1
+                            continue
+                        seen_keys.add(key)
+
+                        # Try to get salary if available
+                        try:
+                            salary_element = card.find_element(By.CSS_SELECTOR, "[data-testid='salary-snippet']")
+                            job_data['salary'] = salary_element.text.strip()
+                        except:
+                            job_data['salary'] = 'Not specified'
+
+                        jobs.append(job_data)
+
+                    except Exception as e:
+                        logger.warning(f"Error extracting job data: {e}")
+                        continue
+
+                # Try to go to next page (bounded by max_pages)
+                if current_page >= max_pages:
+                    break
+                try:
+                    next_btn = driver.find_element(By.CSS_SELECTOR, "a[aria-label='Next'], a[aria-label='Next Page'], a[rel='next']")
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_btn)
+                    self._sleep_with_feedback(0.3, label="Scrolling to next Indeed page")
+                    next_btn.click()
+                    current_page += 1
+                    # polite delay with jitter
+                    self._sleep_with_feedback(self.config.request_delay + random.uniform(0.2, 0.8), label="Between Indeed pages")
+                except NoSuchElementException:
+                    break
+                except Exception:
+                    break
+
+            if skipped_unwanted or skipped_existing:
+                logger.info(
+                    f"Indeed pre-filtering skipped {skipped_unwanted} unwanted and {skipped_existing} existing/duplicate jobs"
+                )
+            logger.info(f"Scraped {len(jobs)} jobs from Indeed across {current_page} page(s)")
+
         except Exception as e:
             logger.error(f"Error scraping Indeed: {e}")
-            
+
         return jobs
+
+    def scrape_porsche(self) -> List[Dict]:
+        """Scrape job postings from Porsche careers public listings using a configured URL."""
+        jobs: List[Dict] = []
+        url = getattr(self.config, 'porsche_search_url', '')
+        if not url:
+            logger.warning("PORSCHE_SEARCH_URL not configured; skipping Porsche scrape")
+            return jobs
+        try:
+            logger.info("Scraping Porsche careers site")
+            resp = self.session.get(url, headers={'User-Agent': self.config.user_agent}, timeout=self.request_timeout)
+            if resp.status_code != 200:
+                logger.warning(f"Porsche search HTTP {resp.status_code}")
+                return jobs
+            soup = BeautifulSoup(resp.content, 'lxml')
+            # Porsche uses a dynamic JSON payload embedded near the bottom or a list of job tiles when results exist.
+            # Attempt to find job tiles first.
+            tiles = soup.select('div.job-offer, li.job-offer, article.job-offer, div.job, li.job')
+            existing_keys = self._get_existing_normalized_keys()
+            seen_keys: set = set()
+            skipped_unwanted = 0
+            skipped_existing = 0
+
+            def add_job(title: str, company: str, location_text: str, link: str):
+                nonlocal skipped_unwanted, skipped_existing
+                job_url = normalize_job_url(link or '', 'Porsche')
+                title = (title or '').strip()
+                company = (company or 'Porsche').strip()
+                location_val = (location_text or '').strip()
+                if self._title_contains_unwanted_keywords(title):
+                    skipped_unwanted += 1
+                    return
+                key = self._build_normalized_key_from_fields('Porsche', title, company, job_url)
+                if key in existing_keys or key in seen_keys:
+                    skipped_existing += 1
+                    return
+                seen_keys.add(key)
+                jobs.append({
+                    'title': title,
+                    'company': company,
+                    'location': location_val or 'Germany',
+                    'source': 'Porsche',
+                    'url': job_url,
+                    'salary': 'Not specified',
+                    'description': '',
+                    'scraped_at': pd.Timestamp.now(),
+                })
+
+            if tiles:
+                for t in tiles:
+                    try:
+                        link_el = t.select_one('a')
+                        link = link_el.get('href', '') if link_el else ''
+                        title_el = t.select_one('h2, h3, .job-title')
+                        title = title_el.get_text(strip=True) if title_el else ''
+                        loc_el = t.select_one('.job-location, .location, .job-offer__location')
+                        loc = loc_el.get_text(strip=True) if loc_el else ''
+                        add_job(title, 'Porsche', loc, link)
+                    except Exception:
+                        continue
+            else:
+                # Fallback: parse potential embedded JSON criteria result (seen on site)
+                # Search for a JSON snippet listing jobs. If found, extract title/location/link.
+                import re, json
+                scripts = soup.find_all('script')
+                for sc in scripts:
+                    try:
+                        text = sc.string or ''
+                        if 'CriterionName' in text and 'PublicationStartDate' in text:
+                            # Not a list of jobs; continue
+                            continue
+                        # Try to find job links in script
+                        for m in re.finditer(r'https?://[^\"\']+', text):
+                            href = m.group(0)
+                            if '/index.php?ac=jobad' in href:
+                                add_job('Job', 'Porsche', '', href)
+                    except Exception:
+                        continue
+
+            if skipped_unwanted or skipped_existing:
+                logger.info(f"Porsche pre-filtering skipped {skipped_unwanted} unwanted and {skipped_existing} existing/duplicate jobs")
+            logger.info(f"Scraped {len(jobs)} jobs from Porsche")
+            return jobs
+        except Exception as e:
+            logger.error(f"Error scraping Porsche: {e}")
+            return jobs
     
     def scrape_linkedin(self, keywords: str, location: str) -> List[Dict]:
-        """Scrape job postings from LinkedIn (basic implementation) - last 24 hours, full-time only"""
+        """Scrape job postings from LinkedIn public listings with pagination and optional descriptions.
+        - Applies: last 24 hours, full-time only
+        - Paginates using the `start` parameter (25 results per page typical)
+        - Optionally fetches job descriptions from detail pages (bounded concurrency)
+        """
         logger.info(f"Scraping LinkedIn for '{keywords}' in '{location}' (last 24 hours, full-time)")
-        jobs = []
-        
-        try:
-            # LinkedIn requires authentication for full access
-            # This is a basic implementation that works for public job listings
-            # Adding f_TPR=r86400 parameter for jobs posted in last 24 hours (86400 seconds = 1 day)
-            # Adding f_JT=F parameter for full-time jobs only
-            url = f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(keywords)}&location={quote_plus(location)}&f_TPR=r86400&f_JT=F"
 
-            # Simple retry loop in addition to session retries
+        def build_search_url(start: int) -> str:
+            # f_TPR=r86400: last 24h, f_JT=F: Full-time
+            # start: pagination offset (multiples of 25)
+            # Keep URL minimal to reduce server-side quirks with paging.
+            return (
+                "https://www.linkedin.com/jobs/search/?"
+                f"keywords={quote_plus(keywords)}"
+                f"&location={quote_plus(location)}"
+                f"&f_TPR=r604800&f_JT=F&start={start}&origin=JOB_SEARCH_PAGE_JOB_FILTER&trk=public_jobs_jobs-search-bar_search-submit"
+            )
+
+        def parse_cards(soup: BeautifulSoup) -> List[Dict]:
+            cards = soup.find_all('div', class_='job-search-card')
+            results: List[Dict] = []
+            for card in cards:
+                try:
+                    if not isinstance(card, Tag):
+                        continue
+                    # Prefer stable selectors used by LinkedIn job cards (CSS-only to avoid class_ typing issues)
+                    title_el = card.select_one('h3.base-search-card__title')
+                    company_link_el = card.select_one('h4.base-search-card__subtitle a')
+                    company_el = company_link_el or card.select_one('h4.base-search-card__subtitle')
+                    location_el = card.select_one('span.job-search-card__location')
+                    link_el = card.select_one('a.base-card__full-link') or card.select_one('a')
+                    time_el = card.select_one('time')
+
+                    job_url = link_el.get('href', '') if isinstance(link_el, Tag) else ''
+                    job = {
+                        'title': (title_el.get_text().strip() if isinstance(title_el, Tag) else ''),
+                        'company': (company_el.get_text().strip() if isinstance(company_el, Tag) else ''),
+                        'location': (location_el.get_text().strip() if isinstance(location_el, Tag) else location),
+                        'source': 'LinkedIn',
+                        'url': job_url,
+                        'salary': 'Not specified',
+                        'scraped_at': pd.Timestamp.now(),
+                    }
+                    # Posted date if available
+                    if isinstance(time_el, Tag):
+                        posted = time_el.get('datetime')
+                        if posted:
+                            job['posted_at'] = posted
+                    results.append(job)
+                except Exception as e:
+                    logger.debug(f"LinkedIn card parse error: {e}")
+                    continue
+            return results
+
+        hit_rate_limit = False
+        rate_limit_logged = False
+
+        def fetch_with_retries(url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
+            if timeout is None:
+                timeout = self.request_timeout
             last_exc = None
             for attempt in range(self.config.max_retries + 1):
                 try:
-                    response = self.session.get(url, timeout=20)
-                    if response.status_code == 200:
-                        break
-                    logger.warning(f"LinkedIn HTTP {response.status_code} on attempt {attempt+1}")
+                    # Vary Accept-Language and small jitter in headers to reduce blocks
+                    headers = {
+                        'User-Agent': self.config.user_agent,
+                        'Accept-Language': random.choice(['en-US,en;q=0.9', 'en-GB,en;q=0.8', 'de-DE,de;q=0.8,en;q=0.7'])
+                    }
+                    resp = self.session.get(url, headers=headers, timeout=timeout)
+                    if resp.status_code == 200:
+                        return resp
+                    if resp.status_code == 429:
+                        nonlocal hit_rate_limit, rate_limit_logged
+                        hit_rate_limit = True
+                        if not rate_limit_logged:
+                            logger.info(f"LinkedIn rate limited with HTTP 429; backing off and aborting {url}")
+                            rate_limit_logged = True
+                        else:
+                            logger.debug(f"LinkedIn 429 on {url}; skipping.")
+                        # Gentle backoff to reduce pressure
+                        self._sleep_with_feedback(10 + random.uniform(0, 5), label="LinkedIn 429 backoff")
+                        return None
+                    # LinkedIn-specific anti-bot responses: stop early to avoid hammering
+                    if resp.status_code in (403, 999):
+                        logger.error(f"LinkedIn blocked the request with HTTP {resp.status_code}; aborting further retries for {url}")
+                        return None
+                    logger.warning(f"LinkedIn HTTP {resp.status_code} on attempt {attempt+1} for {url}")
                 except requests.RequestException as e:
                     last_exc = e
                     logger.warning(f"LinkedIn request error on attempt {attempt+1}: {e}")
-                time.sleep(min(5, 1.5 * (attempt + 1)))
-            else:
-                if last_exc:
-                    raise last_exc
-                raise RuntimeError("LinkedIn request failed after retries")
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # LinkedIn's structure changes frequently, this is a basic example
-            job_cards = soup.find_all('div', class_='job-search-card')
-            
-            for card in job_cards:
-                try:
-                    title = card.find('h3', class_='base-search-card__title')
-                    company = card.find('h4', class_='base-search-card__subtitle')
-                    location_elem = card.find('span', class_='job-search-card__location')
-                    
-                    if title and company:
-                        job_data = {
-                            'title': title.get_text().strip(),
-                            'company': company.get_text().strip(),
-                            'location': location_elem.get_text().strip() if location_elem else location,
-                            'source': 'LinkedIn',
-                            'url': card.find('a')['href'] if card.find('a') else '',
-                            'salary': 'Not specified',
-                            'scraped_at': pd.Timestamp.now()
-                        }
-                        jobs.append(job_data)
-                        
-                except Exception as e:
-                    logger.warning(f"Error extracting LinkedIn job data: {e}")
-                    continue
-                    
+                self._sleep_with_feedback(min(5, 1.2 * (attempt + 1)), label="LinkedIn search retry backoff")
+            if last_exc:
+                logger.error(f"LinkedIn request failed after retries: {last_exc}")
+            return None
+
+        def extract_description(job_url: str) -> str:
+            if not job_url:
+                return ''
+            resp = fetch_with_retries(job_url, timeout=25)
+            if not resp:
+                return ''
+            try:
+                page = BeautifulSoup(resp.content, 'lxml')
+                # Common containers for description (structure may change)
+                # 1) Newer layout
+                desc = page.select_one('div.show-more-less-html__markup')
+                if desc:
+                    return desc.get_text(separator=' ', strip=True)
+                # 2) Legacy
+                desc = page.select_one('div.description__text')
+                if desc:
+                    return desc.get_text(separator=' ', strip=True)
+                # 3) JSON-LD fallback
+                ld = page.find('script', type='application/ld+json')
+                ld_str = getattr(ld, 'string', None) if ld else None
+                if ld_str:
+                    import json
+                    try:
+                        data = json.loads(ld_str)
+                        if isinstance(data, dict) and 'description' in data:
+                            return BeautifulSoup(data['description'], 'html.parser').get_text(separator=' ', strip=True)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(f"Description parse error: {e}")
+            return ''
+
+        jobs: List[Dict] = []
+        # Track normalized keys to dedup within this run
+        seen_keys: set = set()
+        # Load existing DB keys once to avoid fetching detail pages for known jobs
+        existing_keys = self._get_existing_normalized_keys()
+        skipped_existing = 0
+        skipped_unwanted = 0
+        max_pages = 4  # up to ~100 results per keyword/location
+        page_size = 25
+
+        try:
+            no_progress_pages = 0
+            for page_index in range(max_pages):
+                start = page_index * page_size
+                url = build_search_url(start)
+                logger.debug(f"LinkedIn search URL (page {page_index+1}): {url}")
+                resp = fetch_with_retries(url)
+                if not resp:
+                    break
+                soup = BeautifulSoup(resp.content, 'lxml')
+                page_jobs = parse_cards(soup)
+
+                # Pre-filter and de-dup within the same run; also skip known DB jobs
+                new_jobs: List[Dict] = []
+                for j in page_jobs:
+                    # Skip unwanted titles early
+                    if self._title_contains_unwanted_keywords(j.get('title', '')):
+                        skipped_unwanted += 1
+                        continue
+
+                    key = self._build_normalized_key_from_fields(
+                        j.get('source', 'LinkedIn'), j.get('title', ''), j.get('company', ''), j.get('url', '')
+                    )
+                    if not key:
+                        continue
+                    if key in existing_keys or key in seen_keys:
+                        skipped_existing += 1
+                        continue
+                    seen_keys.add(key)
+                    new_jobs.append(j)
+                jobs.extend(new_jobs)
+                logger.info(f"LinkedIn page {page_index+1}: {len(new_jobs)} new jobs (total {len(jobs)})")
+
+                # Stop conditions:
+                # 1) No cards parsed → end reached or layout changed
+                if not page_jobs:
+                    logger.debug("No job cards found on this page; stopping pagination")
+                    break
+                # 2) No new unique jobs added for two consecutive pages → likely repeating results
+                if len(new_jobs) == 0:
+                    no_progress_pages += 1
+                    if no_progress_pages >= 2:
+                        logger.info("No new jobs across two consecutive pages; stopping pagination")
+                        break
+                else:
+                    no_progress_pages = 0
+
+                # Polite delay with jitter
+            self._sleep_with_feedback(self.config.request_delay + random.uniform(0.2, 0.8), label="Between LinkedIn pages")
+
+            # Optionally fetch job descriptions with a gentle sequential approach and early abort on 429
+            MAX_DESC_FETCH = 8
+            targets = [j for j in jobs if j.get('url')][:MAX_DESC_FETCH]
+            if targets and not hit_rate_limit:
+                logger.info(f"Fetching LinkedIn job descriptions for up to {len(targets)} jobs (sequential)...")
+                for j in targets:
+                    if hit_rate_limit:
+                        break
+                    try:
+                        desc = extract_description(j['url'])
+                    except Exception:
+                        desc = ''
+                    j['description'] = desc or ''
+                    if hit_rate_limit:
+                        logger.info("Detected rate limiting while fetching descriptions; stopping early.")
+                        break
+                    # gentle pacing between detail requests
+                    self._sleep_with_feedback(1.0 + random.uniform(0.3, 0.9), label="Between description requests")
+            elif hit_rate_limit:
+                logger.info("Skipping job description fetching due to detected rate limiting (429)")
+            # Jobs beyond target range: default empty description
+            for j in jobs:
+                if 'description' not in j:
+                    j['description'] = ''
+
+            if skipped_unwanted or skipped_existing:
+                logger.info(
+                    f"LinkedIn pre-filtering skipped {skipped_unwanted} unwanted and {skipped_existing} existing/duplicate jobs"
+                )
             logger.info(f"Scraped {len(jobs)} jobs from LinkedIn (last 24 hours, full-time)")
-            
+
         except Exception as e:
             logger.error(f"Error scraping LinkedIn: {e}")
-            
+
         return jobs
     
     def get_most_recent_csv_file(self) -> Optional[str]:
@@ -371,7 +872,7 @@ class JobScraper:
         """Scrape jobs from enabled sources"""
         all_jobs: List[Dict] = []
 
-        if not (self.config.enable_linkedin or self.config.enable_indeed):
+        if not (self.config.enable_linkedin or self.config.enable_indeed or getattr(self.config, 'enable_porsche', False)):
             logger.warning("No sources enabled. Enable at least one of ENABLE_LINKEDIN or ENABLE_INDEED.")
             return pd.DataFrame()
 
@@ -386,6 +887,10 @@ class JobScraper:
                 if self.config.enable_indeed:
                     indeed_jobs = self.scrape_indeed(keyword, location)
                     all_jobs.extend(indeed_jobs)
+                if getattr(self.config, 'enable_porsche', False):
+                    # Porsche search does not vary by keyword/location in our configured URL; call once per outer loop
+                    porsche_jobs = self.scrape_porsche()
+                    all_jobs.extend(porsche_jobs)
         
         # Convert to DataFrame and process
         df = pd.DataFrame(all_jobs)
@@ -441,8 +946,9 @@ class JobScraper:
         """Save jobs data to CSV file"""
         if filename is None:
             filename = f"jobs_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        
-        filepath = f"data/{filename}"
+        data_dir = Path("data")
+        data_dir.mkdir(parents=True, exist_ok=True)
+        filepath = str(data_dir / filename)
         df.to_csv(filepath, index=False)
         logger.info(f"Jobs data saved to {filepath}")
         return filepath

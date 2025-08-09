@@ -30,6 +30,7 @@ class Config:
     request_delay: float
     max_retries: int
     user_agent: str
+    porsche_search_url: str
     
     # Scheduler Configuration
     schedule_time: str
@@ -47,6 +48,7 @@ class Config:
     # Feature Toggles
     enable_linkedin: bool
     enable_indeed: bool
+    enable_porsche: bool
     dry_run: bool
     auto_migrate_csv: bool
     
@@ -78,7 +80,14 @@ class Config:
             # Scraping Configuration
             request_delay=float(os.getenv('REQUEST_DELAY', '2.0')),
             max_retries=int(os.getenv('MAX_RETRIES', '3')),
-            user_agent=os.getenv('USER_AGENT', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'),
+            # Default to a realistic desktop Chrome UA string
+            user_agent=os.getenv('USER_AGENT', (
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0.0.0 Safari/537.36'
+            )),
+            # Third-party sources
+            porsche_search_url=os.getenv('PORSCHE_SEARCH_URL', 'https://jobs.porsche.com/index.php?ac=search_result&search_criterion_keyword%5B%5D=Data&search_criterion_channel%5B%5D=12&search_criterion_entry_level%5B%5D=17&search_criterion_entry_level%5B%5D=12&search_criterion_working_hour%5B%5D=1&search_criterion_limitation%5B%5D=2&search_criterion_country%5B%5D=46'),
             
             # Scheduler Configuration
             schedule_time=os.getenv('SCHEDULE_TIME', '09:00'),
@@ -96,6 +105,7 @@ class Config:
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
             enable_indeed=_get_bool('ENABLE_INDEED', 'false'),
+            enable_porsche=_get_bool('ENABLE_PORSCHE', 'false'),
             dry_run=_get_bool('DRY_RUN', 'false'),
             auto_migrate_csv=_get_bool('AUTO_MIGRATE_CSV', 'false')
         )
@@ -168,6 +178,7 @@ class Config:
             'request_delay': self.request_delay,
             'max_retries': self.max_retries,
             'user_agent': self.user_agent,
+            'porsche_search_url': self.porsche_search_url,
             'schedule_time': self.schedule_time,
             'timezone': self.timezone,
             'log_level': self.log_level,
@@ -177,6 +188,7 @@ class Config:
             'gemini_analysis_prompt': self.gemini_analysis_prompt,
             'enable_linkedin': self.enable_linkedin,
             'enable_indeed': self.enable_indeed,
+            'enable_porsche': self.enable_porsche,
             'dry_run': self.dry_run,
             'auto_migrate_csv': self.auto_migrate_csv
         }

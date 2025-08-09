@@ -37,6 +37,7 @@ class JobDatabase:
                     source TEXT NOT NULL,
                     url TEXT,
                     salary TEXT,
+                    description TEXT,
                     scraped_at TIMESTAMP NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -48,6 +49,16 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON jobs(scraped_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON jobs(created_at)")
             
+            # Backfill: ensure description column exists for older databases
+            try:
+                cur = conn.execute("PRAGMA table_info(jobs)")
+                columns = {row[1] for row in cur.fetchall()}
+                if 'description' not in columns:
+                    conn.execute("ALTER TABLE jobs ADD COLUMN description TEXT")
+            except Exception:
+                # If PRAGMA or ALTER fails, proceed without blocking app
+                pass
+
             conn.commit()
     
     def _get_connection(self):
@@ -75,6 +86,7 @@ class JobDatabase:
                 'source': str(row['source']),
                 'url': str(row.get('url', '')),
                 'salary': str(row.get('salary', 'Not specified')),
+                'description': str(row.get('description', '')),
                 'scraped_at': pd.Timestamp.now().isoformat()
             }
             jobs_to_insert.append(job_data)
@@ -87,11 +99,11 @@ class JobDatabase:
             for job in jobs_to_insert:
                 try:
                     cursor.execute("""
-                        INSERT INTO jobs (job_id, title, company, location, source, url, salary, scraped_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO jobs (job_id, title, company, location, source, url, salary, description, scraped_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         job['job_id'], job['title'], job['company'], job['location'],
-                        job['source'], job['url'], job['salary'], job['scraped_at']
+                        job['source'], job['url'], job['salary'], job['description'], job['scraped_at']
                     ))
                     inserted_count += 1
                 except sqlite3.IntegrityError:
@@ -230,6 +242,42 @@ class JobDatabase:
         df.to_csv(filepath, index=False)
         logger.info(f"Exported {len(df)} jobs to {filepath}")
         return filepath
+
+    # ======================
+    # Description backfilling
+    # ======================
+    def get_jobs_missing_descriptions(self, limit: int = 100) -> pd.DataFrame:
+        """Return jobs that have empty or NULL description, newest first."""
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query(
+                """
+                SELECT job_id, url, source, title, company, scraped_at
+                FROM jobs
+                WHERE description IS NULL OR TRIM(description) = ''
+                ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
+                LIMIT ?
+                """,
+                conn,
+                params=(limit,)
+            )
+        return df
+
+    def update_job_descriptions(self, updates: List[Dict[str, str]]) -> int:
+        """Batch update job descriptions. Each item: {'job_id': ..., 'description': ...}."""
+        if not updates:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            try:
+                cur.executemany(
+                    "UPDATE jobs SET description = ? WHERE job_id = ?",
+                    [(u['description'], u['job_id']) for u in updates]
+                )
+                conn.commit()
+                return cur.rowcount or 0
+            except Exception as e:
+                logger.error(f"Failed updating descriptions: {e}")
+                return 0
 
     def _ensure_job_ids(self, df: pd.DataFrame) -> pd.DataFrame:
         """Ensure DataFrame contains a vectorized job_id column"""
