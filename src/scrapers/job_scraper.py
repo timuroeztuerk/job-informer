@@ -370,7 +370,7 @@ class JobScraper:
         return jobs
 
     def scrape_porsche(self) -> List[Dict]:
-        """Scrape job postings from Porsche careers public listings using a configured URL."""
+        """Scrape Porsche careers first page using Selenium-rendered DOM (handles JS-rendered results)."""
         jobs: List[Dict] = []
         url = getattr(self.config, 'porsche_search_url', '')
         if not url:
@@ -378,37 +378,49 @@ class JobScraper:
             return jobs
         try:
             logger.info("Scraping Porsche careers site")
-            resp = self.session.get(url, headers={'User-Agent': self.config.user_agent}, timeout=self.request_timeout)
-            if resp.status_code != 200:
-                logger.warning(f"Porsche search HTTP {resp.status_code}")
-                return jobs
-            soup = BeautifulSoup(resp.content, 'lxml')
-            # Porsche uses a dynamic JSON payload embedded near the bottom or a list of job tiles when results exist.
-            # Attempt to find job tiles first.
-            tiles = soup.select('div.job-offer, li.job-offer, article.job-offer, div.job, li.job')
+            driver = self.get_driver()
+            driver.get(url)
+
+            # Try to accept cookie banner if present to reveal results
+            try:
+                # Common buttons: "Akzeptieren", "Accept", or role=button with consent id
+                consent_btns = driver.find_elements(By.XPATH, "//button[contains(translate(., 'ACEPTKZIRN', 'aceptkzirn'), 'accept') or contains(., 'Akzeptieren') or contains(., 'Einverstanden')]")
+                if consent_btns:
+                    consent_btns[0].click()
+            except Exception:
+                pass
+
+            # Wait for anchors to job detail pages to appear
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a[href*='index.php?ac=jobad']"))
+                )
+            except Exception:
+                # Give it a brief extra chance
+                self._sleep_with_feedback(2.0, label="Waiting for Porsche results")
+
+            link_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='index.php?ac=jobad']")
             existing_keys = self._get_existing_normalized_keys()
             seen_keys: set = set()
             skipped_unwanted = 0
             skipped_existing = 0
 
-            def add_job(title: str, company: str, location_text: str, link: str):
+            def add_job(title: str, location_text: str, link: str):
                 nonlocal skipped_unwanted, skipped_existing
                 job_url = normalize_job_url(link or '', 'Porsche')
                 title = (title or '').strip()
-                company = (company or 'Porsche').strip()
-                location_val = (location_text or '').strip()
                 if self._title_contains_unwanted_keywords(title):
                     skipped_unwanted += 1
                     return
-                key = self._build_normalized_key_from_fields('Porsche', title, company, job_url)
+                key = self._build_normalized_key_from_fields('Porsche', title, 'Porsche', job_url)
                 if key in existing_keys or key in seen_keys:
                     skipped_existing += 1
                     return
                 seen_keys.add(key)
                 jobs.append({
                     'title': title,
-                    'company': company,
-                    'location': location_val or 'Germany',
+                    'company': 'Porsche',
+                    'location': (location_text or '').strip() or 'Germany',
                     'source': 'Porsche',
                     'url': job_url,
                     'salary': 'Not specified',
@@ -416,44 +428,39 @@ class JobScraper:
                     'scraped_at': pd.Timestamp.now(),
                 })
 
-            if tiles:
-                for t in tiles:
+            for a in link_elements[:50]:
+                try:
+                    href = a.get_attribute('href') or ''
+                    # Title: anchor text or nearest heading within same card
+                    title_text = (a.text or '').strip()
+                    if not title_text:
+                        try:
+                            title_el = a.find_element(By.XPATH, "./ancestor::*[self::li or self::div][1]//h2|./ancestor::*[self::li or self::div][1]//h3")
+                            title_text = title_el.text.strip()
+                        except Exception:
+                            title_text = ''
+                    # Location: try common classes near the anchor
+                    location_text = ''
                     try:
-                        link_el = t.select_one('a')
-                        link = link_el.get('href', '') if link_el else ''
-                        title_el = t.select_one('h2, h3, .job-title')
-                        title = title_el.get_text(strip=True) if title_el else ''
-                        loc_el = t.select_one('.job-location, .location, .job-offer__location')
-                        loc = loc_el.get_text(strip=True) if loc_el else ''
-                        add_job(title, 'Porsche', loc, link)
+                        container = a.find_element(By.XPATH, "./ancestor::*[self::li or self::div][1]")
+                        try:
+                            loc_el = container.find_element(By.CSS_SELECTOR, ".job-location, .location, .job-offer__location")
+                            location_text = loc_el.text.strip()
+                        except Exception:
+                            location_text = ''
                     except Exception:
-                        continue
-            else:
-                # Fallback: parse potential embedded JSON criteria result (seen on site)
-                # Search for a JSON snippet listing jobs. If found, extract title/location/link.
-                import re, json
-                scripts = soup.find_all('script')
-                for sc in scripts:
-                    try:
-                        text = sc.string or ''
-                        if 'CriterionName' in text and 'PublicationStartDate' in text:
-                            # Not a list of jobs; continue
-                            continue
-                        # Try to find job links in script
-                        for m in re.finditer(r'https?://[^\"\']+', text):
-                            href = m.group(0)
-                            if '/index.php?ac=jobad' in href:
-                                add_job('Job', 'Porsche', '', href)
-                    except Exception:
-                        continue
+                        location_text = ''
+                    if href:
+                        add_job(title_text, location_text, href)
+                except Exception:
+                    continue
 
             if skipped_unwanted or skipped_existing:
                 logger.info(f"Porsche pre-filtering skipped {skipped_unwanted} unwanted and {skipped_existing} existing/duplicate jobs")
             logger.info(f"Scraped {len(jobs)} jobs from Porsche")
-            return jobs
         except Exception as e:
             logger.error(f"Error scraping Porsche: {e}")
-            return jobs
+        return jobs
     
     def scrape_linkedin(self, keywords: str, location: str) -> List[Dict]:
         """Scrape job postings from LinkedIn public listings with pagination and optional descriptions.
@@ -590,7 +597,7 @@ class JobScraper:
         existing_keys = self._get_existing_normalized_keys()
         skipped_existing = 0
         skipped_unwanted = 0
-        max_pages = 4  # up to ~100 results per keyword/location
+        max_pages = int(getattr(self.config, 'linkedin_max_pages', 4))
         page_size = 25
 
         try:
@@ -644,7 +651,7 @@ class JobScraper:
             self._sleep_with_feedback(self.config.request_delay + random.uniform(0.2, 0.8), label="Between LinkedIn pages")
 
             # Optionally fetch job descriptions with a gentle sequential approach and early abort on 429
-            MAX_DESC_FETCH = 8
+            MAX_DESC_FETCH = int(getattr(self.config, 'linkedin_desc_max', 8))
             targets = [j for j in jobs if j.get('url')][:MAX_DESC_FETCH]
             if targets and not hit_rate_limit:
                 logger.info(f"Fetching LinkedIn job descriptions for up to {len(targets)} jobs (sequential)...")
@@ -868,13 +875,29 @@ class JobScraper:
         
         return unique_filtered_df
     
-    def scrape_all_sources(self, keywords: List[str], locations: List[str]) -> pd.DataFrame:
-        """Scrape jobs from enabled sources"""
+    def scrape_all_sources(self, keywords: List[str], locations: List[str], *, limit_per_source: Optional[int] = None, skip_selenium: bool = False) -> pd.DataFrame:
+        """Scrape jobs from enabled sources.
+        - limit_per_source: if provided, cap collected jobs per source for speed (after pre-filtering).
+        - skip_selenium: if true, skip Selenium-based sources like Porsche or Indeed dynamic flows.
+        """
         all_jobs: List[Dict] = []
 
         if not (self.config.enable_linkedin or self.config.enable_indeed or getattr(self.config, 'enable_porsche', False)):
             logger.warning("No sources enabled. Enable at least one of ENABLE_LINKEDIN or ENABLE_INDEED.")
             return pd.DataFrame()
+
+        # Porsche: one-shot scrape using configured URL
+        if getattr(self.config, 'enable_porsche', False) and not skip_selenium:
+            logger.info("Starting Porsche one-shot scrape (no keyword/location iteration)")
+            try:
+                porsche_jobs = self.scrape_porsche()
+                if limit_per_source is not None and limit_per_source > 0:
+                    porsche_jobs = porsche_jobs[:limit_per_source]
+                all_jobs.extend(porsche_jobs)
+            except Exception as e:
+                logger.warning(f"Porsche scrape skipped due to error: {e}")
+        elif getattr(self.config, 'enable_porsche', False) and skip_selenium:
+            logger.info("Skipping Porsche due to skip_selenium=true")
 
         for keyword in keywords:
             for location in locations:
@@ -883,14 +906,17 @@ class JobScraper:
 
                 if self.config.enable_linkedin:
                     linkedin_jobs = self.scrape_linkedin(keyword, location)
+                    if limit_per_source is not None and limit_per_source > 0:
+                        linkedin_jobs = linkedin_jobs[:limit_per_source]
                     all_jobs.extend(linkedin_jobs)
-                if self.config.enable_indeed:
+                if self.config.enable_indeed and not skip_selenium:
                     indeed_jobs = self.scrape_indeed(keyword, location)
+                    if limit_per_source is not None and limit_per_source > 0:
+                        indeed_jobs = indeed_jobs[:limit_per_source]
                     all_jobs.extend(indeed_jobs)
-                if getattr(self.config, 'enable_porsche', False):
-                    # Porsche search does not vary by keyword/location in our configured URL; call once per outer loop
-                    porsche_jobs = self.scrape_porsche()
-                    all_jobs.extend(porsche_jobs)
+                elif self.config.enable_indeed and skip_selenium:
+                    logger.info("Skipping Indeed due to skip_selenium=true")
+                # Porsche intentionally not called here to avoid duplicate results
         
         # Convert to DataFrame and process
         df = pd.DataFrame(all_jobs)

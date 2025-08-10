@@ -31,6 +31,8 @@ class Config:
     max_retries: int
     user_agent: str
     porsche_search_url: str
+    linkedin_max_pages: int
+    linkedin_desc_max: int
     
     # Scheduler Configuration
     schedule_time: str
@@ -50,6 +52,16 @@ class Config:
     enable_indeed: bool
     enable_porsche: bool
     dry_run: bool
+    # Dry-run tuning
+    dry_run_fast: bool
+    dry_run_keywords_limit: int
+    dry_run_locations_limit: int
+    dry_run_pages: int
+    dry_run_limit_per_source: int
+    dry_run_skip_selenium: bool
+    dry_run_request_delay: float
+    dry_run_max_retries: int
+    dry_run_desc_max: int
     auto_migrate_csv: bool
     
     @classmethod
@@ -88,6 +100,8 @@ class Config:
             )),
             # Third-party sources
             porsche_search_url=os.getenv('PORSCHE_SEARCH_URL', 'https://jobs.porsche.com/index.php?ac=search_result&search_criterion_keyword%5B%5D=Data&search_criterion_channel%5B%5D=12&search_criterion_entry_level%5B%5D=17&search_criterion_entry_level%5B%5D=12&search_criterion_working_hour%5B%5D=1&search_criterion_limitation%5B%5D=2&search_criterion_country%5B%5D=46'),
+            linkedin_max_pages=int(os.getenv('LINKEDIN_MAX_PAGES', '4')),
+            linkedin_desc_max=int(os.getenv('LINKEDIN_DESC_MAX', '8')),
             
             # Scheduler Configuration
             schedule_time=os.getenv('SCHEDULE_TIME', '09:00'),
@@ -107,6 +121,16 @@ class Config:
             enable_indeed=_get_bool('ENABLE_INDEED', 'false'),
             enable_porsche=_get_bool('ENABLE_PORSCHE', 'false'),
             dry_run=_get_bool('DRY_RUN', 'false'),
+            # Dry-run tuning (only applied when dry_run is true)
+            dry_run_fast=_get_bool('DRY_RUN_FAST', 'true'),
+            dry_run_keywords_limit=int(os.getenv('DRY_RUN_KEYWORDS_LIMIT', '1')),
+            dry_run_locations_limit=int(os.getenv('DRY_RUN_LOCATIONS_LIMIT', '1')),
+            dry_run_pages=int(os.getenv('DRY_RUN_PAGES', '1')),
+            dry_run_limit_per_source=int(os.getenv('DRY_RUN_LIMIT_PER_SOURCE', '10')),
+            dry_run_skip_selenium=_get_bool('DRY_RUN_SKIP_SELENIUM', 'true'),
+            dry_run_request_delay=float(os.getenv('DRY_RUN_REQUEST_DELAY', '0.2')),
+            dry_run_max_retries=int(os.getenv('DRY_RUN_MAX_RETRIES', '1')),
+            dry_run_desc_max=int(os.getenv('DRY_RUN_DESC_MAX', '0')),
             auto_migrate_csv=_get_bool('AUTO_MIGRATE_CSV', 'false')
         )
     
@@ -190,5 +214,14 @@ class Config:
             'enable_indeed': self.enable_indeed,
             'enable_porsche': self.enable_porsche,
             'dry_run': self.dry_run,
+            'dry_run_fast': self.dry_run_fast,
+            'dry_run_keywords_limit': self.dry_run_keywords_limit,
+            'dry_run_locations_limit': self.dry_run_locations_limit,
+            'dry_run_pages': self.dry_run_pages,
+            'dry_run_limit_per_source': self.dry_run_limit_per_source,
+            'dry_run_skip_selenium': self.dry_run_skip_selenium,
+            'dry_run_request_delay': self.dry_run_request_delay,
+            'dry_run_max_retries': self.dry_run_max_retries,
+            'dry_run_desc_max': self.dry_run_desc_max,
             'auto_migrate_csv': self.auto_migrate_csv
         }

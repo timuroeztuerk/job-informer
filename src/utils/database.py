@@ -38,6 +38,7 @@ class JobDatabase:
                     url TEXT,
                     salary TEXT,
                     description TEXT,
+                    normalized_key TEXT,
                     scraped_at TIMESTAMP NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -49,15 +50,23 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON jobs(scraped_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON jobs(created_at)")
             
-            # Backfill: ensure description column exists for older databases
+            # Backfill: ensure description/normalized_key columns exist for older databases
             try:
                 cur = conn.execute("PRAGMA table_info(jobs)")
                 columns = {row[1] for row in cur.fetchall()}
                 if 'description' not in columns:
                     conn.execute("ALTER TABLE jobs ADD COLUMN description TEXT")
+                if 'normalized_key' not in columns:
+                    conn.execute("ALTER TABLE jobs ADD COLUMN normalized_key TEXT")
             except Exception:
                 # If PRAGMA or ALTER fails, proceed without blocking app
                 pass
+
+            # Try to create unique index on normalized_key (may fail if duplicates exist)
+            try:
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_normalized_key ON jobs(normalized_key)")
+            except Exception as e:
+                logger.warning(f"Could not create unique index on normalized_key (possible duplicates present): {e}")
 
             conn.commit()
     
@@ -78,6 +87,15 @@ class JobDatabase:
         # Prepare data for insertion
         jobs_to_insert = []
         for _, row in jobs_df.iterrows():
+            # Build normalized_key similar to build_normalized_keys for a single row
+            url = str(row.get('url', '')).strip()
+            source = str(row.get('source', '')).strip()
+            if url:
+                normalized_key = str(url)
+            else:
+                title = str(row.get('title', '')).strip().lower()
+                company = str(row.get('company', '')).strip().lower()
+                normalized_key = f"{source.lower()}|{title}|{company}"
             job_data = {
                 'job_id': str(row['job_id']),
                 'title': str(row['title']),
@@ -87,6 +105,7 @@ class JobDatabase:
                 'url': str(row.get('url', '')),
                 'salary': str(row.get('salary', 'Not specified')),
                 'description': str(row.get('description', '')),
+                'normalized_key': normalized_key,
                 'scraped_at': pd.Timestamp.now().isoformat()
             }
             jobs_to_insert.append(job_data)
@@ -99,11 +118,11 @@ class JobDatabase:
             for job in jobs_to_insert:
                 try:
                     cursor.execute("""
-                        INSERT INTO jobs (job_id, title, company, location, source, url, salary, description, scraped_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO jobs (job_id, title, company, location, source, url, salary, description, normalized_key, scraped_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         job['job_id'], job['title'], job['company'], job['location'],
-                        job['source'], job['url'], job['salary'], job['description'], job['scraped_at']
+                        job['source'], job['url'], job['salary'], job['description'], job['normalized_key'], job['scraped_at']
                     ))
                     inserted_count += 1
                 except sqlite3.IntegrityError:

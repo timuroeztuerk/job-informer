@@ -57,6 +57,12 @@ def main():
         type=str,
         help='Search locations (comma-separated)'
     )
+
+    parser.add_argument(
+        '--web',
+        type=str,
+        help='Sources to scrape (comma-separated): linkedin,indeed,porsche. Default: all'
+    )
     
     parser.add_argument(
         '--schedule-time',
@@ -75,6 +81,20 @@ def main():
             config.search_keywords = args.keywords
         if args.locations:
             config.search_locations = args.locations
+        # Sources selection: default to all if not specified; otherwise honor provided list
+        selected_sources = None
+        if args.web:
+            selected_sources = [s.strip().lower() for s in args.web.split(',') if s.strip()]
+        else:
+            selected_sources = ['linkedin', 'indeed', 'porsche']
+        config.enable_linkedin = ('linkedin' in selected_sources)
+        config.enable_indeed = ('indeed' in selected_sources)
+        # Porsche is optional; enable if selected
+        try:
+            config.enable_porsche = ('porsche' in selected_sources)
+        except Exception:
+            # Backward compatibility for configs lacking this field
+            pass
         if args.schedule_time:
             config.schedule_time = args.schedule_time
         
@@ -106,6 +126,14 @@ def main():
             run_job_search_once(scheduler)
         elif args.mode == 'test':
             run_all_tests(scheduler)
+            # If DRY_RUN is enabled, chain a fast dry-run to preview scraping without side effects
+            try:
+                if scheduler.config.dry_run:
+                    from loguru import logger as _logger
+                    _logger.info("DRY_RUN=true detected — executing fast dry run after tests")
+                    scheduler.run_dry_run()
+            except Exception as _e:
+                logger.warning(f"Fast dry run skipped due to error: {_e}")
         elif args.mode == 'summary':
             run_latest_summary(scheduler)
         elif args.mode == 'market-report':

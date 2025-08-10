@@ -186,6 +186,56 @@ class TaskScheduler:
             logger.error(f"Quick test failed: {e}")
             return False
 
+    def run_dry_run(self) -> bool:
+        """Run a fast dry run: scrape minimally and do not persist or email."""
+        try:
+            if not self.config.dry_run:
+                logger.info("DRY_RUN is disabled; skipping dry-run phase")
+                return True
+
+            logger.info("=== Starting Fast Dry Run ===")
+            # Derive limited scope
+            keywords = self.config.get_keywords_list()[: max(1, int(self.config.dry_run_keywords_limit))]
+            locations = self.config.get_locations_list()[: max(1, int(self.config.dry_run_locations_limit))]
+
+            # Temporarily clamp scraping-related knobs
+            original_request_delay = self.config.request_delay
+            original_max_retries = self.config.max_retries
+            original_linkedin_pages = getattr(self.config, 'linkedin_max_pages', 4)
+            original_linkedin_desc_max = getattr(self.config, 'linkedin_desc_max', 8)
+
+            if getattr(self.config, 'dry_run_fast', True):
+                self.config.request_delay = min(self.config.request_delay, float(self.config.dry_run_request_delay))
+                self.config.max_retries = min(self.config.max_retries, int(self.config.dry_run_max_retries))
+                self.config.linkedin_max_pages = int(self.config.dry_run_pages)
+                self.config.linkedin_desc_max = int(self.config.dry_run_desc_max)
+
+            # Execute scrape with caps and skip selenium if asked
+            jobs_df = self.scraper.scrape_all_sources(
+                keywords,
+                locations,
+                limit_per_source=max(0, int(self.config.dry_run_limit_per_source)),
+                skip_selenium=bool(self.config.dry_run_skip_selenium),
+            )
+
+            # Restore config values
+            self.config.request_delay = original_request_delay
+            self.config.max_retries = original_max_retries
+            self.config.linkedin_max_pages = original_linkedin_pages
+            self.config.linkedin_desc_max = original_linkedin_desc_max
+
+            # Print summary only, do not persist or email
+            self._print_city_and_description_summary(jobs_df, title="Dry Run Summary")
+            if jobs_df.empty:
+                logger.warning("Dry run produced no jobs (this is ok for quick checks)")
+            else:
+                logger.info(f"Dry run collected {len(jobs_df)} jobs (not saved/email)")
+            logger.success("=== Fast Dry Run Completed ===")
+            return True
+        except Exception as e:
+            logger.error(f"Dry run failed: {e}")
+            return False
+
     def get_search_summary(self) -> dict:
         """Get summary of search configuration"""
         return {
