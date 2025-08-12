@@ -567,6 +567,7 @@ class JobScraper:
 
         try:
             no_progress_pages = 0
+            page_index = 0  # Initialize page_index to ensure it is always defined
             for page_index in range(max_pages):
                 start = page_index * page_size
                 url = build_search_url(start)

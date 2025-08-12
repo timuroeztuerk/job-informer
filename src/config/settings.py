@@ -50,6 +50,14 @@ class Config:
     gemini_api_key: str
     gemini_model: str
     gemini_analysis_prompt: str
+    # Description Parser Configuration
+    enable_description_parser: bool
+    desc_parser_model: str
+    desc_parser_prompt: str
+    desc_parser_batch_size: int
+    desc_parser_max_batches: int
+    desc_parser_version: int
+    desc_parser_dry_run: bool
 
     # Feature Toggles
     enable_linkedin: bool
@@ -83,26 +91,14 @@ class Config:
             # Email Configuration
             smtp_server=os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
             smtp_port=int(os.getenv('SMTP_PORT', '587')),
-            email_address=os.getenv('EMAIL_ADDRESS', 'timurozturkk@gmail.com'),
+            email_address=os.getenv('EMAIL_ADDRESS', ''),
             email_password=os.getenv('EMAIL_PASSWORD', ''),
-            recipient_email=os.getenv('RECIPIENT_EMAIL', 'timurozturkk@gmail.com'),
+            recipient_email=os.getenv('RECIPIENT_EMAIL', ''),
             
             # Job Search Configuration
             search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Science, Data Analysis, AI'),
             search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
-            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', (
-                "manager,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,"
-                "Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,developer,threat,"
-                "mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,"
-                "biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,scientist,founding,client,"
-                "nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,"
-                "entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,"
-                "teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,"
-                "security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,"
-                "working student,frontend,backend,techniker,manager,planer,nebenberuflich,full stack,lead,dual,"
-                "duales,studium,controlling,berater,abitur,praktikum,marketing,verkäufer,internship,sales,"
-                "freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester"
-            )),
+            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', ''),
             
             # Scraping Configuration
             request_delay=float(os.getenv('REQUEST_DELAY', '3.0')),
@@ -112,7 +108,7 @@ class Config:
             # Third-party sources
             porsche_search_url=os.getenv('PORSCHE_SEARCH_URL', 'https://jobs.porsche.com/index.php?ac=search_result&search_criterion_keyword%5B%5D=Data&search_criterion_channel%5B%5D=12&search_criterion_entry_level%5B%5D=17&search_criterion_entry_level%5B%5D=12&search_criterion_working_hour%5B%5D=1&search_criterion_limitation%5B%5D=2&search_criterion_country%5B%5D=46'),
             linkedin_max_pages=int(os.getenv('LINKEDIN_MAX_PAGES', '3')),
-            linkedin_desc_max=int(os.getenv('LINKEDIN_DESC_MAX', '5')),
+            linkedin_desc_max=int(os.getenv('LINKEDIN_DESC_MAX', '10')),
             linkedin_desc_workers=int(os.getenv('LINKEDIN_DESC_WORKERS', '0')),
             max_total_jobs=int(os.getenv('MAX_TOTAL_JOBS', '0')),
             min_new_jobs_to_continue=int(os.getenv('MIN_NEW_JOBS_TO_CONTINUE', '1')),
@@ -136,12 +132,40 @@ class Config:
                 'Be neutral, data-driven, and avoid speculation. Do not include tables, only bullet points and short paragraphs. '
                 'Use only the provided data — no outside sources.'
             )),
+            # Description Parser Configuration
+            enable_description_parser=_get_bool('ENABLE_DESCRIPTION_PARSER', 'true'),
+            desc_parser_model=os.getenv('DESC_PARSER_MODEL', os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite')),
+            desc_parser_prompt=os.getenv('DESC_PARSER_PROMPT', (
+                'Extract the fields below from the job description and return STRICTLY VALID JSON.\n'
+                'Rules: output JSON only (no markdown, no code fences, no prose). Use double quotes. No comments, no trailing commas, no ellipses.\n'
+                'If unknown: use "unspecified" for enums, null for numbers, [] for arrays.\n'
+                'Schema to return (exact keys/types):\n'
+                '{\n'
+                '  "seniority": "intern|junior|mid|senior|lead|principal|unspecified",\n'
+                '  "employment_type": "full-time|part-time|contract|internship|unspecified",\n'
+                '  "remote": "yes|no|hybrid|unspecified",\n'
+                '  "languages": ["en", "de", "both"],\n'
+                '  "programming_languages": ["python", "sql", "java", ...],\n'
+                '  "tools": ["aws", "azure", "tensorflow", ...],\n'
+                '  "skills": ["ml", "statistics", ...],\n'
+                '  "degree_field": "computer science|data science|engineering|unspecified",\n'
+                '  "degree_type": "bachelor|master|phd|unspecified",\n'
+                '  "years_experience_min": 0,\n'
+                '  "location": ["city in germany"],\n'
+                '  "salary_eur_range": {"min": null, "max": null},\n'
+                '  "extra benefits": "[flexible hours, deutschlandticket, gym, ...]",\n'
+                '  "summary": "1-2 sentences, max 30 words"\n'
+                '}'
+            )),
+            desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '25')),
+            desc_parser_max_batches=int(os.getenv('DESC_PARSER_MAX_BATCHES', '10')),
+            desc_parser_version=int(os.getenv('DESC_PARSER_VERSION', '1')),
+            desc_parser_dry_run=_get_bool('DESC_PARSER_DRY_RUN', 'false'),
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
             enable_porsche=_get_bool('ENABLE_PORSCHE', 'true'),
             dry_run=_get_bool('DRY_RUN', 'false'),
-            # Dry-run tuning (only applied when dry_run is true)
             dry_run_fast=_get_bool('DRY_RUN_FAST', 'true'),
             dry_run_keywords_limit=int(os.getenv('DRY_RUN_KEYWORDS_LIMIT', '1')),
             dry_run_locations_limit=int(os.getenv('DRY_RUN_LOCATIONS_LIMIT', '1')),
@@ -169,7 +193,7 @@ class Config:
             'run-once', 'test', 'summary', 'market-report', 'schedule'
         }
         # Modes that require Gemini
-        gemini_required_modes = {'market-report', 'test'}
+        gemini_required_modes = {'market-report', 'test', 'parse-descriptions'}
 
         if mode in email_required_modes:
             if not self.email_address:
@@ -236,6 +260,12 @@ class Config:
             'gemini_api_key': '***HIDDEN***',  # Don't expose API key
             'gemini_model': self.gemini_model,
             'gemini_analysis_prompt': self.gemini_analysis_prompt,
+            'enable_description_parser': self.enable_description_parser,
+            'desc_parser_model': self.desc_parser_model,
+            'desc_parser_batch_size': self.desc_parser_batch_size,
+            'desc_parser_max_batches': self.desc_parser_max_batches,
+            'desc_parser_version': self.desc_parser_version,
+            'desc_parser_dry_run': self.desc_parser_dry_run,
             'enable_linkedin': self.enable_linkedin,
             'enable_porsche': self.enable_porsche,
             'dry_run': self.dry_run,

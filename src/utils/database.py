@@ -314,3 +314,22 @@ class JobDatabase:
         job_ids = np.where(url_available, df_clean['url'], fallback_id)
         df['job_id'] = pd.Series(job_ids, index=df.index)
         return df
+
+    # ======================
+    # Parsed descriptions helpers
+    # ======================
+    def get_parsed_count(self, version: Optional[int] = None) -> int:
+        """Return count of parsed description records, optionally filtered by version."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='parsed_descriptions'")
+                exists = int(cur.fetchone()[0]) > 0
+                if not exists:
+                    return 0
+                if version is None:
+                    cur = conn.execute("SELECT COUNT(*) FROM parsed_descriptions")
+                    return int(cur.fetchone()[0])
+                cur = conn.execute("SELECT COUNT(*) FROM parsed_descriptions WHERE version = ?", (version,))
+                return int(cur.fetchone()[0])
+        except Exception:
+            return 0

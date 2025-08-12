@@ -12,6 +12,7 @@ from ..config.settings import Config
 from ..scrapers.job_scraper import JobScraper
 from ..email_notifier.email_sender import EmailSender
 from ..analyst.market_analyst import MarketAnalyst
+from ..description_parser.parser import DescriptionParser
 
 
 class TaskScheduler:
@@ -22,6 +23,7 @@ class TaskScheduler:
         self.scraper = JobScraper(config)
         self.email_sender = EmailSender(config)
         self.analyst = MarketAnalyst(config)
+        self.desc_parser = DescriptionParser(config, self.scraper.db)
         self._wait_tick_seconds = 1.0
 
     def _log_wait(self, message: str) -> None:
@@ -437,6 +439,22 @@ class TaskScheduler:
             
         except Exception as e:
             logger.error(f"Error testing AI connection: {e}")
+            return False
+
+    def run_description_parser(self) -> bool:
+        """Run the incremental description parser with caching, controlled via config knobs."""
+        try:
+            if not getattr(self.config, 'enable_description_parser', False):
+                logger.info("ENABLE_DESCRIPTION_PARSER is disabled; skipping parsing")
+                return True
+            batch_size = int(getattr(self.config, 'desc_parser_batch_size', 25))
+            max_batches = int(getattr(self.config, 'desc_parser_max_batches', 4))
+            logger.info(f"Running description parser: batch_size={batch_size}, max_batches={max_batches}, version={getattr(self.config, 'desc_parser_version', 1)}")
+            new_items = self.desc_parser.run_incremental(batch_size=batch_size, max_batches=max_batches)
+            logger.info(f"Description parser stored {new_items} new parsed payloads")
+            return True
+        except Exception as e:
+            logger.error(f"Description parser error: {e}")
             return False
 
     def purge_unwanted_jobs(self) -> bool:

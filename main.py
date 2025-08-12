@@ -41,7 +41,7 @@ def main():
     
     parser.add_argument(
         '--mode',
-        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge', 'backfill-descriptions'],
+        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge', 'backfill-descriptions', 'parse-descriptions'],
         default='run-once',
         help='Execution mode (default: run-once)'
     )
@@ -142,6 +142,8 @@ def main():
             purge_unwanted_jobs(scheduler)
         elif args.mode == 'backfill-descriptions':
             backfill_descriptions(scheduler)
+        elif args.mode == 'parse-descriptions':
+            run_description_parser(scheduler)
         else:
             logger.error(f"Unsupported mode: {args.mode}")
             sys.exit(1)
@@ -348,6 +350,17 @@ def backfill_descriptions(scheduler: TaskScheduler):
         logger.success("=== Backfill Completed Successfully ===")
     else:
         logger.error("=== Backfill Failed ===")
+        sys.exit(1)
+
+
+def run_description_parser(scheduler: TaskScheduler):
+    """Run incremental description parsing using LLM with caching"""
+    logger.info("=== Parsing Descriptions (Incremental) ===")
+    success = scheduler.run_description_parser()
+    if success:
+        logger.success("=== Description Parsing Completed ===")
+    else:
+        logger.error("=== Description Parsing Failed ===")
         sys.exit(1)
 
 
