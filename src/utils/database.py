@@ -143,7 +143,7 @@ class JobDatabase:
                 SELECT * FROM jobs 
                 WHERE scraped_at > ?
                 ORDER BY scraped_at DESC
-            """, conn, params=(cutoff_date,))
+            """, conn, params=[cutoff_date])
         
         if not df.empty and 'scraped_at' in df.columns:
             df['scraped_at'] = pd.to_datetime(df['scraped_at'])
@@ -158,7 +158,7 @@ class JobDatabase:
                 SELECT * FROM jobs 
                 WHERE company LIKE ?
                 ORDER BY scraped_at DESC
-            """, conn, params=(f'%{company}%',))
+            """, conn, params=[f'%{company}%'])
         
         if not df.empty and 'scraped_at' in df.columns:
             df['scraped_at'] = pd.to_datetime(df['scraped_at'])
@@ -173,7 +173,7 @@ class JobDatabase:
                 SELECT * FROM jobs 
                 WHERE source = ?
                 ORDER BY scraped_at DESC
-            """, conn, params=(source,))
+            """, conn, params=[source])
         
         if not df.empty and 'scraped_at' in df.columns:
             df['scraped_at'] = pd.to_datetime(df['scraped_at'])
@@ -277,7 +277,7 @@ class JobDatabase:
                 LIMIT ?
                 """,
                 conn,
-                params=(limit,)
+                params=[limit]
             )
         return df
 

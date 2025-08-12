@@ -4,6 +4,7 @@ Handles web scraping of job postings from various job sites
 """
 
 from typing import List, Dict, Optional
+import sys
 import requests
 from bs4 import BeautifulSoup
 from bs4.element import Tag
@@ -76,6 +77,54 @@ class JobScraper:
             if remaining > 0:
                 logger.info(f"{label} — {remaining:.1f}s remaining")
 
+    def _progress_bar(self, current: int, total: int, width: int = 24) -> str:
+        try:
+            total = max(1, int(total))
+            current = max(0, min(int(current), total))
+            filled = int(width * current / total)
+            return '█' * filled + '-' * (width - filled)
+        except Exception:
+            return '-' * width
+
+    def _print_progress(self, prefix: str, current: int, total: int, suffix: str = "") -> None:
+        try:
+            bar = self._progress_bar(current, total)
+            line = f"\r{prefix} [{bar}] {current}/{total} {suffix}".rstrip()
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if current >= total:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+        except Exception:
+            pass
+
+    def _sleep_quiet(self, seconds: float, prefix: str = "pause") -> None:
+        try:
+            total = max(0.0, float(seconds))
+        except Exception:
+            total = 0.0
+        if total <= 0:
+            return
+        # minimal spinner
+        spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        tick = 0.2
+        elapsed = 0.0
+        while elapsed < total:
+            ch = spinner[int((elapsed / tick)) % len(spinner)]
+            remaining = max(0.0, total - elapsed)
+            try:
+                sys.stdout.write(f"\r{prefix} {ch} {remaining:4.1f}s")
+                sys.stdout.flush()
+            except Exception:
+                pass
+            time.sleep(min(tick, total - elapsed))
+            elapsed += tick
+        try:
+            sys.stdout.write("\r" + " " * 40 + "\r")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
     def _get_unwanted_keywords(self) -> List[str]:
         """Return unwanted keywords list from configuration (cached per call site)."""
         try:
@@ -107,18 +156,18 @@ class JobScraper:
         return f"{safe(source)}|{safe(title)}|{safe(company)}"
 
     def _get_existing_normalized_keys(self) -> set:
-        """Fetch existing jobs' normalized keys from the database for quick membership checks."""
+        """Fetch existing normalized keys directly from DB for faster membership checks."""
         try:
             with self.db._get_connection() as conn:
-                existing_df = pd.read_sql_query(
-                    "SELECT url, title, company, source FROM jobs",
+                df = pd.read_sql_query(
+                    "SELECT normalized_key FROM jobs WHERE normalized_key IS NOT NULL",
                     conn
                 )
-            if existing_df.empty:
+            if df.empty:
                 return set()
-            return set(build_normalized_keys(existing_df).tolist())
+            return set(df['normalized_key'].astype(str).tolist())
         except Exception as e:
-            logger.warning(f"Could not load existing jobs for pre-filtering: {e}")
+            logger.warning(f"Could not load existing normalized keys for pre-filtering: {e}")
             return set()
 
     # =======================
@@ -262,9 +311,19 @@ class JobScraper:
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
         chrome_options.add_experimental_option('useAutomationExtension', False)
+        try:
+            chrome_prefs = {"profile.managed_default_content_settings.images": 2}
+            chrome_options.add_experimental_option("prefs", chrome_prefs)
+        except Exception:
+            pass
 
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        try:
+            driver.set_page_load_timeout(20)
+            driver.implicitly_wait(2)
+        except Exception:
+            pass
         try:
             driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
                 'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
@@ -273,101 +332,7 @@ class JobScraper:
             pass
         return driver
     
-    def scrape_indeed(self, keywords: str, location: str) -> List[Dict]:
-        """Scrape job postings from Indeed"""
-        logger.info(f"Scraping Indeed for '{keywords}' in '{location}'")
-        jobs = []
-        skipped_existing = 0
-        skipped_unwanted = 0
-        existing_keys = self._get_existing_normalized_keys()
-        seen_keys: set = set()
-        try:
-            driver = self.get_driver()
-
-            # Build Indeed search URL
-            base_url = "https://www.indeed.com/jobs"
-            url = f"{base_url}?q={quote_plus(keywords)}&l={quote_plus(location)}&sort=date"
-            driver.get(url)
-
-            max_pages = int(getattr(self.config, 'indeed_max_pages', 2))
-            current_page = 1
-
-            while True:
-                # Wait for job listings to load on the page
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-jk]"))
-                )
-
-                job_cards = driver.find_elements(By.CSS_SELECTOR, "[data-jk]")
-
-                for card in job_cards[:20]:  # Limit to first 20 results
-                    try:
-                        title_element = card.find_element(By.CSS_SELECTOR, "h2 a span")
-                        company_element = card.find_element(By.CSS_SELECTOR, "[data-testid='company-name']")
-                        location_element = card.find_element(By.CSS_SELECTOR, "[data-testid='job-location']")
-
-                        job_data = {
-                            'title': title_element.text.strip(),
-                            'company': company_element.text.strip(),
-                            'location': location_element.text.strip(),
-                            'source': 'Indeed',
-                            'url': normalize_job_url(card.find_element(By.CSS_SELECTOR, "h2 a").get_attribute('href') or '', 'Indeed'),
-                            'scraped_at': pd.Timestamp.now()
-                        }
-
-                        # Pre-filter: skip unwanted titles early
-                        if self._title_contains_unwanted_keywords(job_data['title']):
-                            skipped_unwanted += 1
-                            continue
-
-                        # Pre-filter: skip jobs already known in DB or within this run
-                        key = self._build_normalized_key_from_fields(
-                            job_data.get('source', ''), job_data.get('title', ''), job_data.get('company', ''), job_data.get('url', '')
-                        )
-                        if key in existing_keys or key in seen_keys:
-                            skipped_existing += 1
-                            continue
-                        seen_keys.add(key)
-
-                        # Try to get salary if available
-                        try:
-                            salary_element = card.find_element(By.CSS_SELECTOR, "[data-testid='salary-snippet']")
-                            job_data['salary'] = salary_element.text.strip()
-                        except:
-                            job_data['salary'] = 'Not specified'
-
-                        jobs.append(job_data)
-
-                    except Exception as e:
-                        logger.warning(f"Error extracting job data: {e}")
-                        continue
-
-                # Try to go to next page (bounded by max_pages)
-                if current_page >= max_pages:
-                    break
-                try:
-                    next_btn = driver.find_element(By.CSS_SELECTOR, "a[aria-label='Next'], a[aria-label='Next Page'], a[rel='next']")
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_btn)
-                    self._sleep_with_feedback(0.3, label="Scrolling to next Indeed page")
-                    next_btn.click()
-                    current_page += 1
-                    # polite delay with jitter
-                    self._sleep_with_feedback(self.config.request_delay + random.uniform(0.2, 0.8), label="Between Indeed pages")
-                except NoSuchElementException:
-                    break
-                except Exception:
-                    break
-
-            if skipped_unwanted or skipped_existing:
-                logger.info(
-                    f"Indeed pre-filtering skipped {skipped_unwanted} unwanted and {skipped_existing} existing/duplicate jobs"
-                )
-            logger.info(f"Scraped {len(jobs)} jobs from Indeed across {current_page} page(s)")
-
-        except Exception as e:
-            logger.error(f"Error scraping Indeed: {e}")
-
-        return jobs
+    # Indeed scraper removed by request
 
     def scrape_porsche(self) -> List[Dict]:
         """Scrape Porsche careers first page using Selenium-rendered DOM (handles JS-rendered results)."""
@@ -478,7 +443,7 @@ class JobScraper:
                 "https://www.linkedin.com/jobs/search/?"
                 f"keywords={quote_plus(keywords)}"
                 f"&location={quote_plus(location)}"
-                f"&f_TPR=r604800&f_JT=F&start={start}&origin=JOB_SEARCH_PAGE_JOB_FILTER&trk=public_jobs_jobs-search-bar_search-submit"
+                f"&f_TPR=r86400&f_JT=F&start={start}&origin=JOB_SEARCH_PAGE_JOB_FILTER&trk=public_jobs_jobs-search-bar_search-submit"
             )
 
         def parse_cards(soup: BeautifulSoup) -> List[Dict]:
@@ -631,7 +596,14 @@ class JobScraper:
                     seen_keys.add(key)
                     new_jobs.append(j)
                 jobs.extend(new_jobs)
-                logger.info(f"LinkedIn page {page_index+1}: {len(new_jobs)} new jobs (total {len(jobs)})")
+                # compact progress update per page
+                if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
+                    self._print_progress(
+                        prefix=f"LinkedIn {keywords} @ {location}",
+                        current=page_index + 1,
+                        total=max_pages,
+                        suffix=f"new:{len(jobs)} skipU:{skipped_unwanted} skipE:{skipped_existing}"
+                    )
 
                 # Stop conditions:
                 # 1) No cards parsed → end reached or layout changed
@@ -642,32 +614,57 @@ class JobScraper:
                 if len(new_jobs) == 0:
                     no_progress_pages += 1
                     if no_progress_pages >= 2:
-                        logger.info("No new jobs across two consecutive pages; stopping pagination")
+                        logger.debug("No new jobs across two consecutive pages; stopping pagination")
                         break
                 else:
                     no_progress_pages = 0
 
-                # Polite delay with jitter
-            self._sleep_with_feedback(self.config.request_delay + random.uniform(0.2, 0.8), label="Between LinkedIn pages")
+                # Polite delay with jitter (compact)
+                if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
+                    self._sleep_quiet(self.config.request_delay + random.uniform(0.2, 0.8), prefix="pause")
+                else:
+                    time.sleep(self.config.request_delay + random.uniform(0.2, 0.8))
 
-            # Optionally fetch job descriptions with a gentle sequential approach and early abort on 429
+            # Optionally fetch job descriptions with a bounded worker pool and early abort on 429
             MAX_DESC_FETCH = int(getattr(self.config, 'linkedin_desc_max', 8))
+            WORKERS = int(getattr(self.config, 'linkedin_desc_workers', 0))
             targets = [j for j in jobs if j.get('url')][:MAX_DESC_FETCH]
             if targets and not hit_rate_limit:
-                logger.info(f"Fetching LinkedIn job descriptions for up to {len(targets)} jobs (sequential)...")
-                for j in targets:
-                    if hit_rate_limit:
-                        break
-                    try:
-                        desc = extract_description(j['url'])
-                    except Exception:
-                        desc = ''
-                    j['description'] = desc or ''
-                    if hit_rate_limit:
-                        logger.info("Detected rate limiting while fetching descriptions; stopping early.")
-                        break
-                    # gentle pacing between detail requests
-                    self._sleep_with_feedback(1.0 + random.uniform(0.3, 0.9), label="Between description requests")
+                if WORKERS and WORKERS > 1:
+                    logger.info(f"Fetching LinkedIn job descriptions for up to {len(targets)} jobs (workers={WORKERS})...")
+                    def task(j: Dict) -> Dict:
+                        if hit_rate_limit:
+                            return {'url': j['url'], 'desc': ''}
+                        d = extract_description(j['url'])
+                        return {'url': j['url'], 'desc': d}
+                    with ThreadPoolExecutor(max_workers=min(WORKERS, len(targets))) as ex:
+                        futures = {ex.submit(task, j): j for j in targets}
+                        for fut in as_completed(futures):
+                            res = fut.result()
+                            url = res.get('url', '')
+                            desc_v = res.get('desc', '') or ''
+                            for j in jobs:
+                                if j.get('url') == url:
+                                    j['description'] = desc_v
+                                    break
+                else:
+                    logger.info(f"Fetching LinkedIn job descriptions for up to {len(targets)} jobs (sequential)...")
+                    for j in targets:
+                        if hit_rate_limit:
+                            break
+                        try:
+                            desc = extract_description(j['url'])
+                        except Exception:
+                            desc = ''
+                        j['description'] = desc or ''
+                        if hit_rate_limit:
+                            logger.info("Detected rate limiting while fetching descriptions; stopping early.")
+                            break
+                        # gentle pacing between detail requests (quiet)
+                        if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
+                            self._sleep_quiet(1.0 + random.uniform(0.3, 0.9), prefix="desc")
+                        else:
+                            time.sleep(1.0 + random.uniform(0.3, 0.9))
             elif hit_rate_limit:
                 logger.info("Skipping job description fetching due to detected rate limiting (429)")
             # Jobs beyond target range: default empty description
@@ -675,11 +672,10 @@ class JobScraper:
                 if 'description' not in j:
                     j['description'] = ''
 
-            if skipped_unwanted or skipped_existing:
-                logger.info(
-                    f"LinkedIn pre-filtering skipped {skipped_unwanted} unwanted and {skipped_existing} existing/duplicate jobs"
-                )
-            logger.info(f"Scraped {len(jobs)} jobs from LinkedIn (last 24 hours, full-time)")
+            # Final compact summary
+            logger.info(
+                f"LinkedIn summary — new:{len(jobs)} skipU:{skipped_unwanted} skipE:{skipped_existing} pages:{min(max_pages, page_index+1)}"
+            )
 
         except Exception as e:
             logger.error(f"Error scraping LinkedIn: {e}")
@@ -747,7 +743,7 @@ class JobScraper:
             existing_keys = set(build_normalized_keys(existing_df).tolist())
             # Keep only rows whose normalized key is not present in DB
             mask = ~current_keys.isin(existing_keys)
-            filtered_df = current_df[mask]
+            filtered_df = current_df.loc[mask]
         
         filtered_count = len(filtered_df)
         removed_count = original_count - filtered_count
@@ -882,8 +878,8 @@ class JobScraper:
         """
         all_jobs: List[Dict] = []
 
-        if not (self.config.enable_linkedin or self.config.enable_indeed or getattr(self.config, 'enable_porsche', False)):
-            logger.warning("No sources enabled. Enable at least one of ENABLE_LINKEDIN or ENABLE_INDEED.")
+        if not (self.config.enable_linkedin or getattr(self.config, 'enable_porsche', False)):
+            logger.warning("No sources enabled. Enable at least one of ENABLE_LINKEDIN or ENABLE_PORSCHE.")
             return pd.DataFrame()
 
         # Porsche: one-shot scrape using configured URL
@@ -909,13 +905,7 @@ class JobScraper:
                     if limit_per_source is not None and limit_per_source > 0:
                         linkedin_jobs = linkedin_jobs[:limit_per_source]
                     all_jobs.extend(linkedin_jobs)
-                if self.config.enable_indeed and not skip_selenium:
-                    indeed_jobs = self.scrape_indeed(keyword, location)
-                    if limit_per_source is not None and limit_per_source > 0:
-                        indeed_jobs = indeed_jobs[:limit_per_source]
-                    all_jobs.extend(indeed_jobs)
-                elif self.config.enable_indeed and skip_selenium:
-                    logger.info("Skipping Indeed due to skip_selenium=true")
+                # Indeed removed
                 # Porsche intentionally not called here to avoid duplicate results
         
         # Convert to DataFrame and process
@@ -954,7 +944,8 @@ class JobScraper:
             escaped = [rf"\b{re.escape(k)}\b" for k in unwanted_keywords if k]
             if escaped:
                 pattern = "|".join(escaped)
-                df = df[~df['title'].str.contains(pattern, case=False, na=False, regex=True)]
+                mask = ~df['title'].str.contains(pattern, case=False, na=False, regex=True)
+                df = df.loc[mask]
         
         filtered_count = len(df)
         removed_count = original_count - filtered_count

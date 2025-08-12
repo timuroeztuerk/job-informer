@@ -33,6 +33,10 @@ class Config:
     porsche_search_url: str
     linkedin_max_pages: int
     linkedin_desc_max: int
+    linkedin_desc_workers: int
+    max_total_jobs: int
+    min_new_jobs_to_continue: int
+    quiet_progress: bool
     
     # Scheduler Configuration
     schedule_time: str
@@ -49,7 +53,6 @@ class Config:
 
     # Feature Toggles
     enable_linkedin: bool
-    enable_indeed: bool
     enable_porsche: bool
     dry_run: bool
     # Dry-run tuning
@@ -80,32 +83,44 @@ class Config:
             # Email Configuration
             smtp_server=os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
             smtp_port=int(os.getenv('SMTP_PORT', '587')),
-            email_address=os.getenv('EMAIL_ADDRESS', ''),
+            email_address=os.getenv('EMAIL_ADDRESS', 'timurozturkk@gmail.com'),
             email_password=os.getenv('EMAIL_PASSWORD', ''),
-            recipient_email=os.getenv('RECIPIENT_EMAIL', ''),
+            recipient_email=os.getenv('RECIPIENT_EMAIL', 'timurozturkk@gmail.com'),
             
             # Job Search Configuration
-            search_keywords=os.getenv('SEARCH_KEYWORDS', 'python developer,software engineer'),
-            search_locations=os.getenv('SEARCH_LOCATIONS', 'New York,San Francisco,Remote'),
-            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', 'internship,sales,freelance,intern,trainee,thesis,student,part-time,lecturer,tester,manager'),
+            search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Science, Data Analysis, AI'),
+            search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
+            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', (
+                "manager,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,"
+                "Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,developer,threat,"
+                "mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,"
+                "biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,scientist,founding,client,"
+                "nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,"
+                "entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,"
+                "teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,"
+                "security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,"
+                "working student,frontend,backend,techniker,manager,planer,nebenberuflich,full stack,lead,dual,"
+                "duales,studium,controlling,berater,abitur,praktikum,marketing,verkäufer,internship,sales,"
+                "freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester"
+            )),
             
             # Scraping Configuration
-            request_delay=float(os.getenv('REQUEST_DELAY', '2.0')),
-            max_retries=int(os.getenv('MAX_RETRIES', '3')),
+            request_delay=float(os.getenv('REQUEST_DELAY', '3.0')),
+            max_retries=int(os.getenv('MAX_RETRIES', '2')),
             # Default to a realistic desktop Chrome UA string
-            user_agent=os.getenv('USER_AGENT', (
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/124.0.0.0 Safari/537.36'
-            )),
+            user_agent=os.getenv('USER_AGENT', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'),
             # Third-party sources
             porsche_search_url=os.getenv('PORSCHE_SEARCH_URL', 'https://jobs.porsche.com/index.php?ac=search_result&search_criterion_keyword%5B%5D=Data&search_criterion_channel%5B%5D=12&search_criterion_entry_level%5B%5D=17&search_criterion_entry_level%5B%5D=12&search_criterion_working_hour%5B%5D=1&search_criterion_limitation%5B%5D=2&search_criterion_country%5B%5D=46'),
-            linkedin_max_pages=int(os.getenv('LINKEDIN_MAX_PAGES', '4')),
-            linkedin_desc_max=int(os.getenv('LINKEDIN_DESC_MAX', '8')),
+            linkedin_max_pages=int(os.getenv('LINKEDIN_MAX_PAGES', '3')),
+            linkedin_desc_max=int(os.getenv('LINKEDIN_DESC_MAX', '5')),
+            linkedin_desc_workers=int(os.getenv('LINKEDIN_DESC_WORKERS', '0')),
+            max_total_jobs=int(os.getenv('MAX_TOTAL_JOBS', '0')),
+            min_new_jobs_to_continue=int(os.getenv('MIN_NEW_JOBS_TO_CONTINUE', '1')),
+            quiet_progress=_get_bool('QUIET_PROGRESS', 'true'),
             
             # Scheduler Configuration
             schedule_time=os.getenv('SCHEDULE_TIME', '09:00'),
-            timezone=os.getenv('TIMEZONE', 'America/New_York'),
+            timezone=os.getenv('TIMEZONE', 'Europe/Berlin'),
             
             # Logging Configuration
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
@@ -113,13 +128,18 @@ class Config:
             
             # AI Analysis Configuration
             gemini_api_key=os.getenv('GEMINI_API_KEY', ''),
-            gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-exp'),
-            gemini_analysis_prompt=os.getenv('GEMINI_ANALYSIS_PROMPT', 'Analyze the following job market data and provide comprehensive insights.'),
+            gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
+            gemini_analysis_prompt=os.getenv('GEMINI_ANALYSIS_PROMPT', (
+                'You are a concise labor market analyst. Given the job market data summary below, write a one-page (max 400 words) report in plain text. '
+                'The report must include:1. Executive summary (3–4 bullet points). 2. Key statistics (total jobs, top companies, top locations, notable job titles, salary insights). '
+                '3. Short commentary on trends or anomalies from the period. 4. Brief note on what to watch in the coming period. '
+                'Be neutral, data-driven, and avoid speculation. Do not include tables, only bullet points and short paragraphs. '
+                'Use only the provided data — no outside sources.'
+            )),
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
-            enable_indeed=_get_bool('ENABLE_INDEED', 'false'),
-            enable_porsche=_get_bool('ENABLE_PORSCHE', 'false'),
+            enable_porsche=_get_bool('ENABLE_PORSCHE', 'true'),
             dry_run=_get_bool('DRY_RUN', 'false'),
             # Dry-run tuning (only applied when dry_run is true)
             dry_run_fast=_get_bool('DRY_RUN_FAST', 'true'),
@@ -203,6 +223,12 @@ class Config:
             'max_retries': self.max_retries,
             'user_agent': self.user_agent,
             'porsche_search_url': self.porsche_search_url,
+            'linkedin_max_pages': self.linkedin_max_pages,
+            'linkedin_desc_max': self.linkedin_desc_max,
+            'linkedin_desc_workers': self.linkedin_desc_workers,
+            'max_total_jobs': self.max_total_jobs,
+            'min_new_jobs_to_continue': self.min_new_jobs_to_continue,
+            'quiet_progress': self.quiet_progress,
             'schedule_time': self.schedule_time,
             'timezone': self.timezone,
             'log_level': self.log_level,
@@ -211,7 +237,6 @@ class Config:
             'gemini_model': self.gemini_model,
             'gemini_analysis_prompt': self.gemini_analysis_prompt,
             'enable_linkedin': self.enable_linkedin,
-            'enable_indeed': self.enable_indeed,
             'enable_porsche': self.enable_porsche,
             'dry_run': self.dry_run,
             'dry_run_fast': self.dry_run_fast,

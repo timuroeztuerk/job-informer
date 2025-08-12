@@ -61,7 +61,7 @@ def main():
     parser.add_argument(
         '--web',
         type=str,
-        help='Sources to scrape (comma-separated): linkedin,indeed,porsche. Default: all'
+        help='Sources to scrape (comma-separated): linkedin,porsche. If omitted, uses .env toggles'
     )
     
     parser.add_argument(
@@ -81,20 +81,14 @@ def main():
             config.search_keywords = args.keywords
         if args.locations:
             config.search_locations = args.locations
-        # Sources selection: default to all if not specified; otherwise honor provided list
-        selected_sources = None
+        # Sources selection: only override when --web is provided; otherwise respect .env
         if args.web:
             selected_sources = [s.strip().lower() for s in args.web.split(',') if s.strip()]
-        else:
-            selected_sources = ['linkedin', 'indeed', 'porsche']
-        config.enable_linkedin = ('linkedin' in selected_sources)
-        config.enable_indeed = ('indeed' in selected_sources)
-        # Porsche is optional; enable if selected
-        try:
-            config.enable_porsche = ('porsche' in selected_sources)
-        except Exception:
-            # Backward compatibility for configs lacking this field
-            pass
+            config.enable_linkedin = ('linkedin' in selected_sources)
+            try:
+                config.enable_porsche = ('porsche' in selected_sources)
+            except Exception:
+                pass
         if args.schedule_time:
             config.schedule_time = args.schedule_time
         

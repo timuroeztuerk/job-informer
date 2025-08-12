@@ -58,7 +58,7 @@ def filter_unwanted_job_titles(df: pd.DataFrame) -> pd.DataFrame:
     
     for keyword in unwanted_keywords:
         mask = ~df['title'].str.contains(keyword, case=False, na=False)
-        df = df[mask]
+        df = df.loc[mask]
     
     filtered_count = len(df)
     removed_count = original_count - filtered_count
@@ -81,17 +81,25 @@ def extract_salary_info(salary_text: str) -> Dict[str, Optional[str]]:
         r'(\d+,?\d*)k?\s*-\s*(\d+,?\d*)k',  # 50k - 70k
     ]
     
-    result = {'min_salary': None, 'max_salary': None, 'currency': None, 'period': None}
+    result: Dict[str, Optional[str]] = {
+        'min_salary': None,
+        'max_salary': None,
+        'currency': None,
+        'period': None,
+    }
     
     for pattern in patterns:
         match = re.search(pattern, salary_text, re.IGNORECASE)
         if match:
             groups = match.groups()
             if len(groups) >= 2:
-                result['currency'] = groups[0] if groups[0] in ['$', '€', '£'] else '$'
-                result['min_salary'] = groups[1].replace(',', '')
+                curr = groups[0] if groups[0] in ['$', '€', '£'] else '$'
+                result['currency'] = str(curr)
+                min_sal = groups[1]
+                result['min_salary'] = min_sal.replace(',', '') if isinstance(min_sal, str) else None
                 if len(groups) >= 4:
-                    result['max_salary'] = groups[3].replace(',', '')
+                    max_sal = groups[3]
+                    result['max_salary'] = max_sal.replace(',', '') if isinstance(max_sal, str) else None
             break
     
     # Detect period (per hour, per year, etc.)
@@ -112,7 +120,7 @@ def filter_jobs_by_keywords(jobs_df: pd.DataFrame, keywords: List[str], column: 
     
     pattern = '|'.join([re.escape(keyword) for keyword in keywords])
     mask = jobs_df[column].str.contains(pattern, case=False, na=False)
-    return jobs_df[mask]
+    return jobs_df.loc[mask]
 
 
 def filter_jobs_by_location(jobs_df: pd.DataFrame, locations: List[str]) -> pd.DataFrame:
@@ -122,7 +130,7 @@ def filter_jobs_by_location(jobs_df: pd.DataFrame, locations: List[str]) -> pd.D
     
     pattern = '|'.join([re.escape(location) for location in locations])
     mask = jobs_df['location'].str.contains(pattern, case=False, na=False)
-    return jobs_df[mask]
+    return jobs_df.loc[mask]
 
 
 def add_relevance_score(jobs_df: pd.DataFrame, preferred_keywords: List[str]) -> pd.DataFrame:
@@ -232,12 +240,7 @@ def normalize_job_url(url: str, source: str) -> str:
             # Generic fallback: scheme://host/path without query/fragment
             return f"{netloc}{path}".rstrip('/')
 
-        # Indeed: viewjob?jk=<id>
-        if 'indeed.' in netloc:
-            jk = query.get('jk', [])
-            if jk:
-                return f"indeed:{jk[0]}"
-            return f"{netloc}{path}".rstrip('/')
+        # Note: Indeed support removed
 
         # Generic: host + path without query/fragment
         return f"{netloc}{path}".rstrip('/')

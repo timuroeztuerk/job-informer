@@ -2,9 +2,8 @@
 Task Scheduler Module
 Handles manual execution of job scraping tasks
 """
-
-from typing import List
 from datetime import datetime, timedelta
+import sys
 import time
 import zoneinfo
 import pandas as pd
@@ -29,6 +28,26 @@ class TaskScheduler:
         try:
             logger.info(message)
         except Exception:
+            pass
+
+    def _update_progress(self, completed: int, total: int, prefix: str = "") -> None:
+        """Render a simple single-line progress bar in the terminal."""
+        try:
+            width = 30
+            if total <= 0:
+                bar = '-' * width
+                line = f"\r{prefix}[{bar}] {completed}/{total}"
+            else:
+                filled = int(width * max(0, min(completed, total)) / total)
+                bar = '█' * filled + '-' * (width - filled)
+                line = f"\r{prefix}[{bar}] {completed}/{total}"
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if total > 0 and completed >= total:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+        except Exception:
+            # Fallback silently if stdout is not available
             pass
 
     def _print_city_and_description_summary(self, jobs_df: pd.DataFrame, title: str = "Run Summary") -> None:
@@ -114,20 +133,27 @@ class TaskScheduler:
                 # Store jobs in SQLite database (fast deduplication)
                 new_jobs_count = self.scraper.db.upsert_jobs(jobs_df)
                 
-                # Save CSV for backup/auditing (no longer attached to email)
-                csv_filename = self.scraper.save_jobs_to_csv(jobs_df)
+                # Save CSV for backup/auditing unless dry-run
+                csv_filename = None
+                if not self.config.dry_run:
+                    csv_filename = self.scraper.save_jobs_to_csv(jobs_df)
+                else:
+                    logger.info("DRY_RUN is enabled; skipping CSV save")
                 
                 # Send email with inline list of jobs (HTML + text), no attachment
                 subject = f"Job Search Report - {new_jobs_count} new opportunities found!"
-                if not self.config.dry_run:
+                if not self.config.dry_run and new_jobs_count > 0:
                     sent = self.email_sender.send_job_report(jobs_df, subject)
                     if not sent:
                         logger.warning("Email send returned False")
-                else:
+                elif self.config.dry_run:
                     logger.info("DRY_RUN is enabled; skipping email send")
+                else:
+                    logger.info("No new jobs detected; skipping email send")
                 
                 logger.success(f"Job search completed successfully. Found {new_jobs_count} new jobs.")
-                logger.info(f"Results archived to: {csv_filename}")
+                if csv_filename:
+                    logger.info(f"Results archived to: {csv_filename}")
                 return True
             else:
                 logger.warning("No jobs found in this search.")
@@ -247,7 +273,7 @@ class TaskScheduler:
             'request_delay': self.config.request_delay,
             'max_retries': self.config.max_retries,
             'enable_linkedin': self.config.enable_linkedin,
-            'enable_indeed': self.config.enable_indeed,
+            # Indeed removed
             'dry_run': self.config.dry_run
         }
     
@@ -520,19 +546,24 @@ class TaskScheduler:
                 logger.info(f"Backfill batch {batches_processed+1}: processing {len(to_fill)} jobs without descriptions")
 
                 updates = []
+                total_in_batch = int(len(to_fill))
+                completed_in_batch = 0
+                self._update_progress(0, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
                 for _, row in to_fill.iterrows():
                     url = str(row.get('url') or '')
                     source = str(row.get('source') or '')
                     job_id = str(row.get('job_id'))
                     if not url:
+                        completed_in_batch += 1
+                        self._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
                         continue
-                    self._log_wait(f"Fetching description for {job_id} ({source})")
                     desc = self.scraper.fetch_job_description(url, source)
                     if desc:
                         updates.append({'job_id': job_id, 'description': desc})
-                    # gentle pacing between requests with feedback
-                    self._log_wait("Pacing between description requests")
+                    # gentle pacing between requests
                     time.sleep(max(0.5, self.config.request_delay))
+                    completed_in_batch += 1
+                    self._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
 
                 if updates:
                     updated = self.scraper.db.update_job_descriptions(updates)
