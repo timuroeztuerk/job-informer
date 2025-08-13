@@ -8,14 +8,6 @@ import sys
 import requests
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import time
 import pandas as pd
 from loguru import logger
@@ -42,22 +34,23 @@ class JobScraper:
         self.session.headers.update({'User-Agent': config.user_agent})
         # Configure retries for robustness
         # Avoid automatic 429 retries to reduce hammering on rate limits
-        retries = Retry(total=self.config.max_retries, backoff_factor=1.2,
-                        status_forcelist=[500, 502, 503, 504],
-                        allowed_methods=["GET", "HEAD"])
+        retries = Retry(
+            total=self.config.max_retries,
+            backoff_factor=1.2,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "HEAD"],
+        )
         adapter = HTTPAdapter(max_retries=retries)
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
-        self.jobs_data: List[Dict] = []
+        # Runtime state
+        self.jobs_data = []
         # Initialize database for fast deduplication
         self.db = JobDatabase()
-        # Reusable Selenium driver (lazy init)
-        self._driver: Optional[webdriver.Chrome] = None
-        # Default request timeout (seconds)
-        self.request_timeout: int = getattr(self.config, 'request_timeout', 20)
-        
-        # Default wait feedback granularity (seconds)
-        self._wait_tick_seconds: float = 1.0
+        # Defaults
+        self.request_timeout = getattr(self.config, 'request_timeout', 20)
+        self._wait_tick_seconds = 1.0
+        self._last_progress_line = ""
 
     def _sleep_with_feedback(self, seconds: float, label: str = "waiting") -> None:
         """Sleep with periodic feedback logs so the user knows we're alive."""
@@ -92,6 +85,11 @@ class JobScraper:
             line = f"\r{prefix} [{bar}] {current}/{total} {suffix}".rstrip()
             sys.stdout.write(line)
             sys.stdout.flush()
+            # store last line to restore after pauses
+            try:
+                self._last_progress_line = line
+            except Exception:
+                pass
             if current >= total:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
@@ -119,8 +117,11 @@ class JobScraper:
                 pass
             time.sleep(min(tick, total - elapsed))
             elapsed += tick
+        # At end, clear the spinner line and restore last progress (if any)
         try:
-            sys.stdout.write("\r" + " " * 40 + "\r")
+            sys.stdout.write("\r" + " " * 120 + "\r")
+            if getattr(self, "_last_progress_line", ""):
+                sys.stdout.write(self._last_progress_line)
             sys.stdout.flush()
         except Exception:
             pass
@@ -203,7 +204,11 @@ class JobScraper:
             logger.debug(f"Giving up fetching {url}: {last_exc}")
         return None
 
+    # =======================
+    # Backfill-only helpers
+    # =======================
     def _extract_linkedin_description(self, job_url: str) -> str:
+        """Extract description from a LinkedIn job page. Used by backfill mode only."""
         if not job_url:
             return ''
         resp = self._http_get_with_retries(job_url, timeout=25)
@@ -235,6 +240,7 @@ class JobScraper:
         return ''
 
     def _extract_generic_description(self, job_url: str, source: str) -> str:
+        """Best-effort description extraction for non-LinkedIn pages. Backfill-only."""
         if not job_url:
             return ''
         resp = self._http_get_with_retries(job_url, timeout=20)
@@ -242,7 +248,7 @@ class JobScraper:
             return ''
         try:
             page = BeautifulSoup(resp.content, 'lxml')
-            # Try a few common selectors (Indeed and others)
+            # Try a few common selectors
             selectors = [
                 '#jobDescriptionText',
                 'div#jobDescriptionText',
@@ -260,172 +266,11 @@ class JobScraper:
         return ''
 
     def fetch_job_description(self, url: str, source: str) -> str:
-        """Fetch a textual description for a job URL, dispatching by source."""
+        """Fetch a textual description for a job URL. Used only by backfill mode."""
         src = (source or '').lower()
         if 'linkedin' in src or 'linkedin' in (url or '').lower():
             return self._extract_linkedin_description(url)
         return self._extract_generic_description(url, source)
-
-    def get_driver(self) -> webdriver.Chrome:
-        """Return a reusable Chrome WebDriver, creating it if needed."""
-        try:
-            if self._driver:
-                # touch the session to ensure it's alive
-                _ = self._driver.current_url
-                return self._driver
-        except Exception:
-            try:
-                driver = self._driver
-                if driver is not None:
-                    driver.quit()
-            except Exception:
-                pass
-            self._driver = None
-        self._driver = self.setup_driver()
-        return self._driver
-
-    def close_driver(self) -> None:
-        """Close and cleanup the reusable driver."""
-        driver = getattr(self, '_driver', None)
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-            self._driver = None
-
-    def __del__(self):
-        # Best-effort cleanup
-        try:
-            self.close_driver()
-        except Exception:
-            pass
-        
-    def setup_driver(self) -> webdriver.Chrome:
-        """Create a new Chrome WebDriver with appropriate options (no reuse)."""
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument(f'--user-agent={self.config.user_agent}')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        try:
-            chrome_prefs = {"profile.managed_default_content_settings.images": 2}
-            chrome_options.add_experimental_option("prefs", chrome_prefs)
-        except Exception:
-            pass
-
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        try:
-            driver.set_page_load_timeout(20)
-            driver.implicitly_wait(2)
-        except Exception:
-            pass
-        try:
-            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-                'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
-            })
-        except Exception:
-            pass
-        return driver
-    
-    # Indeed scraper removed by request
-
-    def scrape_porsche(self) -> List[Dict]:
-        """Scrape Porsche careers first page using Selenium-rendered DOM (handles JS-rendered results)."""
-        jobs: List[Dict] = []
-        url = getattr(self.config, 'porsche_search_url', '')
-        if not url:
-            logger.warning("PORSCHE_SEARCH_URL not configured; skipping Porsche scrape")
-            return jobs
-        try:
-            logger.info("Scraping Porsche careers site")
-            driver = self.get_driver()
-            driver.get(url)
-
-            # Try to accept cookie banner if present to reveal results
-            try:
-                # Common buttons: "Akzeptieren", "Accept", or role=button with consent id
-                consent_btns = driver.find_elements(By.XPATH, "//button[contains(translate(., 'ACEPTKZIRN', 'aceptkzirn'), 'accept') or contains(., 'Akzeptieren') or contains(., 'Einverstanden')]")
-                if consent_btns:
-                    consent_btns[0].click()
-            except Exception:
-                pass
-
-            # Wait for anchors to job detail pages to appear
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a[href*='index.php?ac=jobad']"))
-                )
-            except Exception:
-                # Give it a brief extra chance
-                self._sleep_with_feedback(2.0, label="Waiting for Porsche results")
-
-            link_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='index.php?ac=jobad']")
-            existing_keys = self._get_existing_normalized_keys()
-            seen_keys: set = set()
-            skipped_unwanted = 0
-            skipped_existing = 0
-
-            def add_job(title: str, location_text: str, link: str):
-                nonlocal skipped_unwanted, skipped_existing
-                job_url = normalize_job_url(link or '', 'Porsche')
-                title = (title or '').strip()
-                if self._title_contains_unwanted_keywords(title):
-                    skipped_unwanted += 1
-                    return
-                key = self._build_normalized_key_from_fields('Porsche', title, 'Porsche', job_url)
-                if key in existing_keys or key in seen_keys:
-                    skipped_existing += 1
-                    return
-                seen_keys.add(key)
-                jobs.append({
-                    'title': title,
-                    'company': 'Porsche',
-                    'location': (location_text or '').strip() or 'Germany',
-                    'source': 'Porsche',
-                    'url': job_url,
-                    'salary': 'Not specified',
-                    'description': '',
-                    'scraped_at': pd.Timestamp.now(),
-                })
-
-            for a in link_elements[:50]:
-                try:
-                    href = a.get_attribute('href') or ''
-                    # Title: anchor text or nearest heading within same card
-                    title_text = (a.text or '').strip()
-                    if not title_text:
-                        try:
-                            title_el = a.find_element(By.XPATH, "./ancestor::*[self::li or self::div][1]//h2|./ancestor::*[self::li or self::div][1]//h3")
-                            title_text = title_el.text.strip()
-                        except Exception:
-                            title_text = ''
-                    # Location: try common classes near the anchor
-                    location_text = ''
-                    try:
-                        container = a.find_element(By.XPATH, "./ancestor::*[self::li or self::div][1]")
-                        try:
-                            loc_el = container.find_element(By.CSS_SELECTOR, ".job-location, .location, .job-offer__location")
-                            location_text = loc_el.text.strip()
-                        except Exception:
-                            location_text = ''
-                    except Exception:
-                        location_text = ''
-                    if href:
-                        add_job(title_text, location_text, href)
-                except Exception:
-                    continue
-
-            if skipped_unwanted or skipped_existing:
-                logger.info(f"Porsche pre-filtering skipped {skipped_unwanted} unwanted and {skipped_existing} existing/duplicate jobs")
-            logger.info(f"Scraped {len(jobs)} jobs from Porsche")
-        except Exception as e:
-            logger.error(f"Error scraping Porsche: {e}")
-        return jobs
     
     def scrape_linkedin(self, keywords: str, location: str) -> List[Dict]:
         """Scrape job postings from LinkedIn public listings with pagination and optional descriptions.
@@ -523,37 +368,6 @@ class JobScraper:
                 logger.error(f"LinkedIn request failed after retries: {last_exc}")
             return None
 
-        def extract_description(job_url: str) -> str:
-            if not job_url:
-                return ''
-            resp = fetch_with_retries(job_url, timeout=25)
-            if not resp:
-                return ''
-            try:
-                page = BeautifulSoup(resp.content, 'lxml')
-                # Common containers for description (structure may change)
-                # 1) Newer layout
-                desc = page.select_one('div.show-more-less-html__markup')
-                if desc:
-                    return desc.get_text(separator=' ', strip=True)
-                # 2) Legacy
-                desc = page.select_one('div.description__text')
-                if desc:
-                    return desc.get_text(separator=' ', strip=True)
-                # 3) JSON-LD fallback
-                ld = page.find('script', type='application/ld+json')
-                ld_str = getattr(ld, 'string', None) if ld else None
-                if ld_str:
-                    import json
-                    try:
-                        data = json.loads(ld_str)
-                        if isinstance(data, dict) and 'description' in data:
-                            return BeautifulSoup(data['description'], 'html.parser').get_text(separator=' ', strip=True)
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.debug(f"Description parse error: {e}")
-            return ''
 
         jobs: List[Dict] = []
         # Track normalized keys to dedup within this run
@@ -626,52 +440,9 @@ class JobScraper:
                 else:
                     time.sleep(self.config.request_delay + random.uniform(0.2, 0.8))
 
-            # Optionally fetch job descriptions with a bounded worker pool and early abort on 429
-            MAX_DESC_FETCH = int(getattr(self.config, 'linkedin_desc_max', 8))
-            WORKERS = int(getattr(self.config, 'linkedin_desc_workers', 0))
-            targets = [j for j in jobs if j.get('url')][:MAX_DESC_FETCH]
-            if targets and not hit_rate_limit:
-                if WORKERS and WORKERS > 1:
-                    logger.info(f"Fetching LinkedIn job descriptions for up to {len(targets)} jobs (workers={WORKERS})...")
-                    def task(j: Dict) -> Dict:
-                        if hit_rate_limit:
-                            return {'url': j['url'], 'desc': ''}
-                        d = extract_description(j['url'])
-                        return {'url': j['url'], 'desc': d}
-                    with ThreadPoolExecutor(max_workers=min(WORKERS, len(targets))) as ex:
-                        futures = {ex.submit(task, j): j for j in targets}
-                        for fut in as_completed(futures):
-                            res = fut.result()
-                            url = res.get('url', '')
-                            desc_v = res.get('desc', '') or ''
-                            for j in jobs:
-                                if j.get('url') == url:
-                                    j['description'] = desc_v
-                                    break
-                else:
-                    logger.info(f"Fetching LinkedIn job descriptions for up to {len(targets)} jobs (sequential)...")
-                    for j in targets:
-                        if hit_rate_limit:
-                            break
-                        try:
-                            desc = extract_description(j['url'])
-                        except Exception:
-                            desc = ''
-                        j['description'] = desc or ''
-                        if hit_rate_limit:
-                            logger.info("Detected rate limiting while fetching descriptions; stopping early.")
-                            break
-                        # gentle pacing between detail requests (quiet)
-                        if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
-                            self._sleep_quiet(1.0 + random.uniform(0.3, 0.9), prefix="desc")
-                        else:
-                            time.sleep(1.0 + random.uniform(0.3, 0.9))
-            elif hit_rate_limit:
-                logger.info("Skipping job description fetching due to detected rate limiting (429)")
-            # Jobs beyond target range: default empty description
+            # Default: do not fetch descriptions during scraping; set empty description field
             for j in jobs:
-                if 'description' not in j:
-                    j['description'] = ''
+                j['description'] = ''
 
             # Final compact summary
             logger.info(
@@ -872,29 +643,15 @@ class JobScraper:
         
         return unique_filtered_df
     
-    def scrape_all_sources(self, keywords: List[str], locations: List[str], *, limit_per_source: Optional[int] = None, skip_selenium: bool = False) -> pd.DataFrame:
+    def scrape_all_sources(self, keywords: List[str], locations: List[str], *, limit_per_source: Optional[int] = None) -> pd.DataFrame:
         """Scrape jobs from enabled sources.
         - limit_per_source: if provided, cap collected jobs per source for speed (after pre-filtering).
-        - skip_selenium: if true, skip Selenium-based sources like Porsche or Indeed dynamic flows.
         """
         all_jobs: List[Dict] = []
 
-        if not (self.config.enable_linkedin or getattr(self.config, 'enable_porsche', False)):
-            logger.warning("No sources enabled. Enable at least one of ENABLE_LINKEDIN or ENABLE_PORSCHE.")
+        if not self.config.enable_linkedin:
+            logger.warning("No sources enabled. Enable ENABLE_LINKEDIN.")
             return pd.DataFrame()
-
-        # Porsche: one-shot scrape using configured URL
-        if getattr(self.config, 'enable_porsche', False) and not skip_selenium:
-            logger.info("Starting Porsche one-shot scrape (no keyword/location iteration)")
-            try:
-                porsche_jobs = self.scrape_porsche()
-                if limit_per_source is not None and limit_per_source > 0:
-                    porsche_jobs = porsche_jobs[:limit_per_source]
-                all_jobs.extend(porsche_jobs)
-            except Exception as e:
-                logger.warning(f"Porsche scrape skipped due to error: {e}")
-        elif getattr(self.config, 'enable_porsche', False) and skip_selenium:
-            logger.info("Skipping Porsche due to skip_selenium=true")
 
         for keyword in keywords:
             for location in locations:
@@ -930,7 +687,7 @@ class JobScraper:
         return df
     
     def filter_unwanted_jobs(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Filter out jobs with unwanted keywords in the title"""
+        """Filter out jobs with unwanted keywords in the title and unwanted companies"""
         if df.empty:
             return df
             
@@ -938,6 +695,11 @@ class JobScraper:
         
         # Get unwanted keywords from configuration
         unwanted_keywords = self.config.get_unwanted_keywords_list()
+        unwanted_companies = []
+        try:
+            unwanted_companies = self.config.get_unwanted_companies_list()
+        except Exception:
+            unwanted_companies = []
 
         if unwanted_keywords:
             # Build a single regex pattern with word boundaries for all keywords
@@ -947,12 +709,20 @@ class JobScraper:
                 pattern = "|".join(escaped)
                 mask = ~df['title'].str.contains(pattern, case=False, na=False, regex=True)
                 df = df.loc[mask]
+
+        if unwanted_companies and 'company' in df.columns:
+            import re
+            terms = [re.escape(c) for c in unwanted_companies if c]
+            if terms:
+                patt = "|".join(terms)
+                mask = ~df['company'].astype(str).str.contains(patt, case=False, na=False, regex=True)
+                df = df.loc[mask]
         
         filtered_count = len(df)
         removed_count = original_count - filtered_count
         
         if removed_count > 0:
-            logger.info(f"Filtered out {removed_count} jobs containing unwanted keywords")
+            logger.info(f"Filtered out {removed_count} jobs by unwanted filters (keywords/companies)")
             
         return df
 

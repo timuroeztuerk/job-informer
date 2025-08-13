@@ -4,7 +4,7 @@ An automated job monitoring and notification system that scrapes job postings fr
 
 ## Features
 
-- **Multi-source Job Scraping**: Supports LinkedIn with 24-hour and full-time filtering
+- **LinkedIn Job Scraping**: Public listings with 24-hour and full-time filtering
 - **AI-Powered Market Analysis**: Generate comprehensive job market reports using Google Gemini
 - **Manual Job Search Execution**: Run job searches on-demand when you need them
 - **Smart Historical Data Management**: Track historical jobs with duplicate prevention
@@ -44,6 +44,7 @@ RECIPIENT_EMAIL=your_recipient@gmail.com
 SEARCH_KEYWORDS=Data Scientist,Software Engineer
 SEARCH_LOCATIONS=Stuttgart,Remote
 UNWANTED_KEYWORDS=internship,sales,freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester,manager
+UNWANTED_COMPANIES=amazon,recruiter gmbh,acme staffing
 
 # AI Analysis Configuration
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -77,6 +78,7 @@ python main.py --mode run-once
 - **`market-report`**: Generate and send AI-powered job market analysis report
 - **`db-summary`**: Show a summary of the database
 - **`migrate-csv`**: Migrate CSV files to the database
+- **`purge`**: Remove duplicates and jobs matching UNWANTED_KEYWORDS or UNWANTED_COMPANIES from the database
 
 ### Command Examples
 
@@ -149,7 +151,7 @@ job-informer/
 │   │   └── settings.py          # Configuration management
 │   ├── scrapers/
 │   │   ├── __init__.py
-│   │   └── job_scraper.py       # Web scraping logic
+│   │   └── job_scraper.py       # Web scraping logic (headline-only; descriptions via backfill)
 │   ├── scheduler/
 │   │   ├── __init__.py
 │   │   └── task_scheduler.py    # Task scheduling
@@ -184,6 +186,7 @@ job-informer/
 | `SEARCH_KEYWORDS` | Job keywords (comma-separated) | `Data` | No |
 | `SEARCH_LOCATIONS` | Search locations (comma-separated) | `Stuttgart` | No |
 | `UNWANTED_KEYWORDS` | Keywords to filter out (comma-separated) | `internship,sales,freelance...` | No |
+| `UNWANTED_COMPANIES` | Company names to filter out (comma-separated, case-insensitive substring match) | - | No |
 | `GEMINI_API_KEY` | Google Gemini API key for AI analysis | - | Yes (for AI features) |
 | `GEMINI_MODEL` | Gemini model to use | `gemini-2.0-flash-exp` | No |
 | `GEMINI_ANALYSIS_PROMPT` | Custom prompt for AI analysis | Default analysis prompt | No |

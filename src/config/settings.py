@@ -25,15 +25,13 @@ class Config:
     search_keywords: str
     search_locations: str
     unwanted_keywords: str
+    unwanted_companies: str
     
     # Scraping Configuration
     request_delay: float
     max_retries: int
     user_agent: str
-    porsche_search_url: str
     linkedin_max_pages: int
-    linkedin_desc_max: int
-    linkedin_desc_workers: int
     max_total_jobs: int
     min_new_jobs_to_continue: int
     quiet_progress: bool
@@ -61,7 +59,6 @@ class Config:
 
     # Feature Toggles
     enable_linkedin: bool
-    enable_porsche: bool
     dry_run: bool
     # Dry-run tuning
     dry_run_fast: bool
@@ -69,10 +66,8 @@ class Config:
     dry_run_locations_limit: int
     dry_run_pages: int
     dry_run_limit_per_source: int
-    dry_run_skip_selenium: bool
     dry_run_request_delay: float
     dry_run_max_retries: int
-    dry_run_desc_max: int
     auto_migrate_csv: bool
     
     @classmethod
@@ -98,18 +93,15 @@ class Config:
             # Job Search Configuration
             search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Science, Data Analysis, AI'),
             search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
-            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', ''),
+            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', 'Software Entwickler:in,Softwareingenieur,software engineer,solutions engineer,Gesundheitswissenschaftler,treasury,bioinformatiker,biologe,equity,retail,lehrkraft,cyber,creator,pwc,deloitte,auditor,phd,befristet,risk,compliance,public sector,microsoft,skillfinder,slurm,supplier,emat,praxis,operator,quality,medical,referent,last minute,assetmanagement,vermessungstechnikerin,powerbi,financial risk,vertriebssteuerung,ux designer,pricing,akademische/r,president,c++,devops,regulatory,assistent:in,projektkoordinator:in,cash,pay,sharepoint,teamlead,credit,sas,ontologien,photonics,convince,forensic,real estate,visual,opportunities,credit risk,life science,50%,produktmanager,produktbetreuer,kontakt-center,ce learning,kernel,think tank,aktuar,system,programmmanager,mathematiker,hr,gis,praktikant,geography,underwriter,controller,manager,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,developer,threat,mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,scientist,founding,client,nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,working student,frontend,backend,techniker,manager,planer,nebenberuflich,full stack,lead,dual,duales,studium,controlling,berater,abitur,praktikum,marketing,verkäufer,internship,sales,freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester'),
+            unwanted_companies=os.getenv('UNWANTED_COMPANIES', 'pwc,deloitte,nachhilfeunterricht'),
             
             # Scraping Configuration
             request_delay=float(os.getenv('REQUEST_DELAY', '3.0')),
             max_retries=int(os.getenv('MAX_RETRIES', '2')),
             # Default to a realistic desktop Chrome UA string
             user_agent=os.getenv('USER_AGENT', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'),
-            # Third-party sources
-            porsche_search_url=os.getenv('PORSCHE_SEARCH_URL', 'https://jobs.porsche.com/index.php?ac=search_result&search_criterion_keyword%5B%5D=Data&search_criterion_channel%5B%5D=12&search_criterion_entry_level%5B%5D=17&search_criterion_entry_level%5B%5D=12&search_criterion_working_hour%5B%5D=1&search_criterion_limitation%5B%5D=2&search_criterion_country%5B%5D=46'),
             linkedin_max_pages=int(os.getenv('LINKEDIN_MAX_PAGES', '3')),
-            linkedin_desc_max=int(os.getenv('LINKEDIN_DESC_MAX', '10')),
-            linkedin_desc_workers=int(os.getenv('LINKEDIN_DESC_WORKERS', '0')),
             max_total_jobs=int(os.getenv('MAX_TOTAL_JOBS', '0')),
             min_new_jobs_to_continue=int(os.getenv('MIN_NEW_JOBS_TO_CONTINUE', '1')),
             quiet_progress=_get_bool('QUIET_PROGRESS', 'true'),
@@ -164,17 +156,14 @@ class Config:
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
-            enable_porsche=_get_bool('ENABLE_PORSCHE', 'true'),
             dry_run=_get_bool('DRY_RUN', 'false'),
             dry_run_fast=_get_bool('DRY_RUN_FAST', 'true'),
             dry_run_keywords_limit=int(os.getenv('DRY_RUN_KEYWORDS_LIMIT', '1')),
             dry_run_locations_limit=int(os.getenv('DRY_RUN_LOCATIONS_LIMIT', '1')),
             dry_run_pages=int(os.getenv('DRY_RUN_PAGES', '1')),
             dry_run_limit_per_source=int(os.getenv('DRY_RUN_LIMIT_PER_SOURCE', '10')),
-            dry_run_skip_selenium=_get_bool('DRY_RUN_SKIP_SELENIUM', 'true'),
             dry_run_request_delay=float(os.getenv('DRY_RUN_REQUEST_DELAY', '0.2')),
             dry_run_max_retries=int(os.getenv('DRY_RUN_MAX_RETRIES', '1')),
-            dry_run_desc_max=int(os.getenv('DRY_RUN_DESC_MAX', '0')),
             auto_migrate_csv=_get_bool('AUTO_MIGRATE_CSV', 'false')
         )
     
@@ -232,6 +221,10 @@ class Config:
         """Get unwanted keywords as a list"""
         return [k.strip().lower() for k in self.unwanted_keywords.split(',') if k.strip()]
     
+    def get_unwanted_companies_list(self) -> list:
+        """Get unwanted companies as a list"""
+        return [c.strip().lower() for c in self.unwanted_companies.split(',') if c.strip()]
+    
     def to_dict(self) -> dict:
         """Convert configuration to dictionary"""
         return {
@@ -243,13 +236,11 @@ class Config:
             'search_keywords': self.search_keywords,
             'search_locations': self.search_locations,
             'unwanted_keywords': self.unwanted_keywords,
+            'unwanted_companies': self.unwanted_companies,
             'request_delay': self.request_delay,
             'max_retries': self.max_retries,
             'user_agent': self.user_agent,
-            'porsche_search_url': self.porsche_search_url,
             'linkedin_max_pages': self.linkedin_max_pages,
-            'linkedin_desc_max': self.linkedin_desc_max,
-            'linkedin_desc_workers': self.linkedin_desc_workers,
             'max_total_jobs': self.max_total_jobs,
             'min_new_jobs_to_continue': self.min_new_jobs_to_continue,
             'quiet_progress': self.quiet_progress,
@@ -267,16 +258,13 @@ class Config:
             'desc_parser_version': self.desc_parser_version,
             'desc_parser_dry_run': self.desc_parser_dry_run,
             'enable_linkedin': self.enable_linkedin,
-            'enable_porsche': self.enable_porsche,
             'dry_run': self.dry_run,
             'dry_run_fast': self.dry_run_fast,
             'dry_run_keywords_limit': self.dry_run_keywords_limit,
             'dry_run_locations_limit': self.dry_run_locations_limit,
             'dry_run_pages': self.dry_run_pages,
             'dry_run_limit_per_source': self.dry_run_limit_per_source,
-            'dry_run_skip_selenium': self.dry_run_skip_selenium,
             'dry_run_request_delay': self.dry_run_request_delay,
             'dry_run_max_retries': self.dry_run_max_retries,
-            'dry_run_desc_max': self.dry_run_desc_max,
             'auto_migrate_csv': self.auto_migrate_csv
         }

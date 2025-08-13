@@ -230,27 +230,25 @@ class TaskScheduler:
             original_request_delay = self.config.request_delay
             original_max_retries = self.config.max_retries
             original_linkedin_pages = getattr(self.config, 'linkedin_max_pages', 4)
-            original_linkedin_desc_max = getattr(self.config, 'linkedin_desc_max', 8)
 
             if getattr(self.config, 'dry_run_fast', True):
                 self.config.request_delay = min(self.config.request_delay, float(self.config.dry_run_request_delay))
                 self.config.max_retries = min(self.config.max_retries, int(self.config.dry_run_max_retries))
                 self.config.linkedin_max_pages = int(self.config.dry_run_pages)
-                self.config.linkedin_desc_max = int(self.config.dry_run_desc_max)
+                # description fetching disabled in main scraper; no desc limit needed
 
             # Execute scrape with caps and skip selenium if asked
             jobs_df = self.scraper.scrape_all_sources(
                 keywords,
                 locations,
                 limit_per_source=max(0, int(self.config.dry_run_limit_per_source)),
-                skip_selenium=bool(self.config.dry_run_skip_selenium),
             )
 
             # Restore config values
             self.config.request_delay = original_request_delay
             self.config.max_retries = original_max_retries
             self.config.linkedin_max_pages = original_linkedin_pages
-            self.config.linkedin_desc_max = original_linkedin_desc_max
+            # no description-related restoration needed
 
             # Print summary only, do not persist or email
             self._print_city_and_description_summary(jobs_df, title="Dry Run Summary")
@@ -471,11 +469,39 @@ class TaskScheduler:
             original_count = len(all_jobs_df)
             logger.info(f"Found {original_count} jobs in database")
 
-            # 1) Remove jobs matching current unwanted keywords
-            filtered_jobs_df = self.scraper.filter_unwanted_jobs(all_jobs_df.copy())
-            unwanted_mask = ~all_jobs_df.index.isin(filtered_jobs_df.index)
-            unwanted_jobs = all_jobs_df[unwanted_mask]
-            unwanted_ids = set(unwanted_jobs['job_id'].tolist())
+            # 1) Remove jobs matching unwanted keywords in TITLE only
+            import re as _re
+            unwanted_kw = self.config.get_unwanted_keywords_list()
+            if unwanted_kw and 'title' in all_jobs_df.columns:
+                escaped_kw = [rf"\b{_re.escape(k)}\b" for k in unwanted_kw if k]
+                if escaped_kw:
+                    patt_kw = "|".join(escaped_kw)
+                    mask_title_unwanted = all_jobs_df['title'].astype(str).str.contains(patt_kw, case=False, na=False, regex=True)
+                    unwanted_by_title = all_jobs_df[mask_title_unwanted]
+                else:
+                    unwanted_by_title = all_jobs_df.iloc[0:0]
+            else:
+                unwanted_by_title = all_jobs_df.iloc[0:0]
+
+            # Unwanted by company names (COMPANY only, case-insensitive substring)
+            unwanted_companies = self.config.get_unwanted_companies_list()
+            if unwanted_companies and 'company' in all_jobs_df.columns:
+                terms = [_re.escape(c) for c in unwanted_companies if c]
+                if terms:
+                    patt_co = "|".join(terms)
+                    mask_company_unwanted = all_jobs_df['company'].astype(str).str.contains(patt_co, case=False, na=False, regex=True)
+                    unwanted_by_company = all_jobs_df[mask_company_unwanted]
+                else:
+                    unwanted_by_company = all_jobs_df.iloc[0:0]
+            else:
+                unwanted_by_company = all_jobs_df.iloc[0:0]
+
+            # Combine unwanted ids
+            unwanted_ids = set()
+            if not unwanted_by_title.empty:
+                unwanted_ids.update(unwanted_by_title['job_id'].tolist())
+            if not unwanted_by_company.empty:
+                unwanted_ids.update(unwanted_by_company['job_id'].tolist())
 
             # 2) Remove duplicates: keep most recent per normalized (title, company, location, source)
             norm_df = all_jobs_df.copy()
@@ -535,7 +561,13 @@ class TaskScheduler:
 
             if len(to_delete_ids) > 0:
                 # Show examples
-                sample_display = pd.concat([unwanted_jobs, duplicate_jobs], ignore_index=True).head(3)
+                frames = []
+                if 'unwanted_by_title' in locals() and not unwanted_by_title.empty:
+                    frames.append(unwanted_by_title)
+                if 'unwanted_by_company' in locals() and not unwanted_by_company.empty:
+                    frames.append(unwanted_by_company)
+                frames.append(duplicate_jobs)
+                sample_display = pd.concat(frames, ignore_index=True).head(3)
                 if not sample_display.empty:
                     logger.info("Examples of removed jobs:")
                     for _, job in sample_display.iterrows():
