@@ -41,7 +41,7 @@ def main():
     
     parser.add_argument(
         '--mode',
-        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge', 'backfill-descriptions', 'parse-descriptions'],
+        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge', 'backfill-descriptions', 'parse-descriptions', 'reset-failed-descriptions'],
         default='run-once',
         help='Execution mode (default: run-once)'
     )
@@ -144,6 +144,8 @@ def main():
             backfill_descriptions(scheduler)
         elif args.mode == 'parse-descriptions':
             run_description_parser(scheduler)
+        elif args.mode == 'reset-failed-descriptions':
+            reset_failed_descriptions(scheduler)
         else:
             logger.error(f"Unsupported mode: {args.mode}")
             sys.exit(1)
@@ -362,6 +364,26 @@ def run_description_parser(scheduler: TaskScheduler):
     else:
         logger.error("=== Description Parsing Failed ===")
         sys.exit(1)
+
+
+def reset_failed_descriptions(scheduler: TaskScheduler):
+    """Reset jobs marked as failed description fetch to allow retrying"""
+    logger.info("=== Resetting Failed Description Fetches ===")
+    
+    # Check current failed count
+    failed_count = scheduler.scraper.db.get_failed_description_count()
+    if failed_count == 0:
+        logger.info("No jobs marked as failed description fetch found.")
+        return
+    
+    logger.info(f"Found {failed_count} jobs marked as failed description fetch")
+    
+    # Reset them
+    reset_count = scheduler.scraper.db.reset_failed_descriptions()
+    if reset_count > 0:
+        logger.success(f"Successfully reset {reset_count} jobs to allow retrying description fetch")
+    else:
+        logger.warning("No jobs were reset")
 
 
 if __name__ == "__main__":

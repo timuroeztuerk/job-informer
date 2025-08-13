@@ -469,11 +469,12 @@ class TaskScheduler:
             original_count = len(all_jobs_df)
             logger.info(f"Found {original_count} jobs in database")
 
-            # 1) Remove jobs matching unwanted keywords in TITLE only
+            # 1) Remove jobs matching unwanted keywords in TITLE only (substring, case-insensitive)
             import re as _re
             unwanted_kw = self.config.get_unwanted_keywords_list()
             if unwanted_kw and 'title' in all_jobs_df.columns:
-                escaped_kw = [rf"\b{_re.escape(k)}\b" for k in unwanted_kw if k]
+                # Escape each keyword for regex, but do NOT use word boundaries so partials match (e.g., 'game' -> 'Gameplay')
+                escaped_kw = [_re.escape(k) for k in unwanted_kw if k]
                 if escaped_kw:
                     patt_kw = "|".join(escaped_kw)
                     mask_title_unwanted = all_jobs_df['title'].astype(str).str.contains(patt_kw, case=False, na=False, regex=True)
@@ -582,53 +583,81 @@ class TaskScheduler:
     def backfill_missing_descriptions(self, batch_size: int = 50, max_batches: int = 10) -> bool:
         """Fetch and fill descriptions for jobs in DB missing descriptions.
         Processes up to (batch_size * max_batches) jobs with gentle pacing and rate-limit awareness.
+        Jobs that fail to fetch descriptions are marked to avoid retrying.
         """
         try:
             total_updated = 0
+            total_failed = 0
             batches_processed = 0
+            consecutive_empty_batches = 0
+            
             while batches_processed < max_batches:
                 self._log_wait(f"Querying DB for up to {batch_size} jobs missing descriptions")
-                to_fill = self.scraper.db.get_jobs_missing_descriptions(limit=batch_size)
+                to_fill = self.scraper.db.get_jobs_missing_descriptions(limit=batch_size, exclude_failed=True)
                 if to_fill.empty:
-                    logger.info("No jobs with missing descriptions found.")
-                    break
+                    consecutive_empty_batches += 1
+                    if consecutive_empty_batches >= 2:
+                        logger.info("No more jobs with missing descriptions found (2 consecutive empty batches).")
+                        break
+                    logger.info("No jobs with missing descriptions found in this batch.")
+                    time.sleep(1.0)  # Brief pause before checking again
+                    continue
+                else:
+                    consecutive_empty_batches = 0
 
                 logger.info(f"Backfill batch {batches_processed+1}: processing {len(to_fill)} jobs without descriptions")
 
                 updates = []
+                failed_job_ids = []
                 total_in_batch = int(len(to_fill))
                 completed_in_batch = 0
                 self._update_progress(0, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
+                
                 for _, row in to_fill.iterrows():
                     url = str(row.get('url') or '')
                     source = str(row.get('source') or '')
                     job_id = str(row.get('job_id'))
+                    
                     if not url:
+                        failed_job_ids.append(job_id)  # No URL to fetch from
                         completed_in_batch += 1
                         self._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
                         continue
+                        
                     desc = self.scraper.fetch_job_description(url, source)
-                    if desc:
+                    if desc and desc.strip():
                         updates.append({'job_id': job_id, 'description': desc})
+                    else:
+                        failed_job_ids.append(job_id)  # Failed to fetch or empty description
+                        
                     # gentle pacing between requests
                     time.sleep(max(0.5, self.config.request_delay))
                     completed_in_batch += 1
                     self._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
 
+                # Update successful descriptions
                 if updates:
                     updated = self.scraper.db.update_job_descriptions(updates)
                     total_updated += updated
-                    logger.info(f"Updated descriptions for {updated} jobs in this batch (total {total_updated})")
-                else:
-                    logger.info("No descriptions could be fetched in this batch")
+                    logger.info(f"Updated descriptions for {updated} jobs in this batch")
+
+                # Mark failed attempts to avoid retrying
+                if failed_job_ids:
+                    marked = self.scraper.db.mark_description_fetch_failed(failed_job_ids)
+                    total_failed += marked
+                    logger.info(f"Marked {marked} jobs as failed to avoid retrying")
+
+                if not updates and not failed_job_ids:
+                    logger.info("No descriptions could be fetched and no failures marked in this batch")
 
                 batches_processed += 1
 
                 # brief pause between batches with feedback
-                self._log_wait("Pausing between backfill batches")
-                time.sleep(2.0)
+                if batches_processed < max_batches:  # Don't pause after last batch
+                    self._log_wait("Pausing between backfill batches")
+                    time.sleep(2.0)
 
-            logger.success(f"Backfill complete. Total descriptions updated: {total_updated}")
+            logger.success(f"Backfill complete. Descriptions updated: {total_updated}, Failed/skipped: {total_failed}")
             return True
         except Exception as e:
             logger.error(f"Backfill error: {e}")

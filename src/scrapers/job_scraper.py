@@ -134,18 +134,28 @@ class JobScraper:
             return []
 
     def _title_contains_unwanted_keywords(self, title: str) -> bool:
-        """Fast check for unwanted keywords in a job title (case-insensitive, word boundaries)."""
+        """Fast check for unwanted keywords in a job title using substring matching (case-insensitive).
+        Example: 'student' will match 'Werkstudent', 'steuer' will match 'Steuerfach'."""
         if not title:
             return False
         unwanted = self._get_unwanted_keywords()
         if not unwanted:
             return False
-        import re
-        escaped = [rf"\b{re.escape(k)}\b" for k in unwanted if k]
-        if not escaped:
+        title_l = title.lower()
+        return any((k or '').lower() in title_l for k in unwanted if k)
+
+    def _company_is_unwanted(self, company: str) -> bool:
+        """Check if company name contains any unwanted company substring (case-insensitive)."""
+        if not company:
             return False
-        pattern = "|".join(escaped)
-        return re.search(pattern, title, re.IGNORECASE) is not None
+        try:
+            unwanted_companies = self.config.get_unwanted_companies_list()
+        except Exception:
+            return False
+        if not unwanted_companies:
+            return False
+        c_l = company.lower()
+        return any((c or '').lower() in c_l for c in unwanted_companies if c)
 
     def _build_normalized_key_from_fields(self, source: str, title: str, company: str, url: str) -> str:
         """Build the same normalized key used for cross-run de-duplication without DataFrame overhead."""
@@ -278,7 +288,7 @@ class JobScraper:
         - Paginates using the `start` parameter (25 results per page typical)
         - Optionally fetches job descriptions from detail pages (bounded concurrency)
         """
-        logger.info(f"Scraping LinkedIn for '{keywords}' in '{location}' (last 24 hours, full-time)")
+        logger.debug(f"Scraping LinkedIn for '{keywords}' in '{location}' (last 24 hours, full-time)")
 
         def build_search_url(start: int) -> str:
             # f_TPR=r86400: last 24h, f_JT=F: Full-time
@@ -396,7 +406,7 @@ class JobScraper:
                 new_jobs: List[Dict] = []
                 for j in page_jobs:
                     # Skip unwanted titles early
-                    if self._title_contains_unwanted_keywords(j.get('title', '')):
+                    if self._title_contains_unwanted_keywords(j.get('title', '')) or self._company_is_unwanted(j.get('company','')):
                         skipped_unwanted += 1
                         continue
 
@@ -417,7 +427,7 @@ class JobScraper:
                         prefix=f"LinkedIn {keywords} @ {location}",
                         current=page_index + 1,
                         total=max_pages,
-                        suffix=f"new:{len(jobs)} skipU:{skipped_unwanted} skipE:{skipped_existing}"
+                        suffix=f"New:{len(jobs)} Unwanted:{skipped_unwanted} Extisting:{skipped_existing}"
                     )
 
                 # Stop conditions:
@@ -445,7 +455,7 @@ class JobScraper:
                 j['description'] = ''
 
             # Final compact summary
-            logger.info(
+            logger.debug(
                 f"LinkedIn summary — new:{len(jobs)} skipU:{skipped_unwanted} skipE:{skipped_existing} pages:{min(max_pages, page_index+1)}"
             )
 
@@ -702,12 +712,12 @@ class JobScraper:
             unwanted_companies = []
 
         if unwanted_keywords:
-            # Build a single regex pattern with word boundaries for all keywords
+            # Substring matching (case-insensitive) for any unwanted keyword
             import re
-            escaped = [rf"\b{re.escape(k)}\b" for k in unwanted_keywords if k]
+            escaped = [re.escape(k) for k in unwanted_keywords if k]
             if escaped:
                 pattern = "|".join(escaped)
-                mask = ~df['title'].str.contains(pattern, case=False, na=False, regex=True)
+                mask = ~df['title'].astype(str).str.contains(pattern, case=False, na=False, regex=True)
                 df = df.loc[mask]
 
         if unwanted_companies and 'company' in df.columns:

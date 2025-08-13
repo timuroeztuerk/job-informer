@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Job Informer Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg:#0f1115; --panel:#1a1f27; --accent:#6366f1; --accent-soft:#818cf8; --text:#e5e7eb; --muted:#94a3b8; }
+    body { background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+    h1 { font-size:1.6rem; margin:0; font-weight:600; }
+    .wrap { max-width:1500px; margin:0 auto; padding:1.2rem 1.4rem 3rem; }
+    header { display:flex; flex-wrap:wrap; gap:.75rem; align-items:center; justify-content:space-between; margin-bottom:1.2rem; }
+    .filters { display:flex; flex-wrap:wrap; gap:.5rem; }
+    .filters input { background:#12161c; border:1px solid #2a313c; color:var(--text); padding:.45rem .6rem; border-radius:6px; font-size:.75rem; width:140px; }
+    .filters input:focus { outline:1px solid var(--accent-soft); }
+    button.primary { background:var(--accent); border:none; color:#fff; padding:.5rem .9rem; border-radius:6px; font-size:.7rem; letter-spacing:.5px; font-weight:600; } 
+    button.secondary { background:#232a33; border:1px solid #323c47; color:var(--muted); padding:.5rem .9rem; border-radius:6px; font-size:.7rem; }
+    button.primary:hover { background:var(--accent-soft); }
+    button.secondary:hover { color:var(--text); }
+    .grid-metrics { display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); margin-bottom:1rem; }
+    .metric { background:var(--panel); padding:.85rem .9rem; border-radius:10px; position:relative; overflow:hidden; }
+    .metric h3 { font-size:.65rem; text-transform:uppercase; letter-spacing:.08em; margin:0 0 .4rem; color:var(--muted); font-weight:600; }
+    .metric .val { font-size:1.4rem; font-weight:600; line-height:1; }
+    .metric small { font-size:.55rem; color:var(--muted); }
+    .badges { margin-top:.4rem; display:flex; flex-wrap:wrap; gap:.3rem; }
+    .badge-filter { background:#232a33; padding:.25rem .45rem; border-radius:4px; font-size:.55rem; color:var(--muted); }
+    #status { font-size:.55rem; color:var(--muted); margin-left:.6rem; }
+    .empty { text-align:center; font-size:.7rem; color:var(--muted); padding:1.2rem 0; }
+    footer { margin-top:2rem; text-align:center; font-size:.55rem; color:#334155; }
+    .carousel-shell { position:relative; display:flex; align-items:stretch; gap:.8rem; }
+    .chart-card { flex:1; background:var(--panel); border-radius:16px; padding:1rem 1rem 1.2rem; box-shadow:0 4px 14px -4px rgba(0,0,0,.4); min-height:500px; display:flex; flex-direction:column; }
+    #mainChart { width:100%!important; height:420px!important; }
+    .chart-header { display:flex; align-items:baseline; justify-content:space-between; gap:1rem; margin:0 0 .4rem; }
+    .chart-header h2 { font-size:.85rem; letter-spacing:.08em; text-transform:uppercase; margin:0; color:var(--muted); font-weight:600; }
+    .chart-meta { font-size:.55rem; color:#64748b; }
+    .nav-btn { background:#232a33; border:1px solid #323c47; color:#94a3b8; width:42px; min-width:42px; border-radius:12px; font-size:1.8rem; line-height:1; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:.15s; }
+    .nav-btn:hover { background:#2d3641; color:var(--text); }
+    .chart-dots { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.75rem; }
+    .chart-dot { background:#1f252d; border:1px solid #2d3641; color:#64748b; padding:.45rem .65rem; font-size:.55rem; border-radius:30px; cursor:pointer; letter-spacing:.06em; font-weight:600; transition:.15s; user-select:none; }
+    .chart-dot.active { background:var(--accent); border-color:var(--accent); color:#fff; box-shadow:0 0 0 1px rgba(255,255,255,.12), 0 4px 10px -4px var(--accent); }
+    .chart-dot:hover { color:var(--text); border-color:#3a4552; }
+    @media (max-width:900px){ .nav-btn { position:absolute; top:50%; transform:translateY(-50%); z-index:5; opacity:.85;} .nav-btn.prev{ left:.3rem;} .nav-btn.next{ right:.3rem;} .carousel-shell { gap:0; } .chart-card { padding: .9rem .85rem 1rem; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Job Informer <span style="color:var(--accent-soft);">Dashboard</span></h1>
+      <div class="filters" id="filters">
+        <input type="date" id="start_date" placeholder="Start" />
+        <input type="date" id="end_date" placeholder="End" />
+        <input type="text" id="keyword" placeholder="Title keyword" />
+        <input type="text" id="company" placeholder="Company" />
+        <input type="text" id="location" placeholder="Location" />
+        <button class="primary" id="apply">APPLY</button>
+        <button class="secondary" id="reset">RESET</button>
+      </div>
+    </header>
+    <div id="status">Loading…</div>
+    <div class="badges" id="activeFilters"></div>
+    
+    <section class="grid-metrics" id="metrics" style="display:none;">
+      <div class="metric"><h3>Total Jobs</h3><div class="val" id="m_total">0</div><small id="m_last"></small></div>
+      <div class="metric"><h3>Avg Salary</h3><div class="val" id="m_avg_salary">–</div><small id="m_salary_range"></small></div>
+      <div class="metric"><h3>Remote %</h3><div class="val" id="m_remote">–</div><small id="m_remote_base"></small></div>
+      <div class="metric"><h3>Top Lang</h3><div class="val" id="m_top_lang">–</div><small id="m_lang_count"></small></div>
+      <div class="metric"><h3>Top Tool</h3><div class="val" id="m_top_tool">–</div><small id="m_tool_count"></small></div>
+      <div class="metric"><h3>Top Skill</h3><div class="val" id="m_top_skill">–</div><small id="m_skill_count"></small></div>
+    </section>
+
+    <section id="chartCarousel" style="display:none; margin-top:1.2rem;">
+      <div class="carousel-shell">
+        <button class="nav-btn prev" id="btnPrev" aria-label="Previous chart">&#x2039;</button>
+        <div class="chart-card" id="chartCard">
+          <div class="chart-header">
+            <h2 id="chartTitle">Chart</h2>
+            <span id="chartMeta" class="chart-meta"></span>
+          </div>
+          <canvas id="mainChart"></canvas>
+        </div>
+        <button class="nav-btn next" id="btnNext" aria-label="Next chart">&#x203A;</button>
+      </div>
+      <div class="chart-dots" id="chartDots"></div>
+    </section>
+    
+    <div id="empty" class="empty" style="display:none;">No data for selected filters.</div>
+    <footer>© Job Informer</footer>
+  </div>
+
+  <script>
+    const charts = {};
+    const el = id => document.getElementById(id);
+    const fmt = n => n==null||isNaN(n)?'–': Intl.NumberFormat().format(Math.round(n));
+    const buildParams = () => {
+      const p = {}; ['start_date','end_date','keyword','company','location'].forEach(k=>{ const v=el(k).value.trim(); if(v) p[k]=v; });
+      return p;
+    };
+    const qs = o => Object.keys(o).length? '?' + Object.entries(o).map(([k,v])=>`${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&') : '';
+    let lastData = null;
+    let currentIndex = 0;
+    const chartDefs = [
+      { key:'tools', title:'Top Tools & Technologies', type:'bar-h', accessor:d=>limitObj(d.tools,20) },
+      { key:'programming_languages', title:'Top Programming Languages', type:'bar', accessor:d=>limitObj(d.programming_languages,20) },
+      { key:'seniority', title:'Seniority Distribution', type:'pie', accessor:d=>d.seniority },
+      { key:'employment_type', title:'Employment Types', type:'pie', accessor:d=>d.employment_type },
+      { key:'remote', title:'Remote / Hybrid', type:'pie', accessor:d=>d.remote },
+      { key:'jobs_per_day', title:'Jobs per Day (30d)', type:'line', accessor:d=>d.jobs_per_day, meta:'Time series' },
+      { key:'experience', title:'Experience (Years)', type:'bar', accessor:d=>(d.experience? d.experience.distribution:{}) },
+      { key:'skills', title:'Top Skills', type:'bar-h', accessor:d=>limitObj(d.skills,25) },
+      { key:'locations', title:'Top Locations', type:'bar-h', accessor:d=>limitObj(d.locations,25) }
+    ];
+    function limitObj(obj, n){ if(!obj) return {}; const entries = Object.entries(obj); return Object.fromEntries(entries.slice(0,n)); }
+
+    async function load() {
+      el('status').textContent = 'Loading…';
+      const params = buildParams();
+      let data;
+      try {
+        const r = await fetch('/api/stats'+qs(params));
+        data = await r.json();
+      } catch(e){ el('status').textContent = 'Error loading data'; return; }
+      if(data.error){ el('status').textContent = data.error; hideSections(); return; }
+      if(data.warning || (data.total_jobs||0)===0){ 
+        el('status').textContent = data.warning || 'No data'; 
+        hideSections(); 
+        showFilters(data.applied_filters||{}); 
+        el('empty').style.display = 'block'; 
+        return; 
+      }
+      lastData = data;
+      el('empty').style.display = 'none';
+      fillMetrics(data); 
+      showFilters(data.applied_filters||{});
+      buildDots();
+      renderCurrentChart();
+      el('metrics').style.display = 'grid'; 
+      el('chartCarousel').style.display = 'block'; 
+      el('status').textContent = `Loaded ${data.total_jobs} jobs`;
+    }
+
+    function hideSections(){ 
+      el('metrics').style.display = 'none'; 
+      el('chartCarousel').style.display = 'none'; 
+      el('empty').style.display = 'block'; 
+    }
+
+    function showFilters(f){ 
+      const c = el('activeFilters'); 
+      c.innerHTML = ''; 
+      const keys = Object.entries(f); 
+      if(!keys.length){ c.innerHTML = '<span class="badge-filter">No filters</span>'; return;} 
+      keys.forEach(([k,v])=>{ 
+        const b = document.createElement('span'); 
+        b.className = 'badge-filter'; 
+        b.textContent = `${k}: ${v}`; 
+        c.appendChild(b); 
+      }); 
+    }
+
+    function fillMetrics(d){
+      el('m_total').textContent = d.total_jobs;
+      el('m_last').textContent = d.last_updated? new Date(d.last_updated).toLocaleDateString():'';
+      if(d.salary && d.salary.avg){ 
+        el('m_avg_salary').textContent = fmt(d.salary.avg)+'€'; 
+        el('m_salary_range').textContent = d.salary.min? `${fmt(d.salary.min)}–${fmt(d.salary.max)}€` : ''; 
+      } else { 
+        el('m_avg_salary').textContent = '–'; 
+        el('m_salary_range').textContent = ''; 
+      }
+      const remote = d.remote||{}; 
+      const remoteBase = Object.values(remote).reduce((a,b)=>a+b,0); 
+      const remoteYes = (remote.yes||0)+(remote.hybrid||0); 
+      el('m_remote').textContent = remoteBase? Math.round(remoteYes/remoteBase*100)+'%':'–'; 
+      el('m_remote_base').textContent = remoteBase? remoteBase+' jobs':'';
+      const pl = d.programming_languages||{}; 
+      el('m_top_lang').textContent = Object.keys(pl)[0]||'–'; 
+      el('m_lang_count').textContent = Object.values(pl).length? Object.values(pl)[0]+' uses':'';
+      const tools = d.tools||{}; 
+      el('m_top_tool').textContent = Object.keys(tools)[0]||'–'; 
+      el('m_tool_count').textContent = Object.values(tools).length? Object.values(tools)[0]+' uses':'';
+      const skills = d.skills||{}; 
+      el('m_top_skill').textContent = Object.keys(skills)[0]||'–'; 
+      el('m_skill_count').textContent = Object.values(skills).length? Object.values(skills)[0]+' uses':'';
+    }
+
+    function renderCurrentChart(){ 
+      if(!lastData) return; 
+      const def = chartDefs[currentIndex]; 
+      const raw = def.accessor? def.accessor(lastData): (lastData[def.key]||{}); 
+      // Convert object to entries and sort descending by value for non-time-series charts
+      let entries = Object.entries(raw||{});
+      if(def.type !== 'line') {
+        entries.sort((a,b)=> b[1]-a[1]);
+      } else if(def.key === 'jobs_per_day') {
+        // Ensure chronological order for time series (keys are date strings)
+        entries.sort((a,b)=> new Date(a[0]) - new Date(b[0]));
+      }
+      const labels = entries.map(e=>e[0]);
+      const values = entries.map(e=>e[1]);
+      const title = def.title + (labels.length? '' : ' (empty)'); 
+      el('chartTitle').textContent = title; 
+      el('chartMeta').textContent = def.meta || `${labels.length} categories`; 
+      highlightDot(); 
+      const cfg = buildChartConfig(def, labels, values); 
+      upsertMain(cfg); 
+    }
+
+    function buildChartConfig(def, labels, values){ 
+      const common = { 
+        labels, 
+        datasets:[{ 
+          data:values, 
+          label:'', 
+          backgroundColor: palette(labels.length), 
+          borderColor: palette(labels.length), 
+          borderWidth: def.type === 'pie' ? 2 : 1.5, 
+          tension:.4, 
+          pointRadius: 4, 
+          pointHoverRadius: 6,
+          pointBackgroundColor: '#ffffff',
+          pointBorderWidth: 2,
+          borderSkipped: false
+        }]
+      }; 
+
+      if(def.type==='pie'){ 
+        return { 
+          type:'doughnut', 
+          data:common, 
+          options:{ 
+            responsive:true, 
+            maintainAspectRatio:false,
+            devicePixelRatio: window.devicePixelRatio || 2,
+            cutout:'50%',
+            radius: '85%',
+            plugins:{ 
+              legend:{ 
+                position:'bottom', 
+                labels:{ 
+                  color:'#94a3b8',
+                  font: { size: 11, weight: '500' },
+                  padding: 15,
+                  usePointStyle: true,
+                  pointStyle: 'circle'
+                }
+              }, 
+              tooltip:{ 
+                enabled:true,
+                backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                titleColor: '#e2e8f0',
+                bodyColor: '#cbd5e1',
+                borderColor: '#475569',
+                borderWidth: 1,
+                cornerRadius: 8,
+                displayColors: false,
+                titleFont: { size: 12, weight: '600' },
+                bodyFont: { size: 11, weight: '500' }
+              } 
+            },
+            animation: {
+              animateRotate: true,
+              animateScale: true,
+              duration: 1200,
+              easing: 'easeOutQuart'
+            },
+            hover: {
+              mode: 'nearest',
+              intersect: true
+            }
+          } 
+        }; 
+      } 
+      
+      if(def.type==='line'){ 
+        common.datasets[0].fill = {
+          target: 'origin',
+          above: 'rgba(255,179,71,.15)'
+        };
+        common.datasets[0].borderColor = '#ffb347'; 
+        common.datasets[0].backgroundColor = '#ffb347';
+        common.datasets[0].borderWidth = 3;
+        common.datasets[0].pointBorderColor = '#ffb347';
+        return { 
+          type:'line', 
+          data:common, 
+          options: {
+            ...axisOpts(),
+            elements: {
+              line: {
+                tension: 0.4,
+                borderJoinStyle: 'round'
+              },
+              point: {
+                hoverBorderWidth: 3
+              }
+            }
+          }
+        }; 
+      } 
+      
+      const horizontal = def.type==='bar-h';
+      // Enhanced gradient for bars
+      common.datasets[0].backgroundColor = horizontal ? 
+        ['#10b981', '#059669', '#047857', '#065f46', '#064e3b'] : 
+        ['#6366f1', '#4f46e5', '#4338ca', '#3730a3', '#312e81'];
+      
+      return { 
+        type:'bar', 
+        data:common, 
+        options: {
+          ...axisOpts(horizontal),
+          elements: {
+            bar: {
+              borderRadius: horizontal ? { topRight: 4, bottomRight: 4 } : { topLeft: 4, topRight: 4 },
+              borderSkipped: false
+            }
+          }
+        }
+      }; 
+    }
+
+    function axisOpts(horizontal=false){ 
+      return { 
+        responsive:true, 
+        maintainAspectRatio:false,
+        devicePixelRatio: window.devicePixelRatio || 2,
+        indexAxis: horizontal?'y':'x', 
+        scales:{ 
+          x:{ 
+            ticks:{ 
+              color:'#64748b', 
+              maxRotation: horizontal ? 0 : 45, 
+              autoSkip:true,
+              font: { size: 11, weight: '500' }
+            }, 
+            grid:{ 
+              color:'rgba(148,163,184,0.08)',
+              lineWidth: 1
+            },
+            border: { color: '#334155', width: 1 }
+          }, 
+          y:{ 
+            beginAtZero:true, 
+            ticks:{ 
+              color:'#64748b',
+              font: { size: 11, weight: '500' }
+            }, 
+            grid:{ 
+              color:'rgba(148,163,184,0.06)',
+              lineWidth: 1
+            },
+            border: { color: '#334155', width: 1 }
+          } 
+        }, 
+        plugins:{ 
+          legend:{ display:false }, 
+          tooltip:{ 
+            enabled:true,
+            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+            titleColor: '#e2e8f0',
+            bodyColor: '#cbd5e1',
+            borderColor: '#475569',
+            borderWidth: 1,
+            cornerRadius: 8,
+            displayColors: false,
+            titleFont: { size: 12, weight: '600' },
+            bodyFont: { size: 11, weight: '500' }
+          } 
+        }, 
+        animation:{ 
+          duration: horizontal ? 800 : 600, 
+          easing:'easeOutQuart',
+          delay: (context) => context.dataIndex * 50
+        },
+        interaction: {
+          intersect: false,
+          mode: 'index'
+        }
+      }; 
+    }
+
+    function upsertMain(cfg){ 
+      const id='mainChart'; 
+      const ctx = el(id).getContext('2d');
+      // Enable high-quality rendering
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      
+      if(charts[id]){ 
+        charts[id].config.type = cfg.type; 
+        charts[id].data = cfg.data; 
+        charts[id].options = cfg.options; 
+        charts[id].update('none'); // Disable animation for updates
+      } else { 
+        charts[id] = new Chart(ctx,cfg); 
+      } 
+    }
+
+    function buildDots(){ 
+      const wrap = el('chartDots'); 
+      wrap.innerHTML=''; 
+      chartDefs.forEach((d,i)=>{ 
+        const span=document.createElement('div'); 
+        span.className='chart-dot'; 
+        span.textContent = d.title; 
+        span.onclick=()=>{ currentIndex=i; renderCurrentChart(); }; 
+        wrap.appendChild(span); 
+      }); 
+    }
+
+    function highlightDot(){ 
+      const dots=[...document.querySelectorAll('.chart-dot')]; 
+      dots.forEach((d,i)=> d.classList.toggle('active', i===currentIndex)); 
+    }
+
+    function nextChart(){ 
+      currentIndex = (currentIndex+1) % chartDefs.length; 
+      renderCurrentChart(); 
+    }
+
+    function prevChart(){ 
+      currentIndex = (currentIndex-1+chartDefs.length) % chartDefs.length; 
+      renderCurrentChart(); 
+    }
+
+    function palette(n){ 
+      const base = ['#6366f1','#10b981','#f59e0b','#ef4444','#3b82f6','#8b5cf6','#14b8a6','#f472b6','#22c55e','#eab308','#0ea5e9','#fb7185','#475569','#0d9488','#4f46e5']; 
+      if(n<=base.length) return base.slice(0,n); 
+      const out=[]; 
+      for(let i=0;i<n;i++){ 
+        out.push(base[i%base.length]); 
+      } 
+      return out; 
+    }
+
+    el('btnNext').addEventListener('click', nextChart); 
+    el('btnPrev').addEventListener('click', prevChart);
+    window.addEventListener('keydown', e=>{ 
+      if(e.key==='ArrowRight') nextChart(); 
+      else if(e.key==='ArrowLeft') prevChart(); 
+    });
+    el('apply').addEventListener('click', ()=>{ currentIndex=0; load(); });
+    el('reset').addEventListener('click', ()=>{ 
+      ['start_date','end_date','keyword','company','location'].forEach(i=>el(i).value=''); 
+      currentIndex=0; 
+      load(); 
+    });
+    load();
+    setInterval(load, 5*60*1000);
+  </script>
+</body>
+</html>

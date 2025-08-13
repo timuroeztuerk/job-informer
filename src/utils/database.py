@@ -265,21 +265,74 @@ class JobDatabase:
     # ======================
     # Description backfilling
     # ======================
-    def get_jobs_missing_descriptions(self, limit: int = 100) -> pd.DataFrame:
-        """Return jobs that have empty or NULL description, newest first."""
+    def get_jobs_missing_descriptions(self, limit: int = 100, exclude_failed: bool = True) -> pd.DataFrame:
+        """Return jobs that have empty or NULL description, newest first.
+        If exclude_failed=True, skip jobs marked as failed (description = 'FETCH_FAILED')."""
         with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query(
-                """
-                SELECT job_id, url, source, title, company, scraped_at
-                FROM jobs
-                WHERE description IS NULL OR TRIM(description) = ''
-                ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
-                LIMIT ?
-                """,
-                conn,
-                params=[limit]
-            )
+            if exclude_failed:
+                df = pd.read_sql_query(
+                    """
+                    SELECT job_id, url, source, title, company, scraped_at
+                    FROM jobs
+                    WHERE (description IS NULL OR TRIM(description) = '')
+                    AND description != 'FETCH_FAILED'
+                    ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
+                    LIMIT ?
+                    """,
+                    conn,
+                    params=[limit]
+                )
+            else:
+                df = pd.read_sql_query(
+                    """
+                    SELECT job_id, url, source, title, company, scraped_at
+                    FROM jobs
+                    WHERE description IS NULL OR TRIM(description) = ''
+                    ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
+                    LIMIT ?
+                    """,
+                    conn,
+                    params=[limit]
+                )
         return df
+
+    def reset_failed_descriptions(self) -> int:
+        """Reset jobs marked as FETCH_FAILED back to empty string to allow retrying."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute("UPDATE jobs SET description = '' WHERE description = 'FETCH_FAILED'")
+                conn.commit()
+                count = cur.rowcount or 0
+                if count > 0:
+                    logger.info(f"Reset {count} jobs marked as failed back to empty for retrying")
+                return count
+            except Exception as e:
+                logger.error(f"Failed resetting failed descriptions: {e}")
+                return 0
+
+    def get_failed_description_count(self) -> int:
+        """Get count of jobs marked as FETCH_FAILED."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM jobs WHERE description = 'FETCH_FAILED'")
+            return cur.fetchone()[0] or 0
+
+    def mark_description_fetch_failed(self, job_ids: List[str]) -> int:
+        """Mark jobs as having failed description fetch to avoid retrying them."""
+        if not job_ids:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            try:
+                cur.executemany(
+                    "UPDATE jobs SET description = 'FETCH_FAILED' WHERE job_id = ?",
+                    [(job_id,) for job_id in job_ids]
+                )
+                conn.commit()
+                return cur.rowcount or 0
+            except Exception as e:
+                logger.error(f"Failed marking descriptions as failed: {e}")
+                return 0
 
     def update_job_descriptions(self, updates: List[Dict[str, str]]) -> int:
         """Batch update job descriptions. Each item: {'job_id': ..., 'description': ...}."""
