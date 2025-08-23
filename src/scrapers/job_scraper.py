@@ -1,28 +1,25 @@
 """
-Job Scraper Module
-Handles web scraping of job postings from various job sites
+Job Scraper Module - Currently only LinkedIn, which my experience says is enough for now.
 """
-
+import os
+import glob
+import time
+import random
 from typing import List, Dict, Optional
 import sys
 import requests
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-import time
 import pandas as pd
 from loguru import logger
-from ..config.settings import Config
-from ..utils.database import JobDatabase
-from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url
-import os
-import glob
 from pathlib import Path
 from urllib.parse import quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import random
+
+from ..config.settings import Config
+from ..utils.database import JobDatabase
+from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url
 
 
 class JobScraper:
@@ -32,8 +29,6 @@ class JobScraper:
         self.config = config
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': config.user_agent})
-        # Configure retries for robustness
-        # Avoid automatic 429 retries to reduce hammering on rate limits
         retries = Retry(
             total=self.config.max_retries,
             backoff_factor=1.2,
@@ -52,6 +47,7 @@ class JobScraper:
         self._wait_tick_seconds = 1.0
         self._last_progress_line = ""
 
+    # Have a look at this again. Nutella
     def _sleep_with_feedback(self, seconds: float, label: str = "waiting") -> None:
         """Sleep with periodic feedback logs so the user knows we're alive."""
         try:
@@ -105,7 +101,7 @@ class JobScraper:
             return
         # minimal spinner
         spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-        tick = 0.2
+        tick = 0.1
         elapsed = 0.0
         while elapsed < total:
             ch = spinner[int((elapsed / tick)) % len(spinner)]
@@ -133,9 +129,8 @@ class JobScraper:
         except Exception:
             return []
 
-    def _title_contains_unwanted_keywords(self, title: str) -> bool:
-        """Fast check for unwanted keywords in a job title using substring matching (case-insensitive).
-        Example: 'student' will match 'Werkstudent', 'steuer' will match 'Steuerfach'."""
+    def purge_keywords(self, title: str) -> bool:
+        """Fast check for unwanted keywords in a job title using substring matching (case-insensitive). Example: 'student' will match 'Werkstudent', 'steuer' will match 'Steuerfach'."""
         if not title:
             return False
         unwanted = self._get_unwanted_keywords()
@@ -144,7 +139,7 @@ class JobScraper:
         title_l = title.lower()
         return any((k or '').lower() in title_l for k in unwanted if k)
 
-    def _company_is_unwanted(self, company: str) -> bool:
+    def purge_companies(self, company: str) -> bool:
         """Check if company name contains any unwanted company substring (case-insensitive)."""
         if not company:
             return False
@@ -291,9 +286,6 @@ class JobScraper:
         logger.debug(f"Scraping LinkedIn for '{keywords}' in '{location}' (last 24 hours, full-time)")
 
         def build_search_url(start: int) -> str:
-            # f_TPR=r86400: last 24h, f_JT=F: Full-time
-            # start: pagination offset (multiples of 25)
-            # Keep URL minimal to reduce server-side quirks with paging.
             return (
                 "https://www.linkedin.com/jobs/search/?"
                 f"keywords={quote_plus(keywords)}"
@@ -378,87 +370,54 @@ class JobScraper:
                 logger.error(f"LinkedIn request failed after retries: {last_exc}")
             return None
 
-
         jobs: List[Dict] = []
-        # Track normalized keys to dedup within this run
         seen_keys: set = set()
-        # Load existing DB keys once to avoid fetching detail pages for known jobs
         existing_keys = self._get_existing_normalized_keys()
         skipped_existing = 0
         skipped_unwanted = 0
-        max_pages = int(getattr(self.config, 'linkedin_max_pages', 4))
-        page_size = 25
 
         try:
-            no_progress_pages = 0
-            page_index = 0  # Initialize page_index to ensure it is always defined
-            for page_index in range(max_pages):
-                start = page_index * page_size
-                url = build_search_url(start)
-                logger.debug(f"LinkedIn search URL (page {page_index+1}): {url}")
-                resp = fetch_with_retries(url)
-                if not resp:
-                    break
+            start = 0
+            url = build_search_url(start)
+            resp = fetch_with_retries(url)
+            if not resp:
+                page_jobs: List[Dict] = []
+            else:
                 soup = BeautifulSoup(resp.content, 'lxml')
                 page_jobs = parse_cards(soup)
 
-                # Pre-filter and de-dup within the same run; also skip known DB jobs
-                new_jobs: List[Dict] = []
-                for j in page_jobs:
-                    # Skip unwanted titles early
-                    if self._title_contains_unwanted_keywords(j.get('title', '')) or self._company_is_unwanted(j.get('company','')):
-                        skipped_unwanted += 1
-                        continue
+            # Pre-filter and de-dup within the same run; also skip known DB jobs
+            new_jobs: List[Dict] = []
+            for j in page_jobs:
+            # Skip unwanted titles early
+                if self.purge_keywords(j.get('title', '')) or self.purge_companies(j.get('company', '')):
+                    skipped_unwanted += 1
+                    continue
+                key = self._build_normalized_key_from_fields(
+                    j.get('source', 'LinkedIn'), j.get('title', ''), j.get('company', ''), j.get('url', '')
+                )
+                if not key:
+                    continue
+                if key in existing_keys or key in seen_keys:
+                    skipped_existing += 1
+                    continue
+                seen_keys.add(key)
+                new_jobs.append(j)
 
-                    key = self._build_normalized_key_from_fields(
-                        j.get('source', 'LinkedIn'), j.get('title', ''), j.get('company', ''), j.get('url', '')
-                    )
-                    if not key:
-                        continue
-                    if key in existing_keys or key in seen_keys:
-                        skipped_existing += 1
-                        continue
-                    seen_keys.add(key)
-                    new_jobs.append(j)
-                jobs.extend(new_jobs)
-                # compact progress update per page
-                if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
-                    self._print_progress(
-                        prefix=f"LinkedIn {keywords} @ {location}",
-                        current=page_index + 1,
-                        total=max_pages,
-                        suffix=f"New:{len(jobs)} Unwanted:{skipped_unwanted} Extisting:{skipped_existing}"
-                    )
+            jobs.extend(new_jobs)
 
-                # Stop conditions:
-                # 1) No cards parsed → end reached or layout changed
-                if not page_jobs:
-                    logger.debug("No job cards found on this page; stopping pagination")
-                    break
-                # 2) No new unique jobs added for two consecutive pages → likely repeating results
-                if len(new_jobs) == 0:
-                    no_progress_pages += 1
-                    if no_progress_pages >= 2:
-                        logger.debug("No new jobs across two consecutive pages; stopping pagination")
-                        break
-                else:
-                    no_progress_pages = 0
-
-                # Polite delay with jitter (compact)
-                if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
-                    self._sleep_quiet(self.config.request_delay + random.uniform(0.2, 0.8), prefix="pause")
-                else:
-                    time.sleep(self.config.request_delay + random.uniform(0.2, 0.8))
+            # Progress for a single page
+            if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
+                self._print_progress(
+                    prefix=f"LinkedIn {keywords} @ {location}",
+                    current=1,
+                    total=1,
+                    suffix=f"New:{len(jobs)} Unwanted:{skipped_unwanted} Existing:{skipped_existing}"
+                )
 
             # Default: do not fetch descriptions during scraping; set empty description field
             for j in jobs:
                 j['description'] = ''
-
-            # Final compact summary
-            logger.debug(
-                f"LinkedIn summary — new:{len(jobs)} skipU:{skipped_unwanted} skipE:{skipped_existing} pages:{min(max_pages, page_index+1)}"
-            )
-
         except Exception as e:
             logger.error(f"Error scraping LinkedIn: {e}")
 
@@ -686,7 +645,6 @@ class JobScraper:
             df['job_id'] = self._build_job_ids_vectorized(df)
             df = df.drop_duplicates(subset=['job_id'], keep='first')
             logger.info(f"Current run found {len(df)} unique jobs after filtering")
-            
             # Remove jobs that were found in previous runs
             df = self.remove_historical_duplicates(df)
             

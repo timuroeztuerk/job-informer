@@ -4,9 +4,9 @@ Job Informer - Main Application Entry Point
 Automated job posting monitoring and notification system
 """
 
+import os
 import argparse
 import sys
-import os
 import json
 from pathlib import Path
 import pandas as pd
@@ -17,8 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from src.config.settings import Config
 from src.utils.logging_utils import setup_logging
 from src.scrapers.job_scraper import JobScraper
-from src.scheduler.task_scheduler import TaskScheduler
-from src.email_notifier.email_sender import EmailSender
+from src.utils.utilities import Utilities
 from src.ai_job_purger.ai_purger import AIPurger
 from loguru import logger
 
@@ -34,19 +33,20 @@ def main():
     """Main application entry point"""
     parser = argparse.ArgumentParser(description="Job Informer - Automated job monitoring system")
     
-    # Add command line arguments
     parser.add_argument(
         '--config',
         type=str,
         help='Path to .env configuration file (default: .env)'
     )
-    
-    parser.add_argument(
-        '--mode',
-        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge', 'ai-purge', 'ai-purge-test', 'backfill-descriptions', 'parse-descriptions', 'reset-failed-descriptions', 'cleanup-orphaned-descriptions'],
-        default='run-once',
-        help='Execution mode (default: run-once)'
-    )
+    # Execution modes: choose one flag; defaults to run-once if none provided
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--run-once', dest='run_once', action='store_true', help='Run job search once')
+    group.add_argument('--test', action='store_true', help='Run combined tests')
+    group.add_argument('--db-summary', dest='db_summary', action='store_true', help='Show database summary')
+    group.add_argument('--purge', action='store_true', help='Purge unwanted jobs')
+    group.add_argument('--ai-purge', dest='ai_purge', action='store_true', help='Run AI-powered job purging')
+    group.add_argument('--get-descriptions', dest='get_descriptions', action='store_true', help='Backfill missing job descriptions')
+    group.add_argument('--parse-descriptions', dest='parse_descriptions', action='store_true', help='Parse job descriptions with AI')
     
     parser.add_argument(
         '--keywords',
@@ -60,224 +60,152 @@ def main():
         help='Search locations (comma-separated)'
     )
 
-    parser.add_argument(
-        '--web',
-        type=str,
-        help='Sources to scrape (comma-separated): linkedin,porsche. If omitted, uses .env toggles'
-    )
-    
-    parser.add_argument(
-        '--schedule-time',
-        type=str,
-        help='Daily schedule time (HH:MM format)'
-    )
-    
     args = parser.parse_args()
+    # Default to run-once if no mode flag is set
+    if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.get_descriptions, args.parse_descriptions]):
+        args.run_once = True
+    # Determine selected mode string for config validation and logging
+    if args.run_once:
+        mode_str = 'run-once'
+    elif args.test:
+        mode_str = 'test'
+    elif args.db_summary:
+        mode_str = 'db-summary'
+    elif args.purge:
+        mode_str = 'purge'
+    elif args.ai_purge:
+        mode_str = 'ai-purge'
+    elif args.get_descriptions:
+        mode_str = 'get-descriptions'
+    elif args.parse_descriptions:
+        mode_str = 'parse-descriptions'
+    else:
+        mode_str = 'run-once'
     
     try:
         # Load configuration
         config = Config.from_env(args.config)
-        
         # Override config with command line arguments if provided
         if args.keywords:
             config.search_keywords = args.keywords
         if args.locations:
             config.search_locations = args.locations
-        # Sources selection: only override when --web is provided; otherwise respect .env
-        if args.web:
-            selected_sources = [s.strip().lower() for s in args.web.split(',') if s.strip()]
-            config.enable_linkedin = ('linkedin' in selected_sources)
-            try:
-                config.enable_porsche = ('porsche' in selected_sources)
-            except Exception:
-                pass
-        if args.schedule_time:
-            config.schedule_time = args.schedule_time
-        
         # Validate configuration for the selected mode
-        config.validate_for_mode(args.mode)
-        
+        config.validate_for_mode(mode_str)
         # Setup logging
         setup_logging(config.log_level, config.log_file)
-        
-        logger.info(f"Mode: {args.mode}")
-        
-        # Create data directory
+        logger.info(f"Mode: {mode_str}")
         create_data_directory()
         
-        # Execute based on mode
-        scheduler = TaskScheduler(config)
-
-        # Optional automatic CSV migration when enabled via env flag
-        try:
-            if getattr(config, 'auto_migrate_csv', False):
-                logger.info("AUTO_MIGRATE_CSV is enabled — migrating CSV files to database before running mode")
-                migrate_csv_files(scheduler)
-        except Exception as e:
-            logger.warning(f"Automatic CSV migration skipped due to error: {e}")
-        
-        if args.mode == 'run-once':
-            run_job_search_once(scheduler)
-        elif args.mode == 'test':
-            run_all_tests(scheduler)
+        if args.run_once:
+            run_job_search_once(Utilities(config))
+        elif args.test:
+            run_all_tests(Utilities(config))
             # If DRY_RUN is enabled, chain a fast dry-run to preview scraping without side effects
             try:
-                if scheduler.config.dry_run:
+                if Utilities(config).config.dry_run:
                     from loguru import logger as _logger
                     _logger.info("DRY_RUN=true detected — executing fast dry run after tests")
-                    scheduler.run_dry_run()
+                    Utilities(config).run_dry_run()
             except Exception as _e:
                 logger.warning(f"Fast dry run skipped due to error: {_e}")
-        elif args.mode == 'summary':
-            run_latest_summary(scheduler)
-        elif args.mode == 'market-report':
-            generate_market_report(scheduler)
-        elif args.mode == 'db-summary':
-            show_database_summary(scheduler)
-        elif args.mode == 'migrate-csv':
-            migrate_csv_files(scheduler)
-        elif args.mode == 'purge':
-            purge_unwanted_jobs(scheduler)
-        elif args.mode == 'ai-purge':
-            run_ai_purge_mode(scheduler)
-        elif args.mode == 'ai-purge-test':
-            run_ai_purge_test_mode(scheduler)
-        elif args.mode == 'backfill-descriptions':
-            backfill_descriptions(scheduler)
-        elif args.mode == 'parse-descriptions':
-            run_description_parser(scheduler)
-        elif args.mode == 'reset-failed-descriptions':
-            reset_failed_descriptions(scheduler)
-        elif args.mode == 'cleanup-orphaned-descriptions':
-            cleanup_orphaned_descriptions(scheduler)
+        elif args.db_summary:
+            show_database_summary(Utilities(config))
+        elif args.purge:
+            purge_unwanted_jobs(Utilities(config))
+        elif args.ai_purge:
+            run_ai_purge_mode(Utilities(config))
+        elif args.get_descriptions:
+            get_descriptions(Utilities(config))
+        elif args.parse_descriptions:
+            run_description_parser(Utilities(config))
         else:
-            logger.error(f"Unsupported mode: {args.mode}")
+            logger.error(f"Unsupported mode: {mode_str}")
             sys.exit(1)
             
     except Exception as e:
         logger.error(f"Application error: {e}")
         sys.exit(1)
 
-def test_email_configuration(scheduler: TaskScheduler):
-    """Test email configuration"""
-    logger.info("=== Testing Email Configuration ===")
-    
-    success = scheduler.test_email_connection()
-    
-    if success:
-        logger.success("Email test successful! Check your inbox.")
-    else:
-        logger.error("Email test failed. Please check your configuration.")
-        sys.exit(1)
-
-def run_job_search_once(scheduler: TaskScheduler):
+def run_job_search_once(utils: Utilities):
     """Run job search once and send results"""
     logger.info("=== Starting Job Search ===")
     
     # Show search configuration
-    summary = scheduler.get_search_summary()
+    summary = utils.get_search_summary()
     logger.info(f"Keywords: {', '.join(summary['keywords'])}")
     logger.info(f"Locations: {', '.join(summary['locations'])}")
     logger.info(f"Email configured: {summary['email_configured']}")
     
     # Execute the search
-    success = scheduler.execute_job_search()
+    success = utils.execute_job_search()
     
     if success:
         logger.success("=== Job Search Completed Successfully ===")
     else:
         logger.warning("=== Job Search Completed (No results found) ===")
 
-def run_quick_test(scheduler: TaskScheduler):
-    """Run quick functionality test"""
-    logger.info("=== Running Quick Test ===")
-    
-    success = scheduler.run_quick_test()
-    
-    if success:
-        logger.success("=== All Tests Passed ===")
-    else:
-        logger.error("=== Some Tests Failed ===")
-        sys.exit(1)
-
-def run_all_tests(scheduler: TaskScheduler):
+def run_all_tests(utils: Utilities):
     """Run combined tests: config/email test, scraper init, and AI connection"""
-    logger.info("=== Running Combined Tests ===")
     overall_success = True
     
-    # Quick test includes config validation, email test, and scraper init
-    if not scheduler.run_quick_test():
+    try:
+        utils.config.validate()
+        logger.success("Configuration validation passed")
+        try:
+            success = utils.email_sender.send_test_email()
+            if success:
+                logger.success("Email test successful! Check your inbox.")
+            else:
+                logger.error("Email test failed!")
+                overall_success = False
+        except Exception as e:
+            logger.error(f"Email test error: {e}")
+            overall_success = False
+        if utils.scraper:
+            logger.success("Scraper initialized successfully")
+        else:
+            logger.error("Scraper initialization failed")
+            overall_success = False
+        
+        # Test LLM connection (if API key is configured)
+        try:
+            if hasattr(utils.config, 'gemini_api_key') and utils.config.gemini_api_key:
+                # Initialize AI Purger with test mode enabled
+                ai_purger = AIPurger(utils.config, test_mode=True)
+                # Test LLM connection
+                if ai_purger.llm_connection():
+                    logger.success("LLM connection successful")
+                else:
+                    logger.error("AI LLM connection failed")
+                    overall_success = False
+            else:
+                logger.info("AI LLM test skipped (no API key configured)")
+        except Exception as e:
+            logger.error(f"AI LLM test error: {e}")
+            logger.warning("AI LLM test failed, but continuing with other tests")
+        
+        # Final result
+        if overall_success:
+            logger.success("All tests passed!")
+        else:
+            logger.error("Some tests failed")
+            
+    except Exception as e:
+        logger.error(f"Test failed: {e}")
         overall_success = False
-    
-    # AI connection test
-    if not scheduler.test_ai_connection():
-        overall_success = False
-    
-    if overall_success:
-        logger.success("=== All Tests Passed ===")
-    else:
-        logger.error("=== Tests Failed ===")
-        sys.exit(1)
 
-def run_full_summary(scheduler: TaskScheduler):
-    """Generate and send full summary report"""
-    logger.info("=== Generating Full Summary ===")
-    
-    success = scheduler.generate_full_summary()
-    
-    if success:
-        logger.success("=== Full Summary Sent Successfully ===")
-    else:
-        logger.error("=== Full Summary Failed ===")
-        sys.exit(1)
-
-def run_latest_summary(scheduler: TaskScheduler):
-    """Generate and send latest summary report"""
-    logger.info("=== Generating Latest Summary ===")
-    
-    success = scheduler.generate_latest_summary()
-    
-    if success:
-        logger.success("=== Latest Summary Sent Successfully ===")
-    else:
-        logger.error("=== Latest Summary Failed ===")
-        sys.exit(1)
-
-def generate_market_report(scheduler: TaskScheduler):
-    """Generate and send AI-powered market analysis report"""
-    logger.info("=== Generating AI Market Report ===")
-    
-    success = scheduler.generate_market_report()
-    
-    if success:
-        logger.success("=== AI Market Report Sent Successfully ===")
-    else:
-        logger.error("=== AI Market Report Generation Failed ===")
-        sys.exit(1)
-
-def test_ai_connection(scheduler: TaskScheduler):
-    """Test AI (Gemini) API connection"""
-    logger.info("=== Testing AI Connection ===")
-    
-    success = scheduler.test_ai_connection()
-    
-    if success:
-        logger.success("=== AI Connection Test Passed ===")
-    else:
-        logger.error("=== AI Connection Test Failed ===")
-        sys.exit(1)
-
-def show_database_summary(scheduler: TaskScheduler):
+def show_database_summary(utils: Utilities):
     """Show database summary statistics"""
     logger.info("=== Database Summary ===")
-    summary = scheduler.scraper.db.get_job_summary()
+    summary = utils.scraper.db.get_job_summary()
     print(f"\n📊 Job Database Summary:")
     print(f"Total jobs: {summary['total_jobs']:,}")
     print(f"Recent jobs (7 days): {summary['recent_jobs_7_days']:,}")
     print(f"Date range: {summary['date_range']['earliest']} to {summary['date_range']['latest']}")
     # Add parsed description analytics
     try:
-        with scheduler.scraper.db._get_connection() as conn:
+        with utils.scraper.db._get_connection() as conn:
             # Get parsed descriptions with the latest version for each job
             parsed_df = pd.read_sql_query("""
                 SELECT p.job_id, p.payload_json, p.version
@@ -454,14 +382,14 @@ def show_database_summary(scheduler: TaskScheduler):
                         print(f"  Average salary: €{avg_salary:,.0f}")
                         print(f"  Range: €{min_salary:,.0f} - €{max_salary:,.0f}")
             else:
-                print(f"\n🧠 No parsed descriptions found - run 'python main.py --mode parse-descriptions' first")
+                print(f"\n🧠 No parsed descriptions found - run 'python main.py --parse-descriptions' first")
                 
     except Exception as e:
         logger.warning(f"Could not compute parsed descriptions analytics: {e}")
     
     # City/description coverage breakdown
     try:
-        with scheduler.scraper.db._get_connection() as conn:
+        with utils.scraper.db._get_connection() as conn:
             all_jobs_df = pd.read_sql_query("SELECT location, description FROM jobs", conn)
         
         if all_jobs_df is None or all_jobs_df.empty:
@@ -478,29 +406,10 @@ def show_database_summary(scheduler: TaskScheduler):
     except Exception as e:
         logger.warning(f"Could not compute city summary: {e}")
 
-def migrate_csv_files(scheduler: TaskScheduler):
-    """Migrate existing CSV files to SQLite database"""
-    logger.info("=== Migrating CSV Files to Database ===")
-    
-    data_dir = Path("data")
-    csv_files = list(data_dir.glob("jobs_*.csv"))
-    
-    if not csv_files:
-        logger.warning("No CSV files found to migrate")
-        return
-    
-    total_migrated = 0
-    for csv_file in csv_files:
-        logger.info(f"Migrating {csv_file.name}...")
-        migrated = scheduler.scraper.db.migrate_csv_to_sqlite(str(csv_file))
-        total_migrated += migrated
-    
-    logger.success(f"Migration complete: {total_migrated} total jobs migrated")
-
-def purge_unwanted_jobs(scheduler: TaskScheduler):
+def purge_unwanted_jobs(utils: Utilities):
     """Purge unwanted jobs from the database based on current filters"""
     logger.info("=== Purging Unwanted Jobs from Database ===")
-    success = scheduler.purge_unwanted_jobs()
+    success = utils.purge_unwanted_jobs()
     
     if success:
         logger.success("=== Database Purge Completed Successfully ===")
@@ -508,13 +417,13 @@ def purge_unwanted_jobs(scheduler: TaskScheduler):
         logger.error("=== Database Purge Failed ===")
         sys.exit(1)
 
-def run_ai_purge_mode(scheduler: TaskScheduler):
+def run_ai_purge_mode(utils: Utilities):
     """Run AI-powered job purging using LLM analysis"""
     logger.info("=== Starting AI-Powered Job Purging ===")
     
     try:
         # Initialize AI Purger
-        ai_purger = AIPurger(scheduler.config)
+        ai_purger = AIPurger(utils.config)
         
         # Test LLM connection first
         if not ai_purger.llm_connection():
@@ -542,113 +451,25 @@ def run_ai_purge_mode(scheduler: TaskScheduler):
         logger.error(f"AI purge mode failed: {e}")
         sys.exit(1)
 
-def run_ai_purge_test_mode(scheduler: TaskScheduler):
-    """Run AI-powered job purging in test mode (first batch only, no actual purging)"""
-    logger.info("=== Starting AI-Powered Job Purging (TEST MODE) ===")
-    
-    try:
-        # Initialize AI Purger with test mode enabled
-        ai_purger = AIPurger(scheduler.config, test_mode=True)
-        
-        # Test LLM connection first
-        if not ai_purger.llm_connection():
-            logger.error("Failed to connect to LLM - aborting AI purge test")
-            sys.exit(1)
-        
-        # Run the AI purge process in test mode
-        summary = ai_purger.run_purge_mode()
-        
-        # Log summary
-        logger.info(f"AI Purge Test Summary:")
-        logger.info(f"  - Mode: TEST MODE (first batch only)")
-        logger.info(f"  - Jobs analyzed: {summary['jobs_analyzed']}")
-        logger.info(f"  - Batches processed: {summary.get('batches_processed', 0)}")
-        logger.info(f"  - Jobs marked for purging: {summary['jobs_to_purge']}")
-        logger.info(f"  - Jobs actually purged: {summary['jobs_purged']} (0 in test mode)")
-        
-        if summary['success']:
-            logger.success("=== AI-Powered Purge Test Completed Successfully ===")
-            logger.info("=== Review the jobs listed above before running in production mode ===")
-        else:
-            error_msg = summary.get('error', 'Unknown error')
-            logger.error(f"=== AI-Powered Purge Test Failed: {error_msg} ===")
-            sys.exit(1)
-            
-    except Exception as e:
-        logger.error(f"AI purge test mode failed: {e}")
-        sys.exit(1)
-
-def backfill_descriptions(scheduler: TaskScheduler):
+def get_descriptions(utils: Utilities):
     """Backfill missing job descriptions in the database"""
     logger.info("=== Backfilling Missing Job Descriptions ===")
-    success = scheduler.backfill_missing_descriptions()
+    success = utils.backfill_missing_descriptions()
     if success:
         logger.success("=== Backfill Completed Successfully ===")
     else:
         logger.error("=== Backfill Failed ===")
         sys.exit(1)
 
-def run_description_parser(scheduler: TaskScheduler):
+def run_description_parser(utils: Utilities):
     """Run incremental description parsing using LLM with caching"""
     logger.info("=== Parsing Descriptions (Incremental) ===")
-    success = scheduler.run_description_parser()
+    success = utils.run_description_parser()
     if success:
         logger.success("=== Description Parsing Completed ===")
     else:
         logger.error("=== Description Parsing Failed ===")
         sys.exit(1)
-
-def reset_failed_descriptions(scheduler: TaskScheduler):
-    """Reset jobs marked as failed description fetch to allow retrying"""
-    logger.info("=== Resetting Failed Description Fetches ===")
-    
-    # Check current failed count
-    failed_count = scheduler.scraper.db.get_failed_description_count()
-    if failed_count == 0:
-        logger.info("No jobs marked as failed description fetch found.")
-        return
-    
-    logger.info(f"Found {failed_count} jobs marked as failed description fetch")
-    
-    # Reset them
-    reset_count = scheduler.scraper.db.reset_failed_descriptions()
-    if reset_count > 0:
-        logger.success(f"Successfully reset {reset_count} jobs to allow retrying description fetch")
-    else:
-        logger.warning("No jobs were reset")
-
-def cleanup_orphaned_descriptions(scheduler: TaskScheduler):
-    """Clean up orphaned parsed descriptions that have no corresponding job"""
-    logger.info("=== Cleaning Up Orphaned Parsed Descriptions ===")
-    
-    # Get current stats before cleanup
-    summary = scheduler.scraper.db.get_job_summary()
-    stats = summary.get('parsed_descriptions_stats', {})
-    
-    orphaned_count = stats.get('orphaned_parsed_descriptions', 0)
-    if orphaned_count == 0:
-        logger.info("No orphaned parsed descriptions found.")
-        return
-    
-    logger.info(f"Found {orphaned_count} orphaned parsed descriptions")
-    
-    # Perform cleanup
-    cleaned_count = scheduler.scraper.db.cleanup_orphaned_parsed_descriptions()
-    
-    if cleaned_count > 0:
-        logger.success(f"Successfully cleaned up {cleaned_count} orphaned parsed descriptions")
-        
-        # Show updated stats
-        updated_summary = scheduler.scraper.db.get_job_summary()
-        updated_stats = updated_summary.get('parsed_descriptions_stats', {})
-        
-        print(f"\nUpdated Statistics:")
-        print(f"  Total jobs: {updated_summary['total_jobs']:,}")
-        print(f"  Jobs with parsed descriptions: {updated_stats.get('jobs_with_descriptions', 0):,}")
-        print(f"  Total parsed description entries: {updated_stats.get('total_parsed_descriptions', 0):,}")
-        print(f"  Orphaned descriptions remaining: {updated_stats.get('orphaned_parsed_descriptions', 0):,}")
-    else:
-        logger.warning("No orphaned descriptions were cleaned up")
 
 if __name__ == "__main__":
     main()

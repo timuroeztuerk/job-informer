@@ -2,12 +2,10 @@
 Logging Utilities
 Setup and configuration for application logging
 """
-
 import os
 import sys
 from loguru import logger
 from typing import Optional
-
 
 def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> None:
     """Setup logging configuration"""

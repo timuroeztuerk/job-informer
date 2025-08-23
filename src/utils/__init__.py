@@ -8,6 +8,7 @@ from .data_utils import (
     generate_job_summary,
     export_jobs_to_formats
 )
+from .utilities import Utilities
 
 __all__ = [
     "setup_logging",
@@ -18,5 +19,6 @@ __all__ = [
     "filter_jobs_by_location",
     "add_relevance_score",
     "generate_job_summary",
-    "export_jobs_to_formats"
+    "export_jobs_to_formats",
+    "Utilities"
 ]
