@@ -47,3 +47,4 @@ logs/
 screenshots/
 *.log
 agentic-changes/
+.github/
