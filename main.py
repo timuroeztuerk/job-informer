@@ -18,6 +18,7 @@ from src.utils.logging_utils import setup_logging
 from src.scrapers.job_scraper import JobScraper
 from src.scheduler.task_scheduler import TaskScheduler
 from src.email_notifier.email_sender import EmailSender
+from src.ai_job_purger.ai_purger import AIPurger
 from loguru import logger
 
 
@@ -41,7 +42,7 @@ def main():
     
     parser.add_argument(
         '--mode',
-        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge', 'backfill-descriptions', 'parse-descriptions', 'reset-failed-descriptions'],
+        choices=['run-once', 'test', 'summary', 'market-report', 'schedule', 'db-summary', 'migrate-csv', 'purge', 'ai-purge', 'ai-purge-test', 'backfill-descriptions', 'parse-descriptions', 'reset-failed-descriptions'],
         default='run-once',
         help='Execution mode (default: run-once)'
     )
@@ -140,6 +141,10 @@ def main():
             migrate_csv_files(scheduler)
         elif args.mode == 'purge':
             purge_unwanted_jobs(scheduler)
+        elif args.mode == 'ai-purge':
+            run_ai_purge_mode(scheduler)
+        elif args.mode == 'ai-purge-test':
+            run_ai_purge_test_mode(scheduler)
         elif args.mode == 'backfill-descriptions':
             backfill_descriptions(scheduler)
         elif args.mode == 'parse-descriptions':
@@ -341,6 +346,78 @@ def purge_unwanted_jobs(scheduler: TaskScheduler):
         logger.success("=== Database Purge Completed Successfully ===")
     else:
         logger.error("=== Database Purge Failed ===")
+        sys.exit(1)
+
+
+def run_ai_purge_mode(scheduler: TaskScheduler):
+    """Run AI-powered job purging using LLM analysis"""
+    logger.info("=== Starting AI-Powered Job Purging ===")
+    
+    try:
+        # Initialize AI Purger
+        ai_purger = AIPurger(scheduler.config)
+        
+        # Test LLM connection first
+        if not ai_purger.llm_connection():
+            logger.error("Failed to connect to LLM - aborting AI purge")
+            sys.exit(1)
+        
+        # Run the AI purge process
+        summary = ai_purger.run_purge_mode()
+        
+        # Log summary
+        logger.info(f"AI Purge Summary:")
+        logger.info(f"  - Jobs analyzed: {summary['jobs_analyzed']}")
+        logger.info(f"  - Batches processed: {summary.get('batches_processed', 0)}")
+        logger.info(f"  - Jobs marked for purging: {summary['jobs_to_purge']}")
+        logger.info(f"  - Jobs actually purged: {summary['jobs_purged']}")
+        
+        if summary['success']:
+            logger.success("=== AI-Powered Purge Completed Successfully ===")
+        else:
+            error_msg = summary.get('error', 'Unknown error')
+            logger.error(f"=== AI-Powered Purge Failed: {error_msg} ===")
+            sys.exit(1)
+            
+    except Exception as e:
+        logger.error(f"AI purge mode failed: {e}")
+        sys.exit(1)
+
+
+def run_ai_purge_test_mode(scheduler: TaskScheduler):
+    """Run AI-powered job purging in test mode (first batch only, no actual purging)"""
+    logger.info("=== Starting AI-Powered Job Purging (TEST MODE) ===")
+    
+    try:
+        # Initialize AI Purger with test mode enabled
+        ai_purger = AIPurger(scheduler.config, test_mode=True)
+        
+        # Test LLM connection first
+        if not ai_purger.llm_connection():
+            logger.error("Failed to connect to LLM - aborting AI purge test")
+            sys.exit(1)
+        
+        # Run the AI purge process in test mode
+        summary = ai_purger.run_purge_mode()
+        
+        # Log summary
+        logger.info(f"AI Purge Test Summary:")
+        logger.info(f"  - Mode: TEST MODE (first batch only)")
+        logger.info(f"  - Jobs analyzed: {summary['jobs_analyzed']}")
+        logger.info(f"  - Batches processed: {summary.get('batches_processed', 0)}")
+        logger.info(f"  - Jobs marked for purging: {summary['jobs_to_purge']}")
+        logger.info(f"  - Jobs actually purged: {summary['jobs_purged']} (0 in test mode)")
+        
+        if summary['success']:
+            logger.success("=== AI-Powered Purge Test Completed Successfully ===")
+            logger.info("=== Review the jobs listed above before running in production mode ===")
+        else:
+            error_msg = summary.get('error', 'Unknown error')
+            logger.error(f"=== AI-Powered Purge Test Failed: {error_msg} ===")
+            sys.exit(1)
+            
+    except Exception as e:
+        logger.error(f"AI purge test mode failed: {e}")
         sys.exit(1)
 
 

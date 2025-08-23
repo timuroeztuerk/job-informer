@@ -182,7 +182,7 @@ class Config:
             'run-once', 'test', 'summary', 'market-report', 'schedule'
         }
         # Modes that require Gemini
-        gemini_required_modes = {'market-report', 'test', 'parse-descriptions'}
+        gemini_required_modes = {'market-report', 'test', 'parse-descriptions', 'ai-purge', 'ai-purge-test'}
 
         if mode in email_required_modes:
             if not self.email_address:

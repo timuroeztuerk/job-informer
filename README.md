@@ -76,3 +76,50 @@ Contributions are welcome! Please fork the repository, create a feature branch, 
 ## License
 
 This project is licensed under the MIT License.
+
+---
+
+## AI-Purger Mode
+
+**Added: August 23, 2025**
+
+The AI-Purger mode is an advanced feature that uses Large Language Models (LLMs) to intelligently identify and remove unwanted job postings from the database. This complements the existing keyword-based filtering with AI-powered analysis.
+
+### Features
+- **Batch Processing**: Processes jobs in batches of 50 for efficiency and API rate limiting
+- **Smart Analysis**: Uses Google Gemini AI to analyze job titles, companies, and other data
+- **Safety Mechanisms**: Built-in safeguards prevent accidental mass deletion
+- **Progress Tracking**: Detailed logging of batch processing progress
+
+### Usage
+```bash
+# Run AI-powered job purging
+python main.py --mode ai-purge
+```
+
+### Configuration
+- Requires `GEMINI_API_KEY` in your `.env` file
+- PURGE_AI prompt can be configured in `src/ai_job_purger/ai_purger.py`
+- Currently uses empty prompt for safety (returns 0 jobs to purge)
+
+### Example Output
+```
+=== Starting AI-Powered Job Purging ===
+Will process 1170 jobs in 24 batches of 50
+Processing batch 1/24 (50 jobs)
+Batch 1 identified 2 jobs for purging
+...
+AI Purge Summary:
+  - Jobs analyzed: 1170
+  - Batches processed: 24
+  - Jobs marked for purging: 45
+  - Jobs actually purged: 45
+```
+
+### Safety Features
+- Empty prompt protection (won't purge if prompt is empty)
+- 50% safety limit (won't purge more than half of all jobs)
+- Batch validation (ensures returned job IDs exist in the batch)
+- LLM connection testing before processing
+
+For detailed documentation, see `AI_PURGER_DOCS.md`.
