@@ -39,7 +39,7 @@ class DescriptionParser:
         self.db = db or JobDatabase()
         self._ensure_table()
         # API setup (Gemini-compatible default)
-        self.model = getattr(self.config, 'desc_parser_model', getattr(self.config, 'gemini_model', 'gemini-2.5-flash'))
+        self.model = getattr(self.config, 'desc_parser_model', getattr(self.config, 'GEMINI_MODEL', 'gemini-2.5-flash-lite'))
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         self.headers = {'Content-Type': 'application/json'}
         self.prompt = getattr(self.config, 'desc_parser_prompt', '')
@@ -190,84 +190,82 @@ class DescriptionParser:
         return new_count
 
     def run_incremental(self, batch_size: int, max_batches: int) -> int:
-        """Find jobs with descriptions and without cached parse, scanning with OFFSET to avoid stopping at cached windows.
+        """Find jobs with descriptions and without cached parse.
         Caps total new parses to (batch_size * max_batches).
         """
         total_new = 0
-        total_seen = 0
-        total_skipped_cached = 0
         version = int(getattr(self.config, 'desc_parser_version', 1))
-        window_size = max(1, batch_size * 5)  # scan a larger window to find uncached items
         max_new = batch_size * max_batches
-        offset = 0
-
+        
         with sqlite3.connect(self.db.db_path) as conn:
-            for window_index in range(max_batches):
-                # Pull a window of jobs with non-empty descriptions
-                df = pd.read_sql_query(
-                    """
-                    SELECT job_id, description
-                    FROM jobs
-                    WHERE description IS NOT NULL AND TRIM(description) <> ''
-                    ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    conn,
-                    params=[window_size, offset],
-                )
-                if df.empty:
-                    break
-                df['desc_hash'] = df['description'].astype(str).apply(self._hash_description)
-
-                # Load existing cache keys for these job_ids at this version
-                keys = tuple(set(df['job_id'].astype(str).tolist()))
-                if not keys:
-                    offset += window_size
-                    continue
-                placeholder = ",".join(["?"] * len(keys))
-                cache_df = pd.read_sql_query(
-                    f"SELECT job_id, desc_hash FROM parsed_descriptions WHERE version = ? AND job_id IN ({placeholder})",
-                    conn,
-                    params=[version, *keys],
-                )
-                cache_set = set((str(r['job_id']), str(r['desc_hash'])) for _, r in cache_df.iterrows()) if not cache_df.empty else set()
-
-                mask = [
-                    (str(r['job_id']), str(r['desc_hash'])) not in cache_set for _, r in df.iterrows()
-                ]
-                candidates = df[mask]
-                batch_seen = int(len(df))
-                batch_to_process = int(len(candidates))
-                batch_cached = batch_seen - batch_to_process
-                total_seen += batch_seen
-                total_skipped_cached += batch_cached
-
-                if candidates.empty:
-                    logger.info("Description parser: cache hit for all candidates in this window; advancing to next window")
-                    offset += window_size
-                    continue
-
-                # Respect cap on total new parses this run
-                remaining_quota = max(0, max_new - total_new)
-                if remaining_quota <= 0:
-                    break
-
-                # Process up to the allowed quota; drop helper column
-                to_parse = candidates.head(min(batch_size, remaining_quota)).drop(columns=['desc_hash'])
-                processed = self.parse_batch(to_parse)
+            # Get all jobs with descriptions that haven't been parsed at this version
+            # We'll compute the hash in Python since it's more reliable
+            all_jobs_df = pd.read_sql_query(
+                """
+                SELECT job_id, description
+                FROM jobs
+                WHERE description IS NOT NULL AND TRIM(description) <> ''
+                ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
+                """,
+                conn
+            )
+            
+            if all_jobs_df.empty:
+                logger.info("Description parser summary — no jobs with descriptions found")
+                return 0
+            
+            # Add description hash column
+            all_jobs_df['desc_hash'] = all_jobs_df['description'].astype(str).apply(self._hash_description)
+            
+            # Get existing parsed records for this version
+            existing_df = pd.read_sql_query(
+                "SELECT job_id, desc_hash FROM parsed_descriptions WHERE version = ?",
+                conn,
+                params=[version]
+            )
+            
+            # Create a set of (job_id, desc_hash) tuples for O(1) lookup
+            existing_set = set()
+            if not existing_df.empty:
+                existing_set = set(zip(existing_df['job_id'].astype(str), existing_df['desc_hash'].astype(str)))
+            
+            # Filter out already parsed jobs
+            mask = [
+                (str(row['job_id']), str(row['desc_hash'])) not in existing_set 
+                for _, row in all_jobs_df.iterrows()
+            ]
+            unparsed_df = all_jobs_df[mask].copy()
+            
+            if unparsed_df.empty:
+                logger.info("Description parser summary — all descriptions already parsed at this version")
+                return 0
+            
+            # Limit to max_new items
+            to_process_df = unparsed_df.head(max_new)
+            total_jobs_to_process = len(to_process_df)
+            
+            logger.info(f"Description parser: found {total_jobs_to_process} unparsed descriptions (version {version})")
+            
+            # Process in batches
+            for batch_start in range(0, total_jobs_to_process, batch_size):
+                batch_end = min(batch_start + batch_size, total_jobs_to_process)
+                batch_df = to_process_df.iloc[batch_start:batch_end].copy()
+                
+                # Remove desc_hash column before processing (parse_batch doesn't expect it)
+                batch_for_processing = batch_df.drop(columns=['desc_hash'])
+                
+                # Process this batch
+                processed = self.parse_batch(batch_for_processing)
                 total_new += processed
+                
+                batch_num = batch_start // batch_size + 1
+                total_batches = (total_jobs_to_process + batch_size - 1) // batch_size
+                logger.info(f"Description parser: processed batch {batch_num}/{total_batches}, parsed {processed}/{len(batch_df)} items")
 
-                # Move to next window
-                offset += window_size
-
-                # Stop early if we reached the quota
-                if total_new >= max_new:
-                    break
-
-        if total_seen > 0:
+        if total_new > 0:
             logger.info(
-                f"Description parser summary — scanned:{total_seen} cached_skipped:{total_skipped_cached} stored_new:{total_new} version:{version}"
+                f"Description parser summary — total_jobs:{len(all_jobs_df)} already_parsed:{len(all_jobs_df) - len(unparsed_df)} stored_new:{total_new} version:{version}"
             )
         else:
-            logger.info("Description parser summary — no rows with descriptions found")
+            logger.info("Description parser summary — no new descriptions parsed")
         return total_new

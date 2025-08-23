@@ -1,12 +1,10 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-import hashlib
 import json
 import sqlite3
 from datetime import datetime
 from loguru import logger
 import requests
-import pandas as pd
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
@@ -31,16 +29,10 @@ class AIPurger:
         self.db = JobDatabase()
         self.parser = DescriptionParser(config=self.config,db=self.db)
         self.parser._ensure_table()
-        
-        # LLM API setup (using same Gemini configuration as existing modules)
         self.model = getattr(self.config, 'gemini_model', 'gemini-2.5-pro')
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         self.headers = {'Content-Type': 'application/json'}
-        
-        # Batch processing configuration
         self.batch_size = 50
-        
-        # Placeholder for the PURGE_AI prompt (empty for now as requested)
         self.purge_prompt = """
         You are an AI job filter. Analyze the provided job listings and identify jobs that should be purged.
         
@@ -425,4 +417,3 @@ class AIPurger:
         except Exception as e:
             logger.error(f"LLM connection test error: {e}")
             return False
-        

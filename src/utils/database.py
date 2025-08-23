@@ -215,6 +215,38 @@ class JobDatabase:
             cursor.execute("SELECT MIN(scraped_at), MAX(scraped_at) FROM jobs")
             date_range = cursor.fetchone()
             
+            # Parsed descriptions statistics
+            parsed_descriptions_stats = {}
+            try:
+                # Check if parsed_descriptions table exists
+                cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='parsed_descriptions'")
+                if cursor.fetchone()[0] > 0:
+                    # Total parsed descriptions
+                    cursor.execute("SELECT COUNT(*) FROM parsed_descriptions")
+                    total_parsed = cursor.fetchone()[0]
+                    
+                    # Unique jobs with parsed descriptions
+                    cursor.execute("SELECT COUNT(DISTINCT job_id) FROM parsed_descriptions")
+                    unique_jobs_parsed = cursor.fetchone()[0]
+                    
+                    # Orphaned parsed descriptions (job_id not in jobs table)
+                    cursor.execute("""
+                        SELECT COUNT(DISTINCT pd.job_id) 
+                        FROM parsed_descriptions pd 
+                        LEFT JOIN jobs j ON pd.job_id = j.job_id 
+                        WHERE j.job_id IS NULL
+                    """)
+                    orphaned_parsed = cursor.fetchone()[0]
+                    
+                    parsed_descriptions_stats = {
+                        'total_parsed_descriptions': total_parsed,
+                        'unique_jobs_with_parsed_descriptions': unique_jobs_parsed,
+                        'orphaned_parsed_descriptions': orphaned_parsed,
+                        'jobs_with_descriptions': unique_jobs_parsed - orphaned_parsed
+                    }
+            except Exception as e:
+                logger.warning(f"Could not get parsed descriptions stats: {e}")
+            
         return {
             'total_jobs': total_jobs,
             'jobs_by_source': jobs_by_source,
@@ -223,8 +255,51 @@ class JobDatabase:
             'date_range': {
                 'earliest': date_range[0] if date_range[0] else None,
                 'latest': date_range[1] if date_range[1] else None
-            }
+            },
+            'parsed_descriptions_stats': parsed_descriptions_stats
         }
+    
+    def cleanup_orphaned_parsed_descriptions(self) -> int:
+        """Remove orphaned parsed descriptions (descriptions for jobs that no longer exist)
+        Returns the number of orphaned descriptions removed."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Check if parsed_descriptions table exists
+                cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='parsed_descriptions'")
+                if cursor.fetchone()[0] == 0:
+                    logger.info("No parsed_descriptions table found")
+                    return 0
+                
+                # Count orphaned descriptions before cleanup
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM parsed_descriptions pd 
+                    LEFT JOIN jobs j ON pd.job_id = j.job_id 
+                    WHERE j.job_id IS NULL
+                """)
+                orphaned_count = cursor.fetchone()[0]
+                
+                if orphaned_count == 0:
+                    logger.info("No orphaned parsed descriptions found")
+                    return 0
+                
+                # Delete orphaned descriptions
+                cursor.execute("""
+                    DELETE FROM parsed_descriptions 
+                    WHERE job_id NOT IN (SELECT job_id FROM jobs)
+                """)
+                
+                deleted_count = cursor.rowcount
+                conn.commit()
+                
+                logger.info(f"Cleaned up {deleted_count} orphaned parsed descriptions")
+                return deleted_count
+                
+        except Exception as e:
+            logger.error(f"Failed to cleanup orphaned parsed descriptions: {e}")
+            return 0
     
     def migrate_csv_to_sqlite(self, csv_file: str) -> int:
         """Migrate jobs from CSV file to SQLite database"""

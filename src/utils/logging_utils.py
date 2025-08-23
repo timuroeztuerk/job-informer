@@ -38,9 +38,6 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> No
             retention="30 days",  # Keep logs for 30 days
             compression="zip"  # Compress old logs
         )
-    
-    logger.info("Logging setup completed")
-
 
 def get_logger(name: str):
     """Get logger instance for a specific module"""
