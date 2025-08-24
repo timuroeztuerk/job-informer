@@ -19,12 +19,19 @@ from requests.adapters import HTTPAdapter
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
-from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url
-
+from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url, remove_historical_duplicates, filter_unwanted_jobs
+from ..utils.terminal_utils import _sleep_with_feedback, _print_progress, _progress_bar, _sleep_quiet
 
 class JobScraper:
     """Base class for job scraping functionality"""
-    
+    _sleep_with_feedback = _sleep_with_feedback
+    _print_progress = _print_progress
+    _progress_bar = _progress_bar
+    _sleep_quiet = _sleep_quiet
+    build_normalized_keys = build_normalized_keys
+    remove_historical_duplicates = remove_historical_duplicates
+    filter_unwanted_jobs = filter_unwanted_jobs
+
     def __init__(self, config: Config):
         self.config = config
         self.session = requests.Session()
@@ -47,93 +54,11 @@ class JobScraper:
         self._wait_tick_seconds = 1.0
         self._last_progress_line = ""
 
-    # Have a look at this again. Nutella
-    def _sleep_with_feedback(self, seconds: float, label: str = "waiting") -> None:
-        """Sleep with periodic feedback logs so the user knows we're alive."""
-        try:
-            total = max(0.0, float(seconds))
-        except Exception:
-            total = 0.0
-        if total <= 0:
-            return
-        tick = max(0.25, float(getattr(self, '_wait_tick_seconds', 1.0)))
-        remaining = total
-        logger.info(f"{label} — sleeping {total:.1f}s")
-        while remaining > 0:
-            step = min(tick, remaining)
-            time.sleep(step)
-            remaining -= step
-            if remaining > 0:
-                logger.info(f"{label} — {remaining:.1f}s remaining")
-
-    def _progress_bar(self, current: int, total: int, width: int = 24) -> str:
-        try:
-            total = max(1, int(total))
-            current = max(0, min(int(current), total))
-            filled = int(width * current / total)
-            return '█' * filled + '-' * (width - filled)
-        except Exception:
-            return '-' * width
-
-    def _print_progress(self, prefix: str, current: int, total: int, suffix: str = "") -> None:
-        try:
-            bar = self._progress_bar(current, total)
-            line = f"\r{prefix} [{bar}] {current}/{total} {suffix}".rstrip()
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            # store last line to restore after pauses
-            try:
-                self._last_progress_line = line
-            except Exception:
-                pass
-            if current >= total:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-        except Exception:
-            pass
-
-    def _sleep_quiet(self, seconds: float, prefix: str = "pause") -> None:
-        try:
-            total = max(0.0, float(seconds))
-        except Exception:
-            total = 0.0
-        if total <= 0:
-            return
-        # minimal spinner
-        spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-        tick = 0.1
-        elapsed = 0.0
-        while elapsed < total:
-            ch = spinner[int((elapsed / tick)) % len(spinner)]
-            remaining = max(0.0, total - elapsed)
-            try:
-                sys.stdout.write(f"\r{prefix} {ch} {remaining:4.1f}s")
-                sys.stdout.flush()
-            except Exception:
-                pass
-            time.sleep(min(tick, total - elapsed))
-            elapsed += tick
-        # At end, clear the spinner line and restore last progress (if any)
-        try:
-            sys.stdout.write("\r" + " " * 120 + "\r")
-            if getattr(self, "_last_progress_line", ""):
-                sys.stdout.write(self._last_progress_line)
-            sys.stdout.flush()
-        except Exception:
-            pass
-
-    def _get_unwanted_keywords(self) -> List[str]:
-        """Return unwanted keywords list from configuration (cached per call site)."""
-        try:
-            return self.config.get_unwanted_keywords_list()
-        except Exception:
-            return []
-
     def purge_keywords(self, title: str) -> bool:
         """Fast check for unwanted keywords in a job title using substring matching (case-insensitive). Example: 'student' will match 'Werkstudent', 'steuer' will match 'Steuerfach'."""
         if not title:
             return False
-        unwanted = self._get_unwanted_keywords()
+        unwanted = self.config.get_unwanted_keywords_list()
         if not unwanted:
             return False
         title_l = title.lower()
@@ -176,9 +101,6 @@ class JobScraper:
             logger.warning(f"Could not load existing normalized keys for pre-filtering: {e}")
             return set()
 
-    # =======================
-    # Description fetching API
-    # =======================
     def _http_get_with_retries(self, url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
         """Lightweight GET with retries and basic LinkedIn-aware handling."""
         if timeout is None:
@@ -209,9 +131,6 @@ class JobScraper:
             logger.debug(f"Giving up fetching {url}: {last_exc}")
         return None
 
-    # =======================
-    # Backfill-only helpers
-    # =======================
     def _extract_linkedin_description(self, job_url: str) -> str:
         """Extract description from a LinkedIn job page. Used by backfill mode only."""
         if not job_url:
@@ -244,39 +163,6 @@ class JobScraper:
             logger.debug(f"LinkedIn description parse error: {e}")
         return ''
 
-    def _extract_generic_description(self, job_url: str, source: str) -> str:
-        """Best-effort description extraction for non-LinkedIn pages. Backfill-only."""
-        if not job_url:
-            return ''
-        resp = self._http_get_with_retries(job_url, timeout=20)
-        if not resp:
-            return ''
-        try:
-            page = BeautifulSoup(resp.content, 'lxml')
-            # Try a few common selectors
-            selectors = [
-                '#jobDescriptionText',
-                'div#jobDescriptionText',
-                'div.jobsearch-JobComponent-description',
-                'section.jobsearch-jobDescriptionText',
-                'div.job-description',
-                'section.job-description',
-            ]
-            for sel in selectors:
-                desc = page.select_one(sel)
-                if desc:
-                    return desc.get_text(separator=' ', strip=True)
-        except Exception as e:
-            logger.debug(f"Generic description parse error for {source}: {e}")
-        return ''
-
-    def fetch_job_description(self, url: str, source: str) -> str:
-        """Fetch a textual description for a job URL. Used only by backfill mode."""
-        src = (source or '').lower()
-        if 'linkedin' in src or 'linkedin' in (url or '').lower():
-            return self._extract_linkedin_description(url)
-        return self._extract_generic_description(url, source)
-    
     def scrape_linkedin(self, keywords: str, location: str) -> List[Dict]:
         """Scrape job postings from LinkedIn public listings with pagination and optional descriptions.
         - Applies: last 24 hours, full-time only
@@ -422,205 +308,11 @@ class JobScraper:
             logger.error(f"Error scraping LinkedIn: {e}")
 
         return jobs
-    
-    def get_most_recent_csv_file(self) -> Optional[str]:
-        """Get the path to the most recent CSV file in the data directory"""
-        data_dir = Path("data")
-        if not data_dir.exists():
-            return None
-        
-        # Find all CSV files with the pattern jobs_YYYYMMDD_HHMMSS.csv
-        pattern = str(data_dir / "jobs_*.csv")
-        csv_files = glob.glob(pattern)
-        
-        if not csv_files:
-            return None
-        
-        # Sort files by modification time (newest first)
-        csv_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        
-        most_recent = csv_files[0]
-        logger.info(f"Found most recent CSV file: {most_recent}")
-        return most_recent
-    
-    def load_historical_jobs(self) -> pd.DataFrame:
-        """Load jobs from the most recent CSV file"""
-        recent_file = self.get_most_recent_csv_file()
-        
-        if recent_file is None:
-            logger.info("No historical CSV files found")
-            return pd.DataFrame()
-        
-        try:
-            historical_df = pd.read_csv(recent_file)
-            # Coerce scraped_at to datetime if present
-            if 'scraped_at' in historical_df.columns:
-                historical_df['scraped_at'] = pd.to_datetime(historical_df['scraped_at'], errors='coerce')
-            logger.info(f"Loaded {len(historical_df)} historical jobs from {recent_file}")
-            return historical_df
-        except Exception as e:
-            logger.error(f"Error loading historical CSV file {recent_file}: {e}")
-            return pd.DataFrame()
-    
-    def remove_historical_duplicates(self, current_df: pd.DataFrame) -> pd.DataFrame:
-        """Remove jobs that already exist in database using fast SQLite lookup"""
-        if current_df.empty:
-            return current_df
-        
-        original_count = len(current_df)
-        
-        # Build normalized keys for current data (canonical URL or source|title|company)
-        current_keys = build_normalized_keys(current_df)
 
-        # Build normalized keys for existing DB rows
-        with self.db._get_connection() as conn:
-            existing_df = pd.read_sql_query(
-                "SELECT url, title, company, source FROM jobs",
-                conn
-            )
-        if existing_df.empty:
-            filtered_df = current_df
-        else:
-            existing_keys = set(build_normalized_keys(existing_df).tolist())
-            # Keep only rows whose normalized key is not present in DB
-            mask = ~current_keys.isin(existing_keys)
-            filtered_df = current_df.loc[mask]
-        
-        filtered_count = len(filtered_df)
-        removed_count = original_count - filtered_count
-        
-        if removed_count > 0:
-            logger.info(f"Removed {removed_count} jobs that already exist in database")
-        else:
-            logger.info("No database duplicates found - all jobs are new!")
-        
-        return filtered_df
-    
-    def get_all_csv_files(self) -> List[str]:
-        """Get all CSV files in the data directory sorted by date (newest first)"""
-        data_dir = Path("data")
-        if not data_dir.exists():
-            return []
-        
-        # Find all CSV files with the pattern jobs_YYYYMMDD_HHMMSS.csv
-        pattern = str(data_dir / "jobs_*.csv")
-        csv_files = glob.glob(pattern)
-        
-        if not csv_files:
-            return []
-        
-        # Sort files by modification time (newest first)
-        csv_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        
-        return csv_files
-    
-    def load_all_historical_jobs(self) -> pd.DataFrame:
-        """Load and combine all historical job data"""
-        csv_files = self.get_all_csv_files()
-        
-        if not csv_files:
-            logger.info("No historical CSV files found")
-            return pd.DataFrame()
-        
-        all_jobs = []
-        total_files = len(csv_files)
-        
-        logger.info(f"Loading jobs from {total_files} CSV files...")
-        
-        for i, csv_file in enumerate(csv_files):
-            try:
-                df = pd.read_csv(csv_file)
-                if 'scraped_at' in df.columns:
-                    df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
-                all_jobs.append(df)
-                logger.debug(f"Loaded {len(df)} jobs from {csv_file} ({i+1}/{total_files})")
-            except Exception as e:
-                logger.warning(f"Error loading {csv_file}: {e}")
-                continue
-        
-        if not all_jobs:
-            logger.warning("No valid CSV files could be loaded")
-            return pd.DataFrame()
-        
-        # Combine all DataFrames
-        combined_df = pd.concat(all_jobs, ignore_index=True)
-        logger.info(f"Combined {len(combined_df)} total job records from all files")
-        
-        return combined_df
-    
-    def load_latest_historical_jobs(self, num_runs: int = 5) -> pd.DataFrame:
-        """Load job data from the most recent N CSV files"""
-        csv_files = self.get_all_csv_files()
-        
-        if not csv_files:
-            logger.info("No historical CSV files found")
-            return pd.DataFrame()
-        
-        # Take only the most recent N files
-        recent_files = csv_files[:num_runs]
-        actual_runs = len(recent_files)
-        
-        logger.info(f"Loading jobs from the most recent {actual_runs} CSV files...")
-        
-        recent_jobs = []
-        
-        for i, csv_file in enumerate(recent_files):
-            try:
-                df = pd.read_csv(csv_file)
-                if 'scraped_at' in df.columns:
-                    df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
-                recent_jobs.append(df)
-                logger.debug(f"Loaded {len(df)} jobs from {csv_file} ({i+1}/{actual_runs})")
-            except Exception as e:
-                logger.warning(f"Error loading {csv_file}: {e}")
-                continue
-        
-        if not recent_jobs:
-            logger.warning("No valid recent CSV files could be loaded")
-            return pd.DataFrame()
-        
-        # Combine recent DataFrames
-        combined_df = pd.concat(recent_jobs, ignore_index=True)
-        logger.info(f"Combined {len(combined_df)} job records from {actual_runs} recent files")
-        
-        return combined_df
-    
-    def filter_historical_jobs(self) -> pd.DataFrame:
-        """Apply current filters to all historical job data and return filtered results"""
-        logger.info("Filtering all historical job data...")
-        
-        # Load all historical jobs
-        all_jobs_df = self.load_all_historical_jobs()
-        
-        if all_jobs_df.empty:
-            logger.warning("No historical job data found to filter")
-            return pd.DataFrame()
-        
-        original_count = len(all_jobs_df)
-        logger.info(f"Loaded {original_count} total historical jobs")
-        
-        # Apply current filters
-        filtered_df = self.filter_unwanted_jobs(all_jobs_df.copy())
-        
-        # Remove duplicates
-        unique_filtered_df = filtered_df.drop_duplicates(subset=['title', 'company'], keep='first')
-        
-        final_count = len(unique_filtered_df)
-        removed_count = original_count - final_count
-        
-        logger.info(f"After filtering: {final_count} jobs remaining ({removed_count} jobs removed)")
-        
-        return unique_filtered_df
-    
-    def scrape_all_sources(self, keywords: List[str], locations: List[str], *, limit_per_source: Optional[int] = None) -> pd.DataFrame:
+    def scrape(self, keywords: List[str], locations: List[str], *, limit_per_source: Optional[int] = None) -> pd.DataFrame:
         """Scrape jobs from enabled sources.
-        - limit_per_source: if provided, cap collected jobs per source for speed (after pre-filtering).
         """
         all_jobs: List[Dict] = []
-
-        if not self.config.enable_linkedin:
-            logger.warning("No sources enabled. Enable ENABLE_LINKEDIN.")
-            return pd.DataFrame()
 
         for keyword in keywords:
             for location in locations:
@@ -632,71 +324,22 @@ class JobScraper:
                     if limit_per_source is not None and limit_per_source > 0:
                         linkedin_jobs = linkedin_jobs[:limit_per_source]
                     all_jobs.extend(linkedin_jobs)
-                # Indeed removed
-                # Porsche intentionally not called here to avoid duplicate results
         
         # Convert to DataFrame and process
         df = pd.DataFrame(all_jobs)
         if not df.empty:
             # Filter out jobs with unwanted keywords in title
             df = self.filter_unwanted_jobs(df)
-            
             # Build job_ids vectorized and drop duplicates
-            df['job_id'] = self._build_job_ids_vectorized(df)
+            df['job_id'] = build_job_ids(df)
             df = df.drop_duplicates(subset=['job_id'], keep='first')
-            logger.info(f"Current run found {len(df)} unique jobs after filtering")
             # Remove jobs that were found in previous runs
             df = self.remove_historical_duplicates(df)
             
-            logger.info(f"Final count after removing historical duplicates: {len(df)}")
         else:
             logger.warning("No jobs found")
             
         return df
-    
-    def filter_unwanted_jobs(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Filter out jobs with unwanted keywords in the title and unwanted companies"""
-        if df.empty:
-            return df
-            
-        original_count = len(df)
-        
-        # Get unwanted keywords from configuration
-        unwanted_keywords = self.config.get_unwanted_keywords_list()
-        unwanted_companies = []
-        try:
-            unwanted_companies = self.config.get_unwanted_companies_list()
-        except Exception:
-            unwanted_companies = []
-
-        if unwanted_keywords:
-            # Substring matching (case-insensitive) for any unwanted keyword
-            import re
-            escaped = [re.escape(k) for k in unwanted_keywords if k]
-            if escaped:
-                pattern = "|".join(escaped)
-                mask = ~df['title'].astype(str).str.contains(pattern, case=False, na=False, regex=True)
-                df = df.loc[mask]
-
-        if unwanted_companies and 'company' in df.columns:
-            import re
-            terms = [re.escape(c) for c in unwanted_companies if c]
-            if terms:
-                patt = "|".join(terms)
-                mask = ~df['company'].astype(str).str.contains(patt, case=False, na=False, regex=True)
-                df = df.loc[mask]
-        
-        filtered_count = len(df)
-        removed_count = original_count - filtered_count
-        
-        if removed_count > 0:
-            logger.info(f"Filtered out {removed_count} jobs by unwanted filters (keywords/companies)")
-            
-        return df
-
-    def _build_job_ids_vectorized(self, df: pd.DataFrame) -> pd.Series:
-        """Build stable identifiers using normalized URLs; fallback to source|title|company."""
-        return build_job_ids(df)
     
     def save_jobs_to_csv(self, df: pd.DataFrame, filename: Optional[str] = None) -> str:
         """Save jobs data to CSV file"""
@@ -706,5 +349,4 @@ class JobScraper:
         data_dir.mkdir(parents=True, exist_ok=True)
         filepath = str(data_dir / filename)
         df.to_csv(filepath, index=False)
-        logger.info(f"Jobs data saved to {filepath}")
         return filepath

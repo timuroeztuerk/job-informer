@@ -74,7 +74,7 @@ class JobDatabase:
         """Get database connection"""
         return sqlite3.connect(self.db_path)
     
-    def upsert_jobs(self, jobs_df: pd.DataFrame) -> int:
+    def put_into_sql(self, jobs_df: pd.DataFrame) -> int:
         """Insert new jobs, ignore duplicates. Returns count of new jobs inserted."""
         if jobs_df.empty:
             return 0
@@ -130,8 +130,8 @@ class JobDatabase:
                     pass
             
             conn.commit()
-        
-        logger.info(f"Inserted {inserted_count} new jobs into database")
+
+        logger.info(f"DB Updated with {inserted_count} new jobs.")
         return inserted_count
     
     def get_recent_jobs(self, days: int = 30) -> pd.DataFrame:
@@ -259,48 +259,6 @@ class JobDatabase:
             'parsed_descriptions_stats': parsed_descriptions_stats
         }
     
-    def cleanup_orphaned_parsed_descriptions(self) -> int:
-        """Remove orphaned parsed descriptions (descriptions for jobs that no longer exist)
-        Returns the number of orphaned descriptions removed."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Check if parsed_descriptions table exists
-                cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='parsed_descriptions'")
-                if cursor.fetchone()[0] == 0:
-                    logger.info("No parsed_descriptions table found")
-                    return 0
-                
-                # Count orphaned descriptions before cleanup
-                cursor.execute("""
-                    SELECT COUNT(*) 
-                    FROM parsed_descriptions pd 
-                    LEFT JOIN jobs j ON pd.job_id = j.job_id 
-                    WHERE j.job_id IS NULL
-                """)
-                orphaned_count = cursor.fetchone()[0]
-                
-                if orphaned_count == 0:
-                    logger.info("No orphaned parsed descriptions found")
-                    return 0
-                
-                # Delete orphaned descriptions
-                cursor.execute("""
-                    DELETE FROM parsed_descriptions 
-                    WHERE job_id NOT IN (SELECT job_id FROM jobs)
-                """)
-                
-                deleted_count = cursor.rowcount
-                conn.commit()
-                
-                logger.info(f"Cleaned up {deleted_count} orphaned parsed descriptions")
-                return deleted_count
-                
-        except Exception as e:
-            logger.error(f"Failed to cleanup orphaned parsed descriptions: {e}")
-            return 0
-    
     def migrate_csv_to_sqlite(self, csv_file: str) -> int:
         """Migrate jobs from CSV file to SQLite database"""
         try:
@@ -312,7 +270,7 @@ class JobDatabase:
             if 'job_id' not in df.columns:
                 df = self._ensure_job_ids(df)
             
-            inserted = self.upsert_jobs(df)
+            inserted = self.put_into_sql(df)
             logger.info(f"Migrated {inserted} jobs from {csv_file}")
             return inserted
             

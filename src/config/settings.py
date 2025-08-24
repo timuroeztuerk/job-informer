@@ -59,7 +59,6 @@ class Config:
 
     # Feature Toggles
     enable_linkedin: bool
-    enable_porsche: bool
     dry_run: bool
     # Dry-run tuning
     dry_run_fast: bool
@@ -98,7 +97,7 @@ class Config:
             unwanted_companies=os.getenv('UNWANTED_COMPANIES', 'universität,pwc,deloitte,nachhilfeunterricht'),
             
             # Scraping Configuration
-            request_delay=float(os.getenv('REQUEST_DELAY', '3.0')),
+            request_delay=float(os.getenv('REQUEST_DELAY', '2.0')),
             max_retries=int(os.getenv('MAX_RETRIES', '2')),
             # Default to a realistic desktop Chrome UA string
             user_agent=os.getenv('USER_AGENT', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'),
@@ -157,7 +156,6 @@ class Config:
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
-            enable_porsche=_get_bool('ENABLE_PORSCHE', 'false'),
             dry_run=_get_bool('DRY_RUN', 'false'),
             dry_run_fast=_get_bool('DRY_RUN_FAST', 'true'),
             dry_run_keywords_limit=int(os.getenv('DRY_RUN_KEYWORDS_LIMIT', '1')),
@@ -173,18 +171,12 @@ class Config:
         """Validate configuration values depending on execution mode"""
         errors = []
 
-        # Common validations
-        if self.request_delay < 0:
-            errors.append("REQUEST_DELAY must be positive")
-        if self.max_retries < 0:
-            errors.append("MAX_RETRIES must be positive")
-
         # Modes that require email configuration
         email_required_modes = {
-            'run-once', 'test', 'summary', 'market-report', 'schedule'
+            'run-once', 'test', 'summary'
         }
         # Modes that require Gemini
-        gemini_required_modes = {'market-report', 'test', 'parse-descriptions', 'ai-purge', 'ai-purge-test'}
+        gemini_required_modes = {'test', 'parse-descriptions', 'ai-purge'}
 
         if mode in email_required_modes:
             if not self.email_address:
@@ -260,7 +252,6 @@ class Config:
             'desc_parser_version': self.desc_parser_version,
             'desc_parser_dry_run': self.desc_parser_dry_run,
             'enable_linkedin': self.enable_linkedin,
-            'enable_porsche': self.enable_porsche,
             'dry_run': self.dry_run,
             'dry_run_fast': self.dry_run_fast,
             'dry_run_keywords_limit': self.dry_run_keywords_limit,

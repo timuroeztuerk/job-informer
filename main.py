@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from src.config.settings import Config
 from src.utils.logging_utils import setup_logging
 from src.scrapers.job_scraper import JobScraper
+from src.description_tools import DescriptionTools
 from src.utils.utilities import Utilities
 from src.ai_job_purger.ai_purger import AIPurger
 from loguru import logger
@@ -27,7 +28,6 @@ def create_data_directory():
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
     return data_dir
-
 
 def main():
     """Main application entry point"""
@@ -98,17 +98,9 @@ def main():
         create_data_directory()
         
         if args.run_once:
-            run_job_search_once(Utilities(config))
+            run_job_search_once(Utilities(config))  
         elif args.test:
             run_all_tests(Utilities(config))
-            # If DRY_RUN is enabled, chain a fast dry-run to preview scraping without side effects
-            try:
-                if Utilities(config).config.dry_run:
-                    from loguru import logger as _logger
-                    _logger.info("DRY_RUN=true detected — executing fast dry run after tests")
-                    Utilities(config).run_dry_run()
-            except Exception as _e:
-                logger.warning(f"Fast dry run skipped due to error: {_e}")
         elif args.db_summary:
             show_database_summary(Utilities(config))
         elif args.purge:
@@ -116,9 +108,9 @@ def main():
         elif args.ai_purge:
             run_ai_purge_mode(Utilities(config))
         elif args.get_descriptions:
-            get_descriptions(Utilities(config))
+            get_descriptions(DescriptionTools(config), Utilities(config), JobScraper(config))
         elif args.parse_descriptions:
-            run_description_parser(Utilities(config))
+            run_description_parser(DescriptionTools(config))
         else:
             logger.error(f"Unsupported mode: {mode_str}")
             sys.exit(1)
@@ -128,22 +120,15 @@ def main():
         sys.exit(1)
 
 def run_job_search_once(utils: Utilities):
-    """Run job search once and send results"""
-    logger.info("=== Starting Job Search ===")
-    
-    # Show search configuration
+    """Run the Job Scraper"""
     summary = utils.get_search_summary()
-    logger.info(f"Keywords: {', '.join(summary['keywords'])}")
-    logger.info(f"Locations: {', '.join(summary['locations'])}")
-    logger.info(f"Email configured: {summary['email_configured']}")
+    logger.info(f"Starting, Keywords: {', '.join(summary['keywords'])}, Locations: {', '.join(summary['locations'])}")
     
-    # Execute the search
     success = utils.execute_job_search()
-    
     if success:
-        logger.success("=== Job Search Completed Successfully ===")
+        logger.success("=== Job Search Done ===")
     else:
-        logger.warning("=== Job Search Completed (No results found) ===")
+        logger.warning("=== No Jobs Found ===")
 
 def run_all_tests(utils: Utilities):
     """Run combined tests: config/email test, scraper init, and AI connection"""
@@ -451,20 +436,20 @@ def run_ai_purge_mode(utils: Utilities):
         logger.error(f"AI purge mode failed: {e}")
         sys.exit(1)
 
-def get_descriptions(utils: Utilities):
+def get_descriptions(desc: DescriptionTools, utils: Utilities, scraper: JobScraper):
     """Backfill missing job descriptions in the database"""
     logger.info("=== Backfilling Missing Job Descriptions ===")
-    success = utils.backfill_missing_descriptions()
+    success = desc.backfill_missing_descriptions(utils, scraper)
     if success:
         logger.success("=== Backfill Completed Successfully ===")
     else:
         logger.error("=== Backfill Failed ===")
         sys.exit(1)
 
-def run_description_parser(utils: Utilities):
+def run_description_parser(desc: DescriptionTools):
     """Run incremental description parsing using LLM with caching"""
     logger.info("=== Parsing Descriptions (Incremental) ===")
-    success = utils.run_description_parser()
+    success = desc.run_description_parser()
     if success:
         logger.success("=== Description Parsing Completed ===")
     else:

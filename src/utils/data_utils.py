@@ -8,7 +8,79 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse, parse_qs
 import re
 from datetime import datetime
+from loguru import logger
 
+def remove_historical_duplicates(self, current_df: pd.DataFrame) -> pd.DataFrame:
+    """Remove jobs that already exist in database using fast SQLite lookup"""
+    if current_df.empty:
+        return current_df
+    
+    original_count = len(current_df)
+    
+    # Build normalized keys for current data (canonical URL or source|title|company)
+    current_keys = build_normalized_keys(current_df)
+
+    # Build normalized keys for existing DB rows
+    with self.db._get_connection() as conn:
+        existing_df = pd.read_sql_query(
+            "SELECT url, title, company, source FROM jobs",
+            conn
+        )
+    if existing_df.empty:
+        filtered_df = current_df
+    else:
+        existing_keys = set(build_normalized_keys(existing_df).tolist())
+        # Keep only rows whose normalized key is not present in DB
+        mask = ~current_keys.isin(existing_keys)
+        filtered_df = current_df.loc[mask]
+    
+    filtered_count = len(filtered_df)
+    removed_count = original_count - filtered_count
+    
+    if removed_count > 0:
+        logger.info(f"Removed {removed_count} jobs that already exist in database")
+    else:
+        logger.info("No database duplicates found - all jobs are new!")
+    
+    return filtered_df
+
+def filter_unwanted_jobs(self, df: pd.DataFrame) -> pd.DataFrame:
+    """Filter out jobs with unwanted keywords in the title and unwanted companies"""
+    if df.empty:
+        return df
+        
+    original_count = len(df)
+    
+    # Get unwanted keywords from configuration
+    unwanted_keywords = self.config.get_unwanted_keywords_list()
+    unwanted_companies = []
+    try:
+        unwanted_companies = self.config.get_unwanted_companies_list()
+    except Exception:
+        unwanted_companies = []
+    if unwanted_keywords:
+        # Substring matching (case-insensitive) for any unwanted keyword
+        import re
+        escaped = [re.escape(k) for k in unwanted_keywords if k]
+        if escaped:
+            pattern = "|".join(escaped)
+            mask = ~df['title'].astype(str).str.contains(pattern, case=False, na=False, regex=True)
+            df = df.loc[mask]
+    if unwanted_companies and 'company' in df.columns:
+        import re
+        terms = [re.escape(c) for c in unwanted_companies if c]
+        if terms:
+            patt = "|".join(terms)
+            mask = ~df['company'].astype(str).str.contains(patt, case=False, na=False, regex=True)
+            df = df.loc[mask]
+    
+    filtered_count = len(df)
+    removed_count = original_count - filtered_count
+    
+    if removed_count > 0:
+        logger.info(f"Filtered out {removed_count} jobs by unwanted filters (keywords/companies)")
+        
+    return df
 
 def clean_job_data(jobs_df: pd.DataFrame) -> pd.DataFrame:
     """Clean and standardize job data"""
