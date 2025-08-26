@@ -50,7 +50,7 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON jobs(scraped_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON jobs(created_at)")
             
-            # Backfill: ensure description/normalized_key columns exist for older databases
+            # Backfill: ensure description/normalized_key/analyzed columns exist for older databases
             try:
                 cur = conn.execute("PRAGMA table_info(jobs)")
                 columns = {row[1] for row in cur.fetchall()}
@@ -58,6 +58,8 @@ class JobDatabase:
                     conn.execute("ALTER TABLE jobs ADD COLUMN description TEXT")
                 if 'normalized_key' not in columns:
                     conn.execute("ALTER TABLE jobs ADD COLUMN normalized_key TEXT")
+                if 'analyzed' not in columns:
+                    conn.execute("ALTER TABLE jobs ADD COLUMN analyzed INTEGER DEFAULT 0")
             except Exception:
                 # If PRAGMA or ALTER fails, proceed without blocking app
                 pass

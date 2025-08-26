@@ -115,13 +115,19 @@ class DescriptionTools:
             )
             conn.commit()
 
-    def _call_llm(self, description_text: str) -> Optional[str]:
+    def _call_llm(self, description_text: str, job_id: str = "unknown") -> Optional[str]:
         """Call unified LLM using structured generation; return raw JSON text or None."""
         if not description_text.strip():
+            logger.warning(f"Job {job_id}: Empty description, skipping LLM call")
             return None
         if not getattr(self.llm, 'api_key', ''):
             logger.error("OPENAI_API_KEY missing; cannot parse descriptions")
             return None
+        
+        # Log the LLM call details
+        desc_preview = description_text.strip()[:150] + "..." if len(description_text.strip()) > 150 else description_text.strip()
+        logger.info(f"Job {job_id}: Starting LLM call for description parsing")
+        logger.info(f"Job {job_id}: Description preview: {desc_preview}")
         
         prompt = f"{self.prompt}\n\nDESCRIPTION:\n{description_text.strip()}\n\nRespond with JSON only."
         
@@ -131,21 +137,24 @@ class DescriptionTools:
                      "Use null if salary information is not available.")
         
         try:
+            logger.info(f"Job {job_id}: Calling LLM with model {self.llm.model}")
             # Use structured generation with the Pydantic model
             result = self.llm.generate_structured(prompt, JobDescriptionStructure, system=system_msg)
             
             if result is None:
-                logger.error("LLM returned None for structured generation")
+                logger.error(f"Job {job_id}: LLM returned None for structured generation")
                 return None
             
             # Handle both parsed object and JSON string responses
             if isinstance(result, str):
                 # If it's already a JSON string, validate it
                 try:
-                    _ = json.loads(result)
+                    parsed_json = json.loads(result)
+                    logger.success(f"Job {job_id}: LLM call successful - returned JSON string")
+                    logger.info(f"Job {job_id}: Extracted data preview: {json.dumps(parsed_json, indent=2)[:300]}...")
                     return result
-                except json.JSONDecodeError:
-                    logger.error("Invalid JSON returned from structured LLM call")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Job {job_id}: Invalid JSON returned from structured LLM call: {e}")
                     return None
             elif isinstance(result, JobDescriptionStructure):
                 # If it's a parsed Pydantic object, convert to the expected JSON format
@@ -159,13 +168,16 @@ class DescriptionTools:
                         "max": data.pop("salary_eur_max", None)
                     }
                 
-                return json.dumps(data)
+                json_result = json.dumps(data)
+                logger.success(f"Job {job_id}: LLM call successful - returned structured object")
+                logger.info(f"Job {job_id}: Extracted data: {json.dumps(data, indent=2)}")
+                return json_result
             else:
-                logger.error(f"Unexpected result type from LLM: {type(result)}")
+                logger.error(f"Job {job_id}: Unexpected result type from LLM: {type(result)}")
                 return None
                 
         except Exception as e:
-            logger.error(f"LLM structured request error: {e}")
+            logger.error(f"Job {job_id}: LLM structured request error: {e}")
             return None
 
     def parse_batch(self, jobs_df: pd.DataFrame) -> int:
@@ -178,23 +190,38 @@ class DescriptionTools:
         dry = bool(getattr(self.config, 'desc_parser_dry_run', False))
         created_ts = datetime.utcnow().isoformat()
 
+        logger.info(f"Processing batch of {len(jobs_df)} jobs for description parsing")
+        
         new_count = 0
-        for _, row in jobs_df.iterrows():
+        for idx, row in jobs_df.iterrows():
             desc = str(row.get('description') or '').strip()
             job_id = str(row.get('job_id') or '')
+            title = str(row.get('title', 'Unknown Title'))
+            company = str(row.get('company', 'Unknown Company'))
+            
             if not desc or not job_id:
+                logger.warning(f"Job {job_id}: Skipping due to missing description or job_id")
                 continue
+                
+            logger.info(f"Job {job_id}: Starting processing for '{title}' at '{company}'")
+            
             h = self._hash_description(desc)
             cached = self._find_cached(job_id, h, version)
             if cached:
+                logger.info(f"Job {job_id}: Found cached result, skipping LLM call")
                 continue
+                
             if dry:
                 # store a placeholder minimal payload without calling LLM
+                logger.info(f"Job {job_id}: Dry run mode - storing placeholder without LLM call")
                 payload = json.dumps({"dry_run": True})
             else:
-                payload = self._call_llm(desc)
+                logger.info(f"Job {job_id}: No cache hit, calling LLM for parsing")
+                payload = self._call_llm(desc, job_id)
                 if not payload:
+                    logger.error(f"Job {job_id}: LLM call failed, skipping storage")
                     continue
+                    
             rec = ParsedDescription(
                 job_id=job_id,
                 desc_hash=h,
@@ -203,24 +230,38 @@ class DescriptionTools:
                 payload_json=payload,
                 created_at=created_ts,
             )
-            self._store(rec)
-            new_count += 1
+            
+            try:
+                self._store(rec)
+                new_count += 1
+                logger.success(f"Job {job_id}: Successfully stored parsed description ({new_count}/{len(jobs_df)} completed)")
+                
+                # Add a small delay between jobs to slow down processing
+                if not dry and new_count < len(jobs_df):
+                    import time
+                    time.sleep(2)  # 2 second delay between LLM calls
+                    logger.info(f"Pausing for 2 seconds before next job...")
+                    
+            except Exception as e:
+                logger.error(f"Job {job_id}: Failed to store parsed description: {e}")
+                
+        logger.info(f"Batch processing complete: {new_count} new descriptions parsed and stored")
         return new_count
 
     def run_incremental(self, batch_size: int, max_batches: int) -> int:
         """Find jobs with descriptions and without cached parse.
-        Caps total new parses to (batch_size * max_batches).
+        Processes at most max_batches batches of batch_size each.
         """
         total_new = 0
         version = int(getattr(self.config, 'desc_parser_version', 1))
-        max_new = batch_size * max_batches
+        batches_processed = 0
         
         with sqlite3.connect(self.db.db_path) as conn:
             # Get all jobs with descriptions that haven't been parsed at this version
             # We'll compute the hash in Python since it's more reliable
             all_jobs_df = pd.read_sql_query(
                 """
-                SELECT job_id, description
+                SELECT job_id, description, title, company
                 FROM jobs
                 WHERE description IS NOT NULL AND TRIM(description) <> ''
                 ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
@@ -258,16 +299,19 @@ class DescriptionTools:
                 logger.info("Description parser summary — all descriptions already parsed at this version")
                 return 0
             
-            # Limit to max_new items
-            to_process_df = unparsed_df.head(max_new)
-            total_jobs_to_process = len(to_process_df)
+            total_unparsed = len(unparsed_df)
+            max_to_process = min(total_unparsed, max_batches * batch_size)
             
-            logger.info(f"Description parser: found {total_jobs_to_process} unparsed descriptions (version {version})")
+            logger.info(f"Description parser: found {total_unparsed} unparsed descriptions, will process up to {max_to_process} (max {max_batches} batches of {batch_size})")
             
-            # Process in batches
-            for batch_start in range(0, total_jobs_to_process, batch_size):
-                batch_end = min(batch_start + batch_size, total_jobs_to_process)
-                batch_df = to_process_df.iloc[batch_start:batch_end].copy()
+            # Process in batches, respecting max_batches limit
+            for batch_start in range(0, max_to_process, batch_size):
+                if batches_processed >= max_batches:
+                    logger.info(f"Reached maximum batch limit ({max_batches}), stopping")
+                    break
+                    
+                batch_end = min(batch_start + batch_size, max_to_process)
+                batch_df = unparsed_df.iloc[batch_start:batch_end].copy()
                 
                 # Remove desc_hash column before processing (parse_batch doesn't expect it)
                 batch_for_processing = batch_df.drop(columns=['desc_hash'])
@@ -275,14 +319,13 @@ class DescriptionTools:
                 # Process this batch
                 processed = self.parse_batch(batch_for_processing)
                 total_new += processed
+                batches_processed += 1
                 
-                batch_num = batch_start // batch_size + 1
-                total_batches = (total_jobs_to_process + batch_size - 1) // batch_size
-                logger.info(f"Description parser: processed batch {batch_num}/{total_batches}, parsed {processed}/{len(batch_df)} items")
+                logger.info(f"Description parser: processed batch {batches_processed}/{max_batches}, parsed {processed}/{len(batch_df)} items")
 
         if total_new > 0:
             logger.info(
-                f"Description parser summary — total_jobs:{len(all_jobs_df)} already_parsed:{len(all_jobs_df) - len(unparsed_df)} stored_new:{total_new} version:{version}"
+                f"Description parser summary — total_jobs:{len(all_jobs_df)} already_parsed:{len(all_jobs_df) - len(unparsed_df)} stored_new:{total_new} version:{version} batches_processed:{batches_processed}"
             )
         else:
             logger.info("Description parser summary — no new descriptions parsed")

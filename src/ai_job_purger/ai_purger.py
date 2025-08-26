@@ -31,11 +31,14 @@ class AIPurger:
     Processing Order: Always starts with the most recently added jobs to the database
     to ensure latest entries are prioritized for purging analysis.
     
+    Caching: Jobs are marked as 'analyzed' (analyzed=1) after processing to avoid 
+    re-analyzing them on subsequent runs. Only jobs with analyzed=0 or NULL are processed.
+    
     By default, processes only the first batch (10 jobs) to avoid overwhelming the system.
     Set process_all=True in constructor to process all jobs in the database.
     """
 
-    def __init__(self, config: Config, test_mode: bool = False, process_all: bool = False):
+    def __init__(self, config: Config, test_mode: bool = False, process_all: bool = True):
         self.config = config
         self.test_mode = test_mode
         self.process_all = process_all  # If True, processes all jobs; if False, processes only default batch size
@@ -43,13 +46,13 @@ class AIPurger:
         self.parser = DescriptionTools(config=self.config, db=self.db)
         self.parser._ensure_table()
         self.llm = LLMConnection(model="gpt-5-nano")
-        self.batch_size = 10
+        self.batch_size = 25
         self.purge_prompt = """
         You are an AI job filter. Analyze the provided job listings and identify jobs that should be purged.
         
         IMPORTANT: Be conservative and only purge jobs that are clearly irrelevant or low-quality.
         Looking at the job titles and companies, you should purge jobs that are:
-        - Clearly IRRELEVANT to data science, machine learning, AI, or software engineering (e.g. sales, retail, manual labor)
+        - Clearly IRRELEVANT to data science, data analysis, machine learning, AI, or software engineering (e.g. sales, retail, manual labor)
         - Obviously spam, duplicate, or very low-quality postings
         - Jobs from companies in the unwanted list
         - Jobs with titles containing unwanted keywords
@@ -69,20 +72,27 @@ class AIPurger:
         if not getattr(self.llm, 'api_key', '') or not self.purge_prompt.strip():
             return None
         
-        # Get jobs from database, starting with the latest added jobs
+        # Show analysis status
+        status = self.get_analysis_status()
+        logger.info(f"Analysis status: {status['unanalyzed']} unanalyzed, {status['analyzed']} analyzed, {status['total']} total jobs")
+        
+        # Get jobs from database, starting with the latest added jobs that haven't been analyzed yet
         try:
             limit_clause = "" if self.process_all else f" LIMIT {self.batch_size}"
             with sqlite3.connect(self.db.db_path) as conn:
                 # Use COALESCE to handle cases where created_at might be NULL, fallback to scraped_at
+                # Only analyze jobs that haven't been analyzed yet (analyzed = 0 or NULL)
                 # This ensures we always start with the most recently added jobs to the database
                 query = f"""
                 SELECT job_id, title, company 
                 FROM jobs 
+                WHERE COALESCE(analyzed, 0) = 0
                 ORDER BY COALESCE(created_at, scraped_at) DESC{limit_clause}
                 """
                 rows = conn.execute(query).fetchall()
                 
                 if not rows:
+                    logger.info("No unanalyzed jobs found for processing")
                     return {"job_ids_to_purge": [], "jobs_analyzed": 0, "batches_processed": 0}
                 
                 jobs = [JobEntry(str(job_id), str(title) if title else "", str(company) if company else "") for job_id, title, company in rows]
@@ -139,6 +149,10 @@ class AIPurger:
                 
                 all_purge_ids.extend(valid_ids)
                 
+                # Mark all jobs in this batch as analyzed (both purged and kept)
+                batch_job_ids_list = list(batch_job_ids)
+                self._mark_jobs_as_analyzed(batch_job_ids_list)
+                
                 # Small delay between batches
                 if batch_num < len(batches):
                     import time
@@ -153,6 +167,88 @@ class AIPurger:
             "jobs_analyzed": len(jobs),
             "batches_processed": batches_processed
         }
+
+    def _mark_jobs_as_analyzed(self, job_ids: List[str]) -> None:
+        """
+        Mark jobs as analyzed in the database to avoid re-processing them
+        """
+        if not job_ids:
+            return
+            
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Update analyzed flag to 1 for the given job IDs
+                placeholders = ','.join(['?' for _ in job_ids])
+                update_query = f"UPDATE jobs SET analyzed = 1 WHERE job_id IN ({placeholders})"
+                
+                cursor.execute(update_query, job_ids)
+                conn.commit()
+                
+                logger.debug(f"Marked {len(job_ids)} jobs as analyzed")
+                
+        except Exception as e:
+            logger.error(f"Error marking jobs as analyzed: {e}")
+
+    def reset_analyzed_flags(self, all_jobs: bool = False) -> int:
+        """
+        Reset analyzed flags to allow re-analysis
+        
+        Args:
+            all_jobs: If True, reset all jobs. If False, reset only unanalyzed jobs (default)
+        
+        Returns:
+            Number of jobs reset
+        """
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                cursor = conn.cursor()
+                
+                if all_jobs:
+                    cursor.execute("UPDATE jobs SET analyzed = 0")
+                else:
+                    cursor.execute("UPDATE jobs SET analyzed = 0 WHERE analyzed IS NULL OR analyzed != 1")
+                
+                conn.commit()
+                reset_count = cursor.rowcount
+                
+                logger.info(f"Reset analyzed flag for {reset_count} jobs")
+                return reset_count
+                
+        except Exception as e:
+            logger.error(f"Error resetting analyzed flags: {e}")
+            return 0
+
+    def get_analysis_status(self) -> Dict[str, int]:
+        """
+        Get counts of analyzed vs unanalyzed jobs
+        
+        Returns:
+            Dictionary with analyzed, unanalyzed, and total counts
+        """
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get analyzed count
+                analyzed_count = cursor.execute("SELECT COUNT(*) FROM jobs WHERE analyzed = 1").fetchone()[0]
+                
+                # Get unanalyzed count
+                unanalyzed_count = cursor.execute("SELECT COUNT(*) FROM jobs WHERE COALESCE(analyzed, 0) = 0").fetchone()[0]
+                
+                # Get total count
+                total_count = cursor.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+                
+                return {
+                    "analyzed": analyzed_count,
+                    "unanalyzed": unanalyzed_count,
+                    "total": total_count
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting analysis status: {e}")
+            return {"analyzed": 0, "unanalyzed": 0, "total": 0}
 
     def purge_jobs_by_ids(self, job_ids: List[str]) -> int:
         """

@@ -94,7 +94,7 @@ class Config:
             search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Science, Data Analysis, AI'),
             search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
             unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', 'adobe,abschluss,geo,volon,scrum,portfolio,financial,governance,labor,bestand,mergers,commodity,steuer,solution architect,finanzbuchhalter,projektmanager,gesundheit,laborant,logistikassistent,assistent,finanzbuchalter,reliability,Software Entwickler:in,Softwareingenieur,software engineer,solutions engineer,Gesundheitswissenschaftler,treasury,bioinformatiker,biologe,equity,retail,lehrkraft,cyber,creator,pwc,deloitte,auditor,phd,befristet,risk,compliance,public sector,microsoft,skillfinder,slurm,supplier,emat,praxis,operator,quality,medical,referent,last minute,assetmanagement,vermessungstechnikerin,powerbi,financial risk,vertriebssteuerung,ux designer,pricing,akademische/r,president,c++,devops,regulatory,assistent:in,projektkoordinator:in,cash,pay,sharepoint,teamlead,credit,sas,ontologien,photonics,convince,forensic,real estate,visual,opportunities,credit risk,life science,50%,produktmanager,produktbetreuer,kontakt-center,ce learning,kernel,think tank,aktuar,system,programmmanager,mathematiker,hr,gis,praktikant,geography,underwriter,controller,manager,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,developer,threat,mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,scientist,founding,client,nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,working student,frontend,backend,techniker,manager,planer,nebenberuflich,full stack,lead,dual,duales,studium,controlling,berater,abitur,praktikum,marketing,verkäufer,internship,sales,freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester'),
-            unwanted_companies=os.getenv('UNWANTED_COMPANIES', 'universität,pwc,deloitte,nachhilfeunterricht'),
+            unwanted_companies=os.getenv('UNWANTED_COMPANIES', 'mycareernow GmbH,universität,pwc,deloitte,nachhilfeunterricht'),
             
             # Scraping Configuration
             request_delay=float(os.getenv('REQUEST_DELAY', '2.0')),
@@ -149,7 +149,7 @@ class Config:
                 '  "summary": "1-2 sentences, max 30 words"\n'
                 '}'
             )),
-            desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '25')),
+            desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '5')),
             desc_parser_max_batches=int(os.getenv('DESC_PARSER_MAX_BATCHES', '10')),
             desc_parser_version=int(os.getenv('DESC_PARSER_VERSION', '1')),
             desc_parser_dry_run=_get_bool('DESC_PARSER_DRY_RUN', 'false'),
