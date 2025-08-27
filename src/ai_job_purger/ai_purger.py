@@ -353,8 +353,8 @@ class AIPurger:
                 logger.error("OPENAI_API_KEY not configured")
                 return False
             ok = self.llm.ping()
-            if ok:
-                logger.info("LLM connection test successful")
+            if ok: #simply continue
+                pass
             else:
                 logger.error("LLM connection test failed")
             return ok

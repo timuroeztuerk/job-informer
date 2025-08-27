@@ -31,14 +31,9 @@ class Config:
     request_delay: float
     max_retries: int
     user_agent: str
-    linkedin_max_pages: int
     max_total_jobs: int
     min_new_jobs_to_continue: int
     quiet_progress: bool
-    
-    # Scheduler Configuration
-    schedule_time: str
-    timezone: str
     
     # Logging Configuration
     log_level: str
@@ -60,15 +55,6 @@ class Config:
     # Feature Toggles
     enable_linkedin: bool
     dry_run: bool
-    # Dry-run tuning
-    dry_run_fast: bool
-    dry_run_keywords_limit: int
-    dry_run_locations_limit: int
-    dry_run_pages: int
-    dry_run_limit_per_source: int
-    dry_run_request_delay: float
-    dry_run_max_retries: int
-    auto_migrate_csv: bool
     
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> 'Config':
@@ -101,14 +87,9 @@ class Config:
             max_retries=int(os.getenv('MAX_RETRIES', '2')),
             # Default to a realistic desktop Chrome UA string
             user_agent=os.getenv('USER_AGENT', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'),
-            linkedin_max_pages=int(os.getenv('LINKEDIN_MAX_PAGES', '3')),
             max_total_jobs=int(os.getenv('MAX_TOTAL_JOBS', '0')),
             min_new_jobs_to_continue=int(os.getenv('MIN_NEW_JOBS_TO_CONTINUE', '1')),
             quiet_progress=_get_bool('QUIET_PROGRESS', 'true'),
-            
-            # Scheduler Configuration
-            schedule_time=os.getenv('SCHEDULE_TIME', '09:00'),
-            timezone=os.getenv('TIMEZONE', 'Europe/Berlin'),
             
             # Logging Configuration
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
@@ -156,15 +137,7 @@ class Config:
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
-            dry_run=_get_bool('DRY_RUN', 'false'),
-            dry_run_fast=_get_bool('DRY_RUN_FAST', 'true'),
-            dry_run_keywords_limit=int(os.getenv('DRY_RUN_KEYWORDS_LIMIT', '1')),
-            dry_run_locations_limit=int(os.getenv('DRY_RUN_LOCATIONS_LIMIT', '1')),
-            dry_run_pages=int(os.getenv('DRY_RUN_PAGES', '1')),
-            dry_run_limit_per_source=int(os.getenv('DRY_RUN_LIMIT_PER_SOURCE', '10')),
-            dry_run_request_delay=float(os.getenv('DRY_RUN_REQUEST_DELAY', '0.2')),
-            dry_run_max_retries=int(os.getenv('DRY_RUN_MAX_RETRIES', '1')),
-            auto_migrate_csv=_get_bool('AUTO_MIGRATE_CSV', 'false')
+            dry_run=_get_bool('DRY_RUN', 'false')
         )
     
     def validate_for_mode(self, mode: str) -> None:
@@ -186,7 +159,7 @@ class Config:
             if not self.recipient_email:
                 errors.append("RECIPIENT_EMAIL is required")
 
-        if mode in {'run-once', 'schedule'}:
+        if mode in {'run-once'}:
             if not self.search_keywords:
                 errors.append("SEARCH_KEYWORDS is required")
             if not self.search_locations:
@@ -234,12 +207,9 @@ class Config:
             'request_delay': self.request_delay,
             'max_retries': self.max_retries,
             'user_agent': self.user_agent,
-            'linkedin_max_pages': self.linkedin_max_pages,
             'max_total_jobs': self.max_total_jobs,
             'min_new_jobs_to_continue': self.min_new_jobs_to_continue,
             'quiet_progress': self.quiet_progress,
-            'schedule_time': self.schedule_time,
-            'timezone': self.timezone,
             'log_level': self.log_level,
             'log_file': self.log_file,
             'gemini_api_key': '***HIDDEN***',  # Don't expose API key
@@ -252,13 +222,5 @@ class Config:
             'desc_parser_version': self.desc_parser_version,
             'desc_parser_dry_run': self.desc_parser_dry_run,
             'enable_linkedin': self.enable_linkedin,
-            'dry_run': self.dry_run,
-            'dry_run_fast': self.dry_run_fast,
-            'dry_run_keywords_limit': self.dry_run_keywords_limit,
-            'dry_run_locations_limit': self.dry_run_locations_limit,
-            'dry_run_pages': self.dry_run_pages,
-            'dry_run_limit_per_source': self.dry_run_limit_per_source,
-            'dry_run_request_delay': self.dry_run_request_delay,
-            'dry_run_max_retries': self.dry_run_max_retries,
-            'auto_migrate_csv': self.auto_migrate_csv
+            'dry_run': self.dry_run
         }

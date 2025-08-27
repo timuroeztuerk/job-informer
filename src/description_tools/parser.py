@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Union
 import hashlib
 import json
 import sqlite3
+import sys
 from datetime import datetime
 import time
 
@@ -92,6 +93,46 @@ class DescriptionTools:
     @staticmethod
     def _hash_description(text: str) -> str:
         return hashlib.sha256((text or '').encode('utf-8')).hexdigest()
+
+    def _update_progress_bars(self, batch_current: int, batch_total: int, job_current: int, job_total: int, 
+                            batch_prefix: str = "Batch: ", job_prefix: str = "Job: ", job_detail: str = "") -> None:
+        """Update dual progress bars for batch and job progress."""
+        try:
+            # Batch progress bar
+            batch_width = 20
+            if batch_total <= 0:
+                batch_bar = '-' * batch_width
+            else:
+                batch_filled = int(batch_width * max(0, min(batch_current, batch_total)) / batch_total)
+                batch_bar = '█' * batch_filled + '-' * (batch_width - batch_filled)
+            
+            # Job progress bar
+            job_width = 20
+            if job_total <= 0:
+                job_bar = '-' * job_width
+            else:
+                job_filled = int(job_width * max(0, min(job_current, job_total)) / job_total)
+                job_bar = '█' * job_filled + '-' * (job_width - job_filled)
+            
+            # Format output
+            batch_line = f"{batch_prefix}[{batch_bar}] {batch_current}/{batch_total}"
+            job_line = f"{job_prefix}[{job_bar}] {job_current}/{job_total}"
+            detail = f" {job_detail}" if job_detail else ""
+            
+            # Print both bars
+            sys.stdout.write(f"\r{batch_line}\n{job_line}{detail}")
+            # Move cursor back up to overwrite both lines next time
+            sys.stdout.write("\033[2A")  
+            sys.stdout.flush()
+            
+            # If both are complete, move to next line
+            if batch_current >= batch_total and job_current >= job_total:
+                sys.stdout.write("\n\n")
+                sys.stdout.flush()
+                
+        except Exception:
+            # Fallback silently if stdout is not available
+            pass
 
     def _find_cached(self, job_id: str, desc_hash: str, version: int) -> Optional[ParsedDescription]:
         with sqlite3.connect(self.db.db_path) as conn:
@@ -180,7 +221,7 @@ class DescriptionTools:
             logger.error(f"Job {job_id}: LLM structured request error: {e}")
             return None
 
-    def parse_batch(self, jobs_df: pd.DataFrame) -> int:
+    def parse_batch(self, jobs_df: pd.DataFrame, batch_num: int = 1, total_batches: int = 1) -> int:
         """Parse a batch of jobs with non-empty descriptions and no cache hit.
         Returns number of newly stored parses.
         """
@@ -190,10 +231,15 @@ class DescriptionTools:
         dry = bool(getattr(self.config, 'desc_parser_dry_run', False))
         created_ts = datetime.utcnow().isoformat()
 
-        logger.info(f"Processing batch of {len(jobs_df)} jobs for description parsing")
+        logger.info(f"Processing batch {batch_num}/{total_batches} of {len(jobs_df)} jobs for description parsing")
         
         new_count = 0
-        for idx, row in jobs_df.iterrows():
+        # Show initial progress bars
+        batch_prefix = f"Batch {batch_num}/{total_batches}: "
+        job_prefix = f"  Job: "
+        self._update_progress_bars(batch_num, total_batches, 0, len(jobs_df), batch_prefix, job_prefix)
+        
+        for current_job_idx, (idx, row) in enumerate(jobs_df.iterrows(), 1):
             desc = str(row.get('description') or '').strip()
             job_id = str(row.get('job_id') or '')
             title = str(row.get('title', 'Unknown Title'))
@@ -203,7 +249,8 @@ class DescriptionTools:
                 logger.warning(f"Job {job_id}: Skipping due to missing description or job_id")
                 continue
                 
-            logger.info(f"Job {job_id}: Starting processing for '{title}' at '{company}'")
+            # Update progress bars for current job
+            self._update_progress_bars(batch_num, total_batches, current_job_idx, len(jobs_df), batch_prefix, job_prefix, f"Processing '{title[:30]}...'")
             
             h = self._hash_description(desc)
             cached = self._find_cached(job_id, h, version)
@@ -236,15 +283,19 @@ class DescriptionTools:
                 new_count += 1
                 logger.success(f"Job {job_id}: Successfully stored parsed description ({new_count}/{len(jobs_df)} completed)")
                 
+                # Update progress bars after successful processing
+                self._update_progress_bars(batch_num, total_batches, current_job_idx, len(jobs_df), batch_prefix, job_prefix, f"Completed '{title[:30]}...'")
+                
                 # Add a small delay between jobs to slow down processing
-                if not dry and new_count < len(jobs_df):
+                if not dry and current_job_idx < len(jobs_df):
                     import time
                     time.sleep(2)  # 2 second delay between LLM calls
-                    logger.info(f"Pausing for 2 seconds before next job...")
                     
             except Exception as e:
                 logger.error(f"Job {job_id}: Failed to store parsed description: {e}")
-                
+        
+        # Final progress update
+        self._update_progress_bars(batch_num, total_batches, len(jobs_df), len(jobs_df), batch_prefix, job_prefix, "Batch Complete")
         logger.info(f"Batch processing complete: {new_count} new descriptions parsed and stored")
         return new_count
 
@@ -301,8 +352,9 @@ class DescriptionTools:
             
             total_unparsed = len(unparsed_df)
             max_to_process = min(total_unparsed, max_batches * batch_size)
+            total_planned_batches = min(max_batches, (max_to_process + batch_size - 1) // batch_size)
             
-            logger.info(f"Description parser: found {total_unparsed} unparsed descriptions, will process up to {max_to_process} (max {max_batches} batches of {batch_size})")
+            logger.info(f"Description parser: found {total_unparsed} unparsed descriptions, will process up to {max_to_process} (max {total_planned_batches} batches of {batch_size})")
             
             # Process in batches, respecting max_batches limit
             for batch_start in range(0, max_to_process, batch_size):
@@ -316,12 +368,13 @@ class DescriptionTools:
                 # Remove desc_hash column before processing (parse_batch doesn't expect it)
                 batch_for_processing = batch_df.drop(columns=['desc_hash'])
                 
-                # Process this batch
-                processed = self.parse_batch(batch_for_processing)
+                # Process this batch with batch number information
+                batch_number = batches_processed + 1
+                processed = self.parse_batch(batch_for_processing, batch_number, total_planned_batches)
                 total_new += processed
                 batches_processed += 1
                 
-                logger.info(f"Description parser: processed batch {batches_processed}/{max_batches}, parsed {processed}/{len(batch_df)} items")
+                logger.info(f"Description parser: processed batch {batches_processed}/{total_planned_batches}, parsed {processed}/{len(batch_df)} items")
 
         if total_new > 0:
             logger.info(
