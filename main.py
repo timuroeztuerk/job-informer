@@ -44,6 +44,7 @@ def main():
     group.add_argument('--test', action='store_true', help='Run combined tests')
     group.add_argument('--db-summary', dest='db_summary', action='store_true', help='Show database summary')
     group.add_argument('--purge', action='store_true', help='Purge unwanted jobs')
+    group.add_argument('--purge-part-time', dest='purge_part_time', action='store_true', help='Purge jobs with part-time employment type from parsed descriptions')
     group.add_argument('--ai-purge', dest='ai_purge', action='store_true', help='Run AI-powered job purging')
     group.add_argument('--get-descriptions', dest='get_descriptions', action='store_true', help='Backfill missing job descriptions')
     group.add_argument('--parse-descriptions', dest='parse_descriptions', action='store_true', help='Parse job descriptions with AI')

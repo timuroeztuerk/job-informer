@@ -183,14 +183,60 @@ class Utilities:
             else:
                 unwanted_by_company = all_jobs_df.iloc[0:0]
 
+            # 1.5) Remove jobs with part-time employment type from parsed descriptions
+            import json
+            part_time_job_ids = set()
+            try:
+                with self.scraper.db._get_connection() as conn:
+                    part_time_df = pd.read_sql_query("""
+                        SELECT DISTINCT j.job_id, j.title, j.company, p.payload_json
+                        FROM jobs j
+                        INNER JOIN parsed_descriptions p ON j.job_id = p.job_id
+                        INNER JOIN (
+                            SELECT job_id, MAX(version) as max_version
+                            FROM parsed_descriptions
+                            GROUP BY job_id
+                        ) latest ON p.job_id = latest.job_id AND p.version = latest.max_version
+                    """, conn)
+                
+                part_time_examples = []
+                for _, row in part_time_df.iterrows():
+                    try:
+                        payload = json.loads(row['payload_json'])
+                        employment_type = payload.get('employment_type', '').lower()
+                        
+                        # Concise combined check for part-time/contract/internship employment types
+                        tokens = ('part-time', 'contract', 'internship')
+                        if any(t in employment_type for t in tokens):
+                            part_time_job_ids.add(row['job_id'])
+                            if len(part_time_examples) < 3:
+                                part_time_examples.append((row['title'], row['company']))
+
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+                
+                if part_time_job_ids:
+                    logger.info(f"Found {len(part_time_job_ids)} part-time jobs to remove based on parsed descriptions")
+                    if part_time_examples:
+                        logger.info("Examples of part-time jobs:")
+                        for title, company in part_time_examples:
+                            logger.info(f"  - {title} at {company}")
+                            
+            except Exception as e:
+                logger.warning(f"Could not check part-time jobs from parsed descriptions: {e}")
+
             # Combine unwanted ids
             unwanted_ids = set()
             if not unwanted_by_title.empty:
                 unwanted_ids.update(unwanted_by_title['job_id'].tolist())
             if not unwanted_by_company.empty:
                 unwanted_ids.update(unwanted_by_company['job_id'].tolist())
+            if part_time_job_ids:
+                unwanted_ids.update(part_time_job_ids)
 
-            # 2) Remove duplicates: keep most recent per normalized (title, company, location, source)
+            # 2) Remove duplicates: keep most recent per normalized (title, company, source)
+            #    Note: We intentionally ignore location so entries with the same title+company
+            #    but different locations are considered duplicates and purged.
             norm_df = all_jobs_df.copy()
             for col in ['title', 'company', 'location', 'source']:
                 if col in norm_df.columns:
@@ -211,7 +257,7 @@ class Utilities:
 
             norm_df_sorted = norm_df.sort_values(by=['_order'], ascending=False)
             keep_idx = norm_df_sorted.drop_duplicates(
-                subset=['title_norm', 'company_norm', 'location_norm', 'source_norm'], keep='first'
+                subset=['title_norm', 'company_norm', 'source_norm'], keep='first'
             ).index
             dup_mask = ~norm_df.index.isin(keep_idx)
             duplicate_jobs = all_jobs_df[dup_mask]
@@ -225,7 +271,7 @@ class Utilities:
                 return True
 
             logger.info(
-                f"Will remove {len(to_delete_ids)} jobs (unwanted: {len(unwanted_ids)}, duplicates: {len(duplicate_ids)})"
+                f"Will remove {len(to_delete_ids)} jobs (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, part-time: {len(part_time_job_ids)}], duplicates: {len(duplicate_ids)})"
             )
 
             # Delete selected jobs
@@ -234,6 +280,11 @@ class Utilities:
                 try:
                     cursor.executemany("DELETE FROM jobs WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
                     conn.commit()
+                    
+                    # Also clean up orphaned parsed descriptions for deleted jobs
+                    if to_delete_ids:
+                        cursor.executemany("DELETE FROM parsed_descriptions WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
+                        conn.commit()
                 except Exception as e:
                     logger.error(f"Error during deletion: {e}")
                     return False
@@ -243,7 +294,7 @@ class Utilities:
                 final_count = cursor.fetchone()[0]
 
             logger.info(
-                f"Purge complete: {len(to_delete_ids)} jobs removed (unwanted: {len(unwanted_ids)}, duplicates: {len(duplicate_ids)}). Remaining: {final_count}"
+                f"Purge complete: {len(to_delete_ids)} jobs removed (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, part-time: {len(part_time_job_ids)}], duplicates: {len(duplicate_ids)}). Remaining: {final_count}"
             )
 
             if len(to_delete_ids) > 0:
