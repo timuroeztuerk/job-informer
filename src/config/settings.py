@@ -55,6 +55,7 @@ class Config:
     # Feature Toggles
     enable_linkedin: bool
     dry_run: bool
+    auto_purge_before_scraping: bool
     
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> 'Config':
@@ -137,7 +138,8 @@ class Config:
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
-            dry_run=_get_bool('DRY_RUN', 'false')
+            dry_run=_get_bool('DRY_RUN', 'false'),
+            auto_purge_before_scraping=_get_bool('AUTO_PURGE_BEFORE_SCRAPING', 'true')
         )
     
     def validate_for_mode(self, mode: str) -> None:

@@ -45,12 +45,39 @@ class Utilities:
         """Execute job search and send notifications"""
         
         try:
+            # Run automatic purge before scraping to clean up unwanted jobs (if enabled)
+            if getattr(self.config, 'auto_purge_before_scraping', True):
+                logger.info("Running automatic database cleanup before scraping...")
+                try:
+                    purge_success = self.purge_unwanted_jobs()
+                    if purge_success:
+                        logger.info("Database cleanup completed successfully")
+                    else:
+                        logger.warning("Database cleanup encountered issues but continuing with search")
+                except Exception as e:
+                    logger.warning(f"Database cleanup failed: {e}, continuing with search")
+            else:
+                logger.info("Automatic database cleanup disabled, skipping")
+
             # Parse keywords and locations from config
             keywords = [k.strip() for k in self.config.search_keywords.split(',')]
             locations = [l.strip() for l in self.config.search_locations.split(',')]
             jobs_df = self.scraper.scrape(keywords, locations)
             
             if not jobs_df.empty:
+                # Apply additional filtering to newly scraped jobs
+                jobs_df = self.filter_scraped_jobs(jobs_df)
+                
+                if jobs_df.empty:
+                    logger.warning("All scraped jobs were filtered out by purge criteria")
+                    # Send notification about filtered results (respect dry run)
+                    subject = "Job Search Report - No jobs after filtering"
+                    if not self.config.dry_run:
+                        self.email_sender.send_job_report(jobs_df, subject)
+                    else:
+                        logger.info("DRY_RUN is enabled; skipping filtered-results email")
+                    return False
+                
                 # Store jobs in SQLite database (fast deduplication)
                 new_jobs_count = self.scraper.db.put_into_sql(jobs_df)
                 
@@ -216,9 +243,9 @@ class Utilities:
                         continue
                 
                 if part_time_job_ids:
-                    logger.info(f"Found {len(part_time_job_ids)} part-time jobs to remove based on parsed descriptions")
+                    logger.info(f"Found {len(part_time_job_ids)} unwanted employment type jobs to remove based on parsed descriptions (part-time/contract/internship)")
                     if part_time_examples:
-                        logger.info("Examples of part-time jobs:")
+                        logger.info("Examples of unwanted employment type jobs:")
                         for title, company in part_time_examples:
                             logger.info(f"  - {title} at {company}")
                             
@@ -271,7 +298,7 @@ class Utilities:
                 return True
 
             logger.info(
-                f"Will remove {len(to_delete_ids)} jobs (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, part-time: {len(part_time_job_ids)}], duplicates: {len(duplicate_ids)})"
+                f"Will remove {len(to_delete_ids)} jobs (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, employment types: {len(part_time_job_ids)}], duplicates: {len(duplicate_ids)})"
             )
 
             # Delete selected jobs
@@ -294,7 +321,7 @@ class Utilities:
                 final_count = cursor.fetchone()[0]
 
             logger.info(
-                f"Purge complete: {len(to_delete_ids)} jobs removed (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, part-time: {len(part_time_job_ids)}], duplicates: {len(duplicate_ids)}). Remaining: {final_count}"
+                f"Purge complete: {len(to_delete_ids)} jobs removed (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, employment types: {len(part_time_job_ids)}], duplicates: {len(duplicate_ids)}). Remaining: {final_count}"
             )
 
             if len(to_delete_ids) > 0:
@@ -316,5 +343,66 @@ class Utilities:
         except Exception as e:
             logger.error(f"Error purging unwanted jobs: {e}")
             return False
+
+    def filter_scraped_jobs(self, jobs_df: pd.DataFrame) -> pd.DataFrame:
+        """Apply purge filters to newly scraped jobs before storing/emailing them"""
+        if jobs_df.empty:
+            return jobs_df
+            
+        original_count = len(jobs_df)
+        logger.info(f"Filtering {original_count} newly scraped jobs...")
+        
+        try:
+            import re as _re
+            
+            # 1) Remove jobs matching unwanted keywords in TITLE
+            unwanted_kw = self.config.get_unwanted_keywords_list()
+            if unwanted_kw and 'title' in jobs_df.columns:
+                escaped_kw = [_re.escape(k) for k in unwanted_kw if k]
+                if escaped_kw:
+                    patt_kw = "|".join(escaped_kw)
+                    mask_keep = ~jobs_df['title'].astype(str).str.contains(patt_kw, case=False, na=False, regex=True)
+                    jobs_df = jobs_df[mask_keep]
+                    
+            # 2) Remove jobs matching unwanted companies
+            unwanted_companies = self.config.get_unwanted_companies_list()
+            if unwanted_companies and 'company' in jobs_df.columns:
+                terms = [_re.escape(c) for c in unwanted_companies if c]
+                if terms:
+                    patt_co = "|".join(terms)
+                    mask_keep = ~jobs_df['company'].astype(str).str.contains(patt_co, case=False, na=False, regex=True)
+                    jobs_df = jobs_df[mask_keep]
+            
+            # 3) Remove jobs with obvious part-time/internship indicators in title
+            if 'title' in jobs_df.columns:
+                employment_indicators = [
+                    'part-time', 'part time', 'teilzeit',  # part-time variations
+                    'intern', 'internship', 'praktik',     # internship variations
+                    'contract', 'contractor', 'freiberufl', # contract variations
+                    'werkstudent', 'working student',       # student positions
+                    'trainee', 'ausbildung'                # trainee/apprenticeship
+                ]
+                # Use word boundary for more precise matching with non-capturing group
+                employment_pattern = r'\b(?:' + '|'.join(_re.escape(term) for term in employment_indicators) + r')\b'
+                mask_keep = ~jobs_df['title'].astype(str).str.contains(employment_pattern, case=False, na=False, regex=True)
+                before_employment_filter = len(jobs_df)
+                jobs_df = jobs_df[mask_keep]
+                employment_filtered = before_employment_filter - len(jobs_df)
+                if employment_filtered > 0:
+                    logger.info(f"Filtered out {employment_filtered} jobs with unwanted employment indicators in title")
+            
+            filtered_count = len(jobs_df)
+            removed_count = original_count - filtered_count
+            
+            if removed_count > 0:
+                logger.info(f"Total filtered out: {removed_count} newly scraped jobs. Remaining: {filtered_count}")
+            else:
+                logger.info(f"All {original_count} newly scraped jobs passed all filters")
+                
+            return jobs_df
+            
+        except Exception as e:
+            logger.error(f"Error filtering scraped jobs: {e}, returning original dataset")
+            return jobs_df
 
 
