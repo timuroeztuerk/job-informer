@@ -121,6 +121,7 @@ class Utilities:
         return {
             'keywords': self.config.get_keywords_list(),
             'locations': self.config.get_locations_list(),
+            'time_range': getattr(self.config, 'search_time_range', 'day'),
             'email_configured': bool(self.config.email_address and self.config.email_password),
             'recipient': self.config.recipient_email,
             'user_agent': self.config.user_agent[:50] + "..." if len(self.config.user_agent) > 50 else self.config.user_agent,

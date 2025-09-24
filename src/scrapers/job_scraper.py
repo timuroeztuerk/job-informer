@@ -5,7 +5,7 @@ import os
 import glob
 import time
 import random
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import sys
 import requests
 from bs4 import BeautifulSoup
@@ -17,10 +17,17 @@ from urllib.parse import quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
-from ..config.settings import Config
+from ..config.settings import Config, DEFAULT_TIME_RANGE
 from ..utils.database import JobDatabase
 from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url, remove_historical_duplicates, filter_unwanted_jobs
 from ..utils.terminal_utils import _sleep_with_feedback, _print_progress, _progress_bar, _sleep_quiet
+
+TIME_RANGE_TO_SECONDS = {
+    "day": 24 * 60 * 60,
+    "week": 7 * 24 * 60 * 60,
+    "month": 30 * 24 * 60 * 60,
+}
+
 
 class JobScraper:
     """Base class for job scraping functionality"""
@@ -131,6 +138,21 @@ class JobScraper:
             logger.debug(f"Giving up fetching {url}: {last_exc}")
         return None
 
+    def _get_linkedin_time_filter(self) -> Tuple[int, str]:
+        """Resolve the configured time range to LinkedIn's `f_TPR` seconds filter."""
+        configured = getattr(self.config, 'search_time_range', DEFAULT_TIME_RANGE)
+        normalized = (configured or DEFAULT_TIME_RANGE).strip().lower()
+        seconds = TIME_RANGE_TO_SECONDS.get(normalized)
+        if seconds is None:
+            logger.warning(
+                "Unsupported time range '{}' provided; defaulting to '{}'",
+                configured,
+                DEFAULT_TIME_RANGE,
+            )
+            normalized = DEFAULT_TIME_RANGE
+            seconds = TIME_RANGE_TO_SECONDS[DEFAULT_TIME_RANGE]
+        return seconds, normalized
+
     def _extract_linkedin_description(self, job_url: str) -> str:
         """Extract description from a LinkedIn job page. Used by backfill mode only."""
         if not job_url:
@@ -165,18 +187,21 @@ class JobScraper:
 
     def scrape_linkedin(self, keywords: str, location: str) -> List[Dict]:
         """Scrape job postings from LinkedIn public listings with pagination and optional descriptions.
-        - Applies: last 24 hours, full-time only
+        - Applies: configurable time range (day/week/month), full-time only
         - Paginates using the `start` parameter (25 results per page typical)
         - Optionally fetches job descriptions from detail pages (bounded concurrency)
         """
-        logger.debug(f"Scraping LinkedIn for '{keywords}' in '{location}' (last 24 hours, full-time)")
+        time_filter_seconds, normalized_time_range = self._get_linkedin_time_filter()
+        logger.debug(
+            f"Scraping LinkedIn for '{keywords}' in '{location}' (time range: {normalized_time_range}, full-time)"
+        )
 
         def build_search_url(start: int) -> str:
             return (
                 "https://www.linkedin.com/jobs/search/?"
                 f"keywords={quote_plus(keywords)}"
                 f"&location={quote_plus(location)}"
-                f"&f_TPR=r86400&f_JT=F&start={start}&origin=JOB_SEARCH_PAGE_JOB_FILTER&trk=public_jobs_jobs-search-bar_search-submit"
+                f"&f_TPR=r{time_filter_seconds}&f_JT=F&start={start}&origin=JOB_SEARCH_PAGE_JOB_FILTER&trk=public_jobs_jobs-search-bar_search-submit"
             )
 
         def parse_cards(soup: BeautifulSoup) -> List[Dict]:

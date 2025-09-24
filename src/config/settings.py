@@ -10,6 +10,10 @@ from dataclasses import dataclass
 import re
 
 
+VALID_TIME_RANGES = {"day", "week", "month"}
+DEFAULT_TIME_RANGE = "day"
+
+
 @dataclass
 class Config:
     """Configuration class for Job Informer application"""
@@ -24,6 +28,7 @@ class Config:
     # Job Search Configuration
     search_keywords: str
     search_locations: str
+    search_time_range: str
     unwanted_keywords: str
     unwanted_companies: str
     
@@ -69,6 +74,13 @@ class Config:
             value = os.getenv(name, default)
             return bool(re.match(r"^(1|true|yes|y|on)$", str(value).strip(), re.IGNORECASE))
 
+        def _get_time_range(name: str, default: str = DEFAULT_TIME_RANGE) -> str:
+            value = os.getenv(name, default)
+            value = (value or default).strip().lower()
+            if value not in VALID_TIME_RANGES:
+                return DEFAULT_TIME_RANGE
+            return value
+
         return cls(
             # Email Configuration
             smtp_server=os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
@@ -80,6 +92,7 @@ class Config:
             # Job Search Configuration
             search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Science, Data Analysis, AI'),
             search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
+            search_time_range=_get_time_range('SEARCH_TIME_RANGE', DEFAULT_TIME_RANGE),
             unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', 'adobe,abschluss,geo,volon,scrum,portfolio,financial,governance,labor,bestand,mergers,commodity,steuer,solution architect,finanzbuchhalter,projektmanager,gesundheit,laborant,logistikassistent,assistent,finanzbuchalter,reliability,Software Entwickler:in,Softwareingenieur,software engineer,solutions engineer,Gesundheitswissenschaftler,treasury,bioinformatiker,biologe,equity,retail,lehrkraft,cyber,creator,pwc,deloitte,auditor,phd,befristet,risk,compliance,public sector,microsoft,skillfinder,slurm,supplier,emat,praxis,operator,quality,medical,referent,last minute,assetmanagement,vermessungstechnikerin,powerbi,financial risk,vertriebssteuerung,ux designer,pricing,akademische/r,president,c++,devops,regulatory,assistent:in,projektkoordinator:in,cash,pay,sharepoint,teamlead,credit,sas,ontologien,photonics,convince,forensic,real estate,visual,opportunities,credit risk,life science,50%,produktmanager,produktbetreuer,kontakt-center,ce learning,kernel,think tank,aktuar,system,programmmanager,mathematiker,hr,gis,praktikant,geography,underwriter,controller,manager,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,developer,threat,mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,scientist,founding,client,nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,working student,frontend,backend,techniker,manager,planer,nebenberuflich,full stack,lead,dual,duales,studium,controlling,berater,abitur,praktikum,marketing,verkäufer,internship,sales,freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester'),
             unwanted_companies=os.getenv('UNWANTED_COMPANIES', 'mycareernow GmbH,universität,pwc,deloitte,nachhilfeunterricht'),
             
@@ -166,6 +179,8 @@ class Config:
                 errors.append("SEARCH_KEYWORDS is required")
             if not self.search_locations:
                 errors.append("SEARCH_LOCATIONS is required")
+            if (self.search_time_range or '').strip().lower() not in VALID_TIME_RANGES:
+                errors.append("SEARCH_TIME_RANGE must be one of: day, week, month")
 
         if mode in gemini_required_modes:
             if not self.gemini_api_key:
@@ -204,6 +219,7 @@ class Config:
             'recipient_email': self.recipient_email,
             'search_keywords': self.search_keywords,
             'search_locations': self.search_locations,
+            'search_time_range': self.search_time_range,
             'unwanted_keywords': self.unwanted_keywords,
             'unwanted_companies': self.unwanted_companies,
             'request_delay': self.request_delay,

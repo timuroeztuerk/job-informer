@@ -53,11 +53,18 @@ def main():
         type=str,
         help='Job search keywords (comma-separated)'
     )
-    
+
     parser.add_argument(
         '--locations',
         type=str,
         help='Search locations (comma-separated)'
+    )
+
+    parser.add_argument(
+        '--time',
+        dest='time_range',
+        choices=['day', 'week', 'month'],
+        help='Filter jobs posted within the specified time range'
     )
 
     args = parser.parse_args()
@@ -90,6 +97,8 @@ def main():
             config.search_keywords = args.keywords
         if args.locations:
             config.search_locations = args.locations
+        if args.time_range:
+            config.search_time_range = args.time_range
         # Validate configuration for the selected mode
         config.validate_for_mode(mode_str)
         # Setup logging
@@ -122,7 +131,11 @@ def main():
 def run_job_search_once(utils: Utilities):
     """Run the Job Scraper"""
     summary = utils.get_search_summary()
-    logger.info(f"Starting, Keywords: {', '.join(summary['keywords'])}, Locations: {', '.join(summary['locations'])}")
+    keywords_str = ', '.join(summary['keywords'])
+    locations_str = ', '.join(summary['locations'])
+    logger.info(
+        f"Starting, Keywords: {keywords_str}, Locations: {locations_str}, Time range: {summary['time_range']}"
+    )
     
     success = utils.execute_job_search()
     if success:
