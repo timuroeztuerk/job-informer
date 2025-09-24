@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
-from ..description_tools.parser import DescriptionTools
+from .parser import DescriptionTools
 from ..utils.llm_connection import LLMConnection
 
 @dataclass
@@ -52,10 +52,9 @@ class AIPurger:
         
         IMPORTANT: Be conservative and only purge jobs that are clearly irrelevant or low-quality.
         Looking at the job titles and companies, you should purge jobs that are:
-        - Clearly IRRELEVANT to data science, data analysis, machine learning, AI, or software engineering (e.g. sales, retail, manual labor)
-        - Obviously spam, duplicate, or very low-quality postings
-        - Jobs from companies in the unwanted list
-        - Jobs with titles containing unwanted keywords
+        - Clearly IRRELEVANT to data science, data analysis, machine learning, AI, or software engineering (e.g. sales, retail, manual labor).
+        - I'm looking for data science, machine learning, AI jobs, NOT purely software engineering jobs.
+        - Obviously spam, duplicate, or very low-quality postings.
         - AI consultant jobs can stay, if they are not duplicate.
         DO NOT purge jobs that might be relevant, even if you're unsure.
         
@@ -342,22 +341,3 @@ class AIPurger:
             logger.error(f"AI-Purger error: {e}")
             summary["error"] = str(e)
             return summary
-
-    def llm_connection(self) -> bool:
-        """
-        Test LLM connection
-        Returns True if connection is successful, False otherwise
-        """
-        try:
-            if not getattr(self.llm, 'api_key', ''):
-                logger.error("OPENAI_API_KEY not configured")
-                return False
-            ok = self.llm.ping()
-            if ok: #simply continue
-                pass
-            else:
-                logger.error("LLM connection test failed")
-            return ok
-        except Exception as e:
-            logger.error(f"LLM connection test error: {e}")
-            return False

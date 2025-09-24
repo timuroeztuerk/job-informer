@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
-from ..scrapers.job_scraper import JobScraper
-from ..utils.utilities import Utilities
+from .job_scraper import JobScraper
+# from ..utils.utilities import Utilities  # Temporarily commented out
 from ..utils.llm_connection import LLMConnection
 
 
@@ -400,7 +400,7 @@ class DescriptionTools:
             logger.error(f"Description parser error: {e}")
             return False
 
-    def backfill_missing_descriptions(self, utils: Utilities, scraper: JobScraper, batch_size: int = 50, max_batches: int = 10) -> bool:
+    def backfill_missing_descriptions(self, scraper: JobScraper, batch_size: int = 50, max_batches: int = 10) -> bool:
         """Fetch and fill descriptions for jobs in DB missing descriptions.
         Processes up to (batch_size * max_batches) jobs with gentle pacing and rate-limit awareness.
         Jobs that fail to fetch descriptions are marked to avoid retrying.
@@ -428,7 +428,7 @@ class DescriptionTools:
                 failed_job_ids = []
                 total_in_batch = int(len(to_fill))
                 completed_in_batch = 0
-                utils._update_progress(0, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
+                scraper._update_progress(0, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
 
                 for _, row in to_fill.iterrows():
                     url = str(row.get('url') or '')
@@ -438,7 +438,7 @@ class DescriptionTools:
                     if not url:
                         failed_job_ids.append(job_id)  # No URL to fetch from
                         completed_in_batch += 1
-                        utils._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
+                        scraper._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
                         continue
 
                     desc = scraper._extract_linkedin_description(url)
@@ -450,7 +450,7 @@ class DescriptionTools:
                     # gentle pacing between requests
                     time.sleep(max(0.5, scraper.config.request_delay))
                     completed_in_batch += 1
-                    utils._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
+                    scraper._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
 
                 # Update successful descriptions
                 if updates:

@@ -1,18 +1,39 @@
+"""
+Job Informer Package
+
+Main package for the Job Informer automated job monitoring system.
+Provides access to configuration, utilities, and agent components.
+"""
+
 # Version information
 __version__ = "1.0.1"
 
 # Delayed imports to avoid circular dependencies
 def get_job_scraper():
-    from .scrapers.job_scraper import JobScraper
+    """Get JobScraper class (deferred import)"""
+    from .agents.job_scraper import JobScraper
     return JobScraper
 
-def get_utilities():
-    from .utils.utilities import Utilities
-    return Utilities
+# def get_utilities():
+#     """Get Utilities class (deferred import) - REMOVED: functions moved to respective agents"""
+#     from .utils.utilities import Utilities
+#     return Utilities
 
 def get_email_sender():
-    from .email_notifier.email_sender import EmailSender
+    """Get EmailSender class (deferred import)"""
+    from .agents.email_sender import EmailSender
     return EmailSender
 
-# Empty __all__ to discourage direct imports from this package
-__all__ = []
+def get_config():
+    """Get Config class (deferred import)"""
+    from .config.settings import Config
+    return Config
+
+# Expose deferred imports for convenience
+__all__ = [
+    "get_job_scraper",
+    # "get_utilities",  # Removed: functions moved to respective agents
+    "get_email_sender",
+    "get_config",
+    "__version__"
+]

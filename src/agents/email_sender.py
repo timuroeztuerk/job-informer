@@ -890,3 +890,45 @@ class EmailSender:
             formatted_lines.append('</ul>')
         
         return '\n'.join(formatted_lines)
+
+    def filter_and_send_historical_jobs(self) -> bool:
+        """Apply current filters to historical data from database and send filtered results"""
+        from ..agents.job_scraper import JobScraper
+        
+        scraper = JobScraper(self.config)
+        
+        try:
+            # Get all jobs from database and apply current filters
+            with scraper.db._get_connection() as conn:
+                all_jobs_df = pd.read_sql_query("SELECT * FROM jobs ORDER BY scraped_at DESC", conn)
+            
+            if all_jobs_df.empty:
+                logger.warning("No historical job data found in database")
+                subject = "Job Informer Filtered Historical Data - No Data Available"
+                self.send_job_report(all_jobs_df, subject)
+                return False
+            
+            # Apply current filters (same logic as in scraper)
+            filtered_jobs_df = scraper.filter_unwanted_jobs(all_jobs_df.copy())
+            
+            if filtered_jobs_df.empty:
+                logger.warning("No jobs remained after filtering historical data")
+                subject = "Job Informer Filtered Historical Data - No Jobs After Filtering"
+                self.send_job_report(filtered_jobs_df, subject)
+                return False
+            
+            logger.info(f"Filtered historical data: {len(filtered_jobs_df)} jobs passed the current filters")
+            
+            # Send email with filtered historical jobs
+            subject = f"Job Informer Filtered Historical Data - {len(filtered_jobs_df)} Jobs After Filtering"
+            success = self.send_job_report(filtered_jobs_df, subject)
+            
+            if not success:
+                logger.error("Failed to send filtered historical data report")
+                
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error filtering historical jobs: {e}")
+            self.send_error_notification(str(e))
+            return False

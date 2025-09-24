@@ -4,9 +4,8 @@ Job Informer - Main Application Entry Point
 Automated job posting monitoring and notification system
 """
 
-import os
 import argparse
-import sys, logging
+import sys
 import json
 from loguru import logger
 from pathlib import Path
@@ -14,34 +13,19 @@ import pandas as pd
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-class InterceptHandler(logging.Handler):
-    def emit(self, record):
-        try:
-            level = logger.level(record.levelname).name
-        except Exception:
-            level = "INFO"
-        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
-
-def setup_logging():
-    logger.remove()
-    logger.add(
-        sys.stdout,
-        colorize=True,
-        format="<level>{level.icon}</level> <cyan>{message}</cyan>",
-        level="INFO",
-    )
-
-    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
-
+from src.utils.logging_utils import setup_logging
 setup_logging()
 
 from src.config.settings import Config
 from src.utils.logging_utils import setup_logging
-from src.scrapers.job_scraper import JobScraper
-from src.description_tools import DescriptionTools
-from src.utils.utilities import Utilities
-from src.ai_job_purger.ai_purger import AIPurger
+from src.agents.job_scraper import JobScraper
+from src.agents.parser import DescriptionTools
+from src.config.settings import Config
+from src.agents.job_scraper import JobScraper
+from src.agents.email_sender import EmailSender
+from src.agents.ai_purger import AIPurger
+from src.agents.parser import DescriptionTools
+from src.agents.ai_purger import AIPurger
 
 def create_data_directory():
     """Create data directory if it doesn't exist"""
@@ -125,17 +109,17 @@ def main():
         create_data_directory()
         
         if args.run_once:
-            run_job_search_once(Utilities(config))  
+            run_job_search_once(config)  
         elif args.test:
-            run_all_tests(Utilities(config))
+            run_all_tests(config)
         elif args.db_summary:
-            show_database_summary(Utilities(config))
+            show_database_summary(config)
         elif args.purge:
-            purge_unwanted_jobs(Utilities(config))
+            purge_unwanted_jobs(config)
         elif args.ai_purge:
-            run_ai_purge_mode(Utilities(config))
+            run_ai_purge_mode(config)
         elif args.get_descriptions:
-            get_descriptions(DescriptionTools(config), Utilities(config), JobScraper(config))
+            get_descriptions(config)
         elif args.parse_descriptions:
             run_description_parser(DescriptionTools(config))
         else:
@@ -146,29 +130,31 @@ def main():
         logger.error(f"Application error: {e}")
         sys.exit(1)
 
-def run_job_search_once(utils: Utilities):
+def run_job_search_once(config: Config):
     """Run the Job Scraper"""
-    summary = utils.get_search_summary()
+    scraper = JobScraper(config)
+    summary = scraper.get_search_summary()
     keywords_str = ', '.join(summary['keywords'])
     locations_str = ', '.join(summary['locations'])
     logger.info(
         f"Starting, Keywords: {keywords_str}, Locations: {locations_str}, Time range: {summary['time_range']}"
     )
     
-    success = utils.execute_job_search()
+    success = scraper.execute_job_search()
     if success:
         logger.success("=== Job Search Done ===")
     else:
         logger.warning("=== No Jobs Found ===")
 
-def run_all_tests(utils: Utilities):
+def run_all_tests(config: Config):
     """Run combined tests: config/email test, scraper init, and AI connection"""
     overall_success = True
     
     try:
-        utils.config.validate()
+        config.validate()
         try:
-            success = utils.email_sender.send_test_email()
+            email_sender = EmailSender(config)
+            success = email_sender.send_test_email()
             if success:
                 pass
             else:
@@ -177,22 +163,29 @@ def run_all_tests(utils: Utilities):
         except Exception as e:
             logger.error(f"Email test error: {e}")
             overall_success = False
-        if utils.scraper:
-            pass
-        else:
-            logger.error("Scraper initialization failed")
+            
+        # Test scraper initialization
+        try:
+            scraper = JobScraper(config)
+            if scraper:
+                pass
+            else:
+                logger.error("Scraper initialization failed")
+                overall_success = False
+        except Exception as e:
+            logger.error(f"Scraper initialization error: {e}")
             overall_success = False
         
         # Test LLM connection (if API key is configured)
         try:
-            if hasattr(utils.config, 'gemini_api_key') and utils.config.gemini_api_key:
+            if hasattr(config, 'gemini_api_key') and config.gemini_api_key:
                 # Initialize AI Purger with test mode enabled
-                ai_purger = AIPurger(utils.config, test_mode=True)
-                # Test LLM connection
-                if ai_purger.llm_connection():
-                    pass
+                ai_purger = AIPurger(config, test_mode=True)
+                # Test LLM connection by checking if API key is available
+                if hasattr(ai_purger.llm, 'api_key') and ai_purger.llm.api_key:
+                    logger.info("AI LLM connection test passed (API key configured)")
                 else:
-                    logger.error("AI LLM connection failed")
+                    logger.error("AI LLM connection failed (no API key)")
                     overall_success = False
             else:
                 logger.info("AI LLM test skipped (no API key configured)")
@@ -210,16 +203,17 @@ def run_all_tests(utils: Utilities):
         logger.error(f"Test failed: {e}")
         overall_success = False
 
-def show_database_summary(utils: Utilities):
+def show_database_summary(config: Config):
     """Show database summary statistics"""
-    summary = utils.scraper.db.get_job_summary()
+    scraper = JobScraper(config)
+    summary = scraper.db.get_job_summary()
     print(f"\n📊 Job Database Summary:")
     print(f"Total jobs: {summary['total_jobs']:,}")
     print(f"Recent jobs (7 days): {summary['recent_jobs_7_days']:,}")
     print(f"Date range: {summary['date_range']['earliest']} to {summary['date_range']['latest']}")
     # Add parsed description analytics
     try:
-        with utils.scraper.db._get_connection() as conn:
+        with scraper.db._get_connection() as conn:
             # Get parsed descriptions with the latest version for each job
             parsed_df = pd.read_sql_query("""
                 SELECT p.job_id, p.payload_json, p.version
@@ -403,7 +397,7 @@ def show_database_summary(utils: Utilities):
     
     # City/description coverage breakdown
     try:
-        with utils.scraper.db._get_connection() as conn:
+        with scraper.db._get_connection() as conn:
             all_jobs_df = pd.read_sql_query("SELECT location, description FROM jobs", conn)
         
         if all_jobs_df is None or all_jobs_df.empty:
@@ -420,28 +414,35 @@ def show_database_summary(utils: Utilities):
     except Exception as e:
         logger.warning(f"Could not compute city summary: {e}")
 
-def purge_unwanted_jobs(utils: Utilities):
-    """Purge unwanted jobs from the database based on current filters"""
-    logger.info("=== Purging Unwanted Jobs from Database ===")
-    success = utils.purge_unwanted_jobs()
-    
-    if success:
-        logger.success("=== Database Purge Completed Successfully ===")
-    else:
-        logger.error("=== Database Purge Failed ===")
+def purge_unwanted_jobs(config: Config):
+    """Purge unwanted jobs from database"""
+    scraper = JobScraper(config)
+    try:
+        logger.info("Starting database purge...")
+        success = scraper.purge_unwanted_jobs()
+        
+        if success:
+            logger.success("=== Database Purge Completed Successfully ===")
+        else:
+            logger.error("=== Database Purge Failed ===")
+            sys.exit(1)
+    except Exception as e:
+        logger.error(f"Database purge error: {e}")
         sys.exit(1)
 
-def run_ai_purge_mode(utils: Utilities):
+def run_ai_purge_mode(config: Config):
     """Run AI-powered job purging using LLM analysis"""
     logger.info("=== Starting AI-Powered Job Purging ===")
     
     try:
         # Initialize AI Purger
-        ai_purger = AIPurger(utils.config)
+        ai_purger = AIPurger(config)
         
         # Test LLM connection first
-        if not ai_purger.llm_connection():
-            logger.error("Failed to connect to LLM - aborting AI purge")
+        if hasattr(ai_purger.llm, 'api_key') and ai_purger.llm.api_key:
+            logger.info("AI LLM API key is configured - proceeding with purge")
+        else:
+            logger.error("Failed to connect to LLM - no API key configured")
             sys.exit(1)
         
         # Run the AI purge process
@@ -462,9 +463,11 @@ def run_ai_purge_mode(utils: Utilities):
         logger.error(f"AI purge mode failed: {e}")
         sys.exit(1)
 
-def get_descriptions(desc: DescriptionTools, utils: Utilities, scraper: JobScraper):
+def get_descriptions(config: Config):
     """Backfill missing job descriptions in the database"""
-    success = desc.backfill_missing_descriptions(utils, scraper)
+    desc = DescriptionTools(config)
+    scraper = JobScraper(config)
+    success = desc.backfill_missing_descriptions(scraper)
     if success:
         logger.success("=== Done ===")
     else:
