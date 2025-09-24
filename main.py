@@ -22,7 +22,6 @@ from src.utils.utilities import Utilities
 from src.ai_job_purger.ai_purger import AIPurger
 from loguru import logger
 
-
 def create_data_directory():
     """Create data directory if it doesn't exist"""
     data_dir = Path("data")

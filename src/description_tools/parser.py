@@ -165,11 +165,6 @@ class DescriptionTools:
             logger.error("OPENAI_API_KEY missing; cannot parse descriptions")
             return None
         
-        # Log the LLM call details
-        desc_preview = description_text.strip()[:150] + "..." if len(description_text.strip()) > 150 else description_text.strip()
-        logger.info(f"Job {job_id}: Starting LLM call for description parsing")
-        logger.info(f"Job {job_id}: Description preview: {desc_preview}")
-        
         prompt = f"{self.prompt}\n\nDESCRIPTION:\n{description_text.strip()}\n\nRespond with JSON only."
         
         # Add system message to clarify schema, especially for salary fields
@@ -178,7 +173,6 @@ class DescriptionTools:
                      "Use null if salary information is not available.")
         
         try:
-            logger.info(f"Job {job_id}: Calling LLM with model {self.llm.model}")
             # Use structured generation with the Pydantic model
             result = self.llm.generate_structured(prompt, JobDescriptionStructure, system=system_msg)
             
@@ -191,8 +185,6 @@ class DescriptionTools:
                 # If it's already a JSON string, validate it
                 try:
                     parsed_json = json.loads(result)
-                    logger.success(f"Job {job_id}: LLM call successful - returned JSON string")
-                    logger.info(f"Job {job_id}: Extracted data preview: {json.dumps(parsed_json, indent=2)[:300]}...")
                     return result
                 except json.JSONDecodeError as e:
                     logger.error(f"Job {job_id}: Invalid JSON returned from structured LLM call: {e}")
@@ -210,8 +202,6 @@ class DescriptionTools:
                     }
                 
                 json_result = json.dumps(data)
-                logger.success(f"Job {job_id}: LLM call successful - returned structured object")
-                logger.info(f"Job {job_id}: Extracted data: {json.dumps(data, indent=2)}")
                 return json_result
             else:
                 logger.error(f"Job {job_id}: Unexpected result type from LLM: {type(result)}")
@@ -230,8 +220,6 @@ class DescriptionTools:
         version = int(getattr(self.config, 'desc_parser_version', 1))
         dry = bool(getattr(self.config, 'desc_parser_dry_run', False))
         created_ts = datetime.utcnow().isoformat()
-
-        logger.info(f"Processing batch {batch_num}/{total_batches} of {len(jobs_df)} jobs for description parsing")
         
         new_count = 0
         # Show initial progress bars
@@ -260,10 +248,8 @@ class DescriptionTools:
                 
             if dry:
                 # store a placeholder minimal payload without calling LLM
-                logger.info(f"Job {job_id}: Dry run mode - storing placeholder without LLM call")
                 payload = json.dumps({"dry_run": True})
             else:
-                logger.info(f"Job {job_id}: No cache hit, calling LLM for parsing")
                 payload = self._call_llm(desc, job_id)
                 if not payload:
                     logger.error(f"Job {job_id}: LLM call failed, skipping storage")
@@ -281,7 +267,6 @@ class DescriptionTools:
             try:
                 self._store(rec)
                 new_count += 1
-                logger.success(f"Job {job_id}: Successfully stored parsed description ({new_count}/{len(jobs_df)} completed)")
                 
                 # Update progress bars after successful processing
                 self._update_progress_bars(batch_num, total_batches, current_job_idx, len(jobs_df), batch_prefix, job_prefix, f"Completed '{title[:30]}...'")
