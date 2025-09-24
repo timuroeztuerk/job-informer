@@ -70,6 +70,9 @@ class DescriptionTools:
         # Unified LLM connection, default to gpt-5-nano; caller prompt controls schema
         self.llm = LLMConnection(model="gpt-5-nano")
         self.prompt: str = getattr(self.config, 'desc_parser_prompt', '')
+        # Track how many characters the last progress update used so we can
+        # properly clear the line on the next update.
+        self._progress_line_length: int = 0
 
     def _ensure_table(self) -> None:
         """Create parsed_descriptions table if it doesn't exist (separate from jobs)."""
@@ -94,42 +97,46 @@ class DescriptionTools:
     def _hash_description(text: str) -> str:
         return hashlib.sha256((text or '').encode('utf-8')).hexdigest()
 
-    def _update_progress_bars(self, batch_current: int, batch_total: int, job_current: int, job_total: int, 
-                            batch_prefix: str = "Batch: ", job_prefix: str = "Job: ", job_detail: str = "") -> None:
-        """Update dual progress bars for batch and job progress."""
+    def _update_progress(self, batch_num: int, total_batches: int, job_current: int, job_total: int,
+                          status: str = "") -> None:
+        """Render a minimal single-line progress indicator."""
         try:
-            # Batch progress bar
-            batch_width = 20
-            if batch_total <= 0:
-                batch_bar = '-' * batch_width
+            # Clamp values to avoid negative progress or overflows
+            if total_batches > 0:
+                batch_position = max(0, min(batch_num, total_batches))
+                batch_total_display = total_batches
             else:
-                batch_filled = int(batch_width * max(0, min(batch_current, batch_total)) / batch_total)
-                batch_bar = '█' * batch_filled + '-' * (batch_width - batch_filled)
-            
-            # Job progress bar
-            job_width = 20
-            if job_total <= 0:
-                job_bar = '-' * job_width
+                batch_position = max(batch_num, 0)
+                batch_total_display = "?"
+
+            if job_total > 0:
+                job_position = max(0, min(job_current, job_total))
+                pct = int((job_position / job_total) * 100)
+                job_total_display = job_total
             else:
-                job_filled = int(job_width * max(0, min(job_current, job_total)) / job_total)
-                job_bar = '█' * job_filled + '-' * (job_width - job_filled)
-            
-            # Format output
-            batch_line = f"{batch_prefix}[{batch_bar}] {batch_current}/{batch_total}"
-            job_line = f"{job_prefix}[{job_bar}] {job_current}/{job_total}"
-            detail = f" {job_detail}" if job_detail else ""
-            
-            # Print both bars
-            sys.stdout.write(f"\r{batch_line}\n{job_line}{detail}")
-            # Move cursor back up to overwrite both lines next time
-            sys.stdout.write("\033[2A")  
+                job_position = max(job_current, 0)
+                pct = 0
+                job_total_display = "?"
+
+            line = f"Batch {batch_position}/{batch_total_display} | Job {job_position}/{job_total_display} ({pct:3d}%)"
+
+            if status:
+                status_clean = status.strip().replace("\n", " ")
+                max_status_length = 60
+                if len(status_clean) > max_status_length:
+                    status_clean = status_clean[:max_status_length - 3] + "..."
+                line += f" — {status_clean}"
+
+            padding = max(self._progress_line_length - len(line), 0)
+            sys.stdout.write("\r" + line + " " * padding)
             sys.stdout.flush()
-            
-            # If both are complete, move to next line
-            if batch_current >= batch_total and job_current >= job_total:
-                sys.stdout.write("\n\n")
+            self._progress_line_length = max(self._progress_line_length, len(line))
+
+            if job_total > 0 and job_position >= job_total:
+                sys.stdout.write("\n")
                 sys.stdout.flush()
-                
+                self._progress_line_length = 0
+
         except Exception:
             # Fallback silently if stdout is not available
             pass
@@ -222,30 +229,33 @@ class DescriptionTools:
         created_ts = datetime.utcnow().isoformat()
         
         new_count = 0
-        # Show initial progress bars
-        batch_prefix = f"Batch {batch_num}/{total_batches}: "
-        job_prefix = f"  Job: "
-        self._update_progress_bars(batch_num, total_batches, 0, len(jobs_df), batch_prefix, job_prefix)
-        
+        # Show initial progress indicator
+        self._update_progress(batch_num, total_batches, 0, len(jobs_df), status="Starting batch")
+
         for current_job_idx, (idx, row) in enumerate(jobs_df.iterrows(), 1):
             desc = str(row.get('description') or '').strip()
             job_id = str(row.get('job_id') or '')
             title = str(row.get('title', 'Unknown Title'))
             company = str(row.get('company', 'Unknown Company'))
-            
+
             if not desc or not job_id:
                 logger.warning(f"Job {job_id}: Skipping due to missing description or job_id")
+                self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df),
+                                      status="Skipped — missing description or job_id")
                 continue
-                
+
             # Update progress bars for current job
-            self._update_progress_bars(batch_num, total_batches, current_job_idx, len(jobs_df), batch_prefix, job_prefix, f"Processing '{title[:30]}...'")
-            
+            processing_detail = f"Processing {title[:30]}..."
+            self._update_progress(batch_num, total_batches, current_job_idx - 1, len(jobs_df), status=processing_detail)
+
             h = self._hash_description(desc)
             cached = self._find_cached(job_id, h, version)
             if cached:
                 logger.info(f"Job {job_id}: Found cached result, skipping LLM call")
+                self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df),
+                                      status="Cached result found")
                 continue
-                
+
             if dry:
                 # store a placeholder minimal payload without calling LLM
                 payload = json.dumps({"dry_run": True})
@@ -253,8 +263,10 @@ class DescriptionTools:
                 payload = self._call_llm(desc, job_id)
                 if not payload:
                     logger.error(f"Job {job_id}: LLM call failed, skipping storage")
+                    self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df),
+                                          status="Failed — LLM call error")
                     continue
-                    
+
             rec = ParsedDescription(
                 job_id=job_id,
                 desc_hash=h,
@@ -267,20 +279,23 @@ class DescriptionTools:
             try:
                 self._store(rec)
                 new_count += 1
-                
+
                 # Update progress bars after successful processing
-                self._update_progress_bars(batch_num, total_batches, current_job_idx, len(jobs_df), batch_prefix, job_prefix, f"Completed '{title[:30]}...'")
-                
+                completion_detail = f"Completed {title[:30]}..."
+                self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df), status=completion_detail)
+
                 # Add a small delay between jobs to slow down processing
                 if not dry and current_job_idx < len(jobs_df):
                     import time
                     time.sleep(2)  # 2 second delay between LLM calls
-                    
+
             except Exception as e:
                 logger.error(f"Job {job_id}: Failed to store parsed description: {e}")
-        
+                self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df),
+                                      status="Failed — storage error")
+
         # Final progress update
-        self._update_progress_bars(batch_num, total_batches, len(jobs_df), len(jobs_df), batch_prefix, job_prefix, "Batch Complete")
+        self._update_progress(batch_num, total_batches, len(jobs_df), len(jobs_df), status="Batch complete")
         logger.info(f"Batch processing complete: {new_count} new descriptions parsed and stored")
         return new_count
 
