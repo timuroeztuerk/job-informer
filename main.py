@@ -7,25 +7,20 @@ Automated job posting monitoring and notification system
 import argparse
 import sys
 import json
-from loguru import logger
 from pathlib import Path
+
 import pandas as pd
+from loguru import logger
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
-from src.utils.logging_utils import setup_logging
-setup_logging()
 
 from src.config.settings import Config
-from src.utils.logging_utils import setup_logging
 from src.agents.job_scraper import JobScraper
 from src.agents.parser import DescriptionTools
-from src.config.settings import Config
-from src.agents.job_scraper import JobScraper
 from src.agents.email_sender import EmailSender
 from src.agents.ai_purger import AIPurger
-from src.agents.parser import DescriptionTools
-from src.agents.ai_purger import AIPurger
+from src.utils.logging_utils import setup_logging
 
 def create_data_directory():
     """Create data directory if it doesn't exist"""
@@ -73,6 +68,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Start with default logging so early errors are visible
+    setup_logging()
     # Default to run-once if no mode flag is set
     if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.get_descriptions, args.parse_descriptions]):
         args.run_once = True
@@ -97,6 +95,9 @@ def main():
     try:
         # Load configuration
         config = Config.from_env(args.config)
+
+        # Reconfigure logging based on settings
+        setup_logging(config.log_level, config.log_file)
         # Override config with command line arguments if provided
         if args.keywords:
             config.search_keywords = args.keywords
@@ -143,6 +144,8 @@ def run_job_search_once(config: Config):
     success = scraper.execute_job_search()
     if success:
         logger.success("=== Job Search Done ===")
+    elif getattr(scraper, 'last_run_threshold_hit', False):
+        logger.warning("=== Job Search skipped: below MIN_NEW_JOBS_TO_CONTINUE threshold ===")
     else:
         logger.warning("=== No Jobs Found ===")
 
@@ -178,11 +181,11 @@ def run_all_tests(config: Config):
         
         # Test LLM connection (if API key is configured)
         try:
-            if hasattr(config, 'gemini_api_key') and config.gemini_api_key:
+            if getattr(config, 'openai_api_key', ''):
                 # Initialize AI Purger with test mode enabled
                 ai_purger = AIPurger(config, test_mode=True)
                 # Test LLM connection by checking if API key is available
-                if hasattr(ai_purger.llm, 'api_key') and ai_purger.llm.api_key:
+                if getattr(ai_purger.llm, 'api_key', ''):
                     logger.info("AI LLM connection test passed (API key configured)")
                 else:
                     logger.error("AI LLM connection failed (no API key)")

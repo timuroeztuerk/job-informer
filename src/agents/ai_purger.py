@@ -4,7 +4,6 @@ import json
 import sqlite3
 from datetime import datetime
 from loguru import logger
-import requests
 from pydantic import BaseModel
 
 from ..config.settings import Config
@@ -45,7 +44,9 @@ class AIPurger:
         self.db = JobDatabase()
         self.parser = DescriptionTools(config=self.config, db=self.db)
         self.parser._ensure_table()
-        self.llm = LLMConnection(model="gpt-5-nano")
+        purge_model = getattr(self.config, 'gemini_model', 'gpt-5-nano')
+        purge_api_key = getattr(self.config, 'gemini_api_key', '').strip() or None
+        self.llm = LLMConnection(api_key=purge_api_key, model=purge_model)
         self.batch_size = 25
         self.purge_prompt = """
         You are an AI job filter. Analyze the provided job listings and identify jobs that should be purged.
@@ -58,8 +59,9 @@ class AIPurger:
         - AI consultant jobs can stay, if they are not duplicate.
         DO NOT purge jobs that might be relevant, even if you're unsure.
         
-        Return only the job IDs that should be purged as a JSON array.
-        Example: ["job_id_1", "job_id_2"]
+        Each job listing will be labeled with a short numeric ID (e.g., "1", "2").
+        Return only these numeric IDs for the jobs that should be purged as a JSON array.
+        Example: ["1", "2"]
         """
         self.json_structure = AIPurger_JSON_CLASS
 
@@ -111,10 +113,28 @@ class AIPurger:
         batches_processed = 0
         for batch_num, batch in enumerate(batches, 1):
             try:
-                # Format jobs for LLM
-                jobs_data = [{"id": job.id, "title": job.title, "company": job.company} for job in batch]
+                # Format jobs for LLM using compact numeric identifiers
+                reference_map: Dict[str, JobEntry] = {}
+                jobs_data: List[Dict[str, str]] = []
+                for index, job in enumerate(batch, start=1):
+                    ref_id = str(index)
+                    reference_map[ref_id] = job
+                    jobs_data.append({
+                        "id": ref_id,
+                        "title": job.title,
+                        "company": job.company
+                    })
                 prompt = f"{self.purge_prompt}\n\nJOBS DATA:\n{json.dumps(jobs_data, indent=2)}\n\nAnalyze these jobs and return which ones should be purged."
-                
+
+                # Minimal logging to show what is being sent to the AI
+                prompt_preview = prompt if len(prompt) <= 1200 else f"{prompt[:1200]}... (truncated)"
+                logger.info(
+                    "Sending batch {} with {} jobs to AI. Payload preview:\n{}",
+                    batch_num,
+                    len(jobs_data),
+                    prompt_preview,
+                )
+
                 # Get structured LLM response
                 analysis_result = self.llm.generate_structured(prompt, AIPurger_JSON_CLASS)
                 if not analysis_result:
@@ -135,7 +155,19 @@ class AIPurger:
                 
                 # Validate IDs exist in batch
                 batch_job_ids = {job.id for job in batch}
-                valid_ids = [job_id for job_id in analysis.job_ids_to_purge if job_id in batch_job_ids]
+                valid_ids: List[str] = []
+                seen_actual_ids: set[str] = set()
+                for returned_id in analysis.job_ids_to_purge:
+                    if returned_id in reference_map:
+                        actual_id = reference_map[returned_id].id
+                    elif returned_id in batch_job_ids:
+                        actual_id = returned_id
+                    else:
+                        continue
+
+                    if actual_id not in seen_actual_ids:
+                        valid_ids.append(actual_id)
+                        seen_actual_ids.add(actual_id)
                 
                 # Test mode: print candidates
                 if self.test_mode and valid_ids:

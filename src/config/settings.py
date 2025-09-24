@@ -45,9 +45,10 @@ class Config:
     log_file: str
     
     # AI Analysis Configuration
-    gemini_api_key: str
-    gemini_model: str
-    gemini_analysis_prompt: str
+    openai_api_key: str
+    openai_model: str
+    analysis_prompt: str
+    
     # Description Parser Configuration
     enable_description_parser: bool
     desc_parser_model: str
@@ -110,9 +111,9 @@ class Config:
             log_file=os.getenv('LOG_FILE', 'logs/job_informer.log'),
             
             # AI Analysis Configuration
-            gemini_api_key=os.getenv('GEMINI_API_KEY', ''),
-            gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
-            gemini_analysis_prompt=os.getenv('GEMINI_ANALYSIS_PROMPT', (
+            openai_api_key=os.getenv('OPENAI_API_KEY', ''),
+            openai_model=os.getenv('OPENAI_MODEL', 'gpt-5-nano'),
+            analysis_prompt=os.getenv('ANALYSIS_PROMPT', (
                 'You are a concise labor market analyst. Given the job market data summary below, write a one-page (max 400 words) report in plain text. '
                 'The report must include:1. Executive summary (3–4 bullet points). 2. Key statistics (total jobs, top companies, top locations, notable job titles, salary insights). '
                 '3. Short commentary on trends or anomalies from the period. 4. Brief note on what to watch in the coming period. '
@@ -121,7 +122,7 @@ class Config:
             )),
             # Description Parser Configuration
             enable_description_parser=_get_bool('ENABLE_DESCRIPTION_PARSER', 'true'),
-            desc_parser_model=os.getenv('DESC_PARSER_MODEL', os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite')),
+            desc_parser_model=os.getenv('DESC_PARSER_MODEL', os.getenv('OPENAI_MODEL', 'gpt-5-nano')),
             desc_parser_prompt=os.getenv('DESC_PARSER_PROMPT', (
                 'Extract the fields below from the job description and return STRICTLY VALID JSON.\n'
                 'Rules: output JSON only (no markdown, no code fences, no prose). Use double quotes. No comments, no trailing commas, no ellipses.\n'
@@ -163,8 +164,8 @@ class Config:
         email_required_modes = {
             'run-once', 'test', 'summary'
         }
-        # Modes that require Gemini
-        gemini_required_modes = {'test', 'parse-descriptions', 'ai-purge'}
+        # Modes that require LLM access
+        ai_required_modes = {'test', 'parse-descriptions', 'ai-purge'}
 
         if mode in email_required_modes:
             if not self.email_address:
@@ -182,9 +183,9 @@ class Config:
             if (self.search_time_range or '').strip().lower() not in VALID_TIME_RANGES:
                 errors.append("SEARCH_TIME_RANGE must be one of: day, week, month")
 
-        if mode in gemini_required_modes:
-            if not self.gemini_api_key:
-                errors.append("GEMINI_API_KEY is required for AI analysis features")
+        if mode in ai_required_modes:
+            if not self.openai_api_key:
+                errors.append("OPENAI_API_KEY is required for AI analysis features")
 
         if errors:
             raise ValueError(f"Configuration validation failed: {', '.join(errors)}")
@@ -230,9 +231,9 @@ class Config:
             'quiet_progress': self.quiet_progress,
             'log_level': self.log_level,
             'log_file': self.log_file,
-            'gemini_api_key': '***HIDDEN***',  # Don't expose API key
-            'gemini_model': self.gemini_model,
-            'gemini_analysis_prompt': self.gemini_analysis_prompt,
+            'openai_api_key': '***HIDDEN***',  # Don't expose API key
+            'openai_model': self.openai_model,
+            'analysis_prompt': self.analysis_prompt,
             'enable_description_parser': self.enable_description_parser,
             'desc_parser_model': self.desc_parser_model,
             'desc_parser_batch_size': self.desc_parser_batch_size,

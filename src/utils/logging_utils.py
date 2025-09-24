@@ -6,20 +6,28 @@ import os
 import sys
 from loguru import logger
 from typing import Optional
+import logging
+
+class InterceptHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except Exception:
+            level = "INFO"
+        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+    
 
 def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> None:
     """Setup logging configuration"""
     
-    # Remove default logger
     logger.remove()
-    
-    # Add console logging with colors
     logger.add(
-        sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level=log_level,
-        colorize=True
+        sys.stdout,
+        colorize=True,
+        format="<level>{level.icon}</level> <cyan>{message}</cyan>",
+        level="INFO",
     )
+    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
     
     # Add file logging if specified
     if log_file:

@@ -6,10 +6,15 @@ Handles sending email notifications with job reports
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import pandas as pd
 import html
+import json
+from typing import Optional
+
+import pandas as pd
 from loguru import logger
+
 from ..config.settings import Config
+from ..utils.llm_connection import LLMConnection
 
 
 class EmailSender:
@@ -22,7 +27,84 @@ class EmailSender:
         self.email_address = config.email_address
         self.email_password = config.email_password
         self.recipient_email = config.recipient_email
-    
+
+    def generate_ai_analysis(self, jobs_df: pd.DataFrame) -> Optional[str]:
+        """Generate AI summary using configured Gemini/OpenAI settings."""
+        if jobs_df.empty:
+            return None
+
+        if getattr(self.config, 'dry_run', False):
+            logger.debug("Dry run enabled; skipping AI market analysis")
+            return None
+
+        prompt = getattr(self.config, 'gemini_analysis_prompt', '').strip()
+        api_key = getattr(self.config, 'gemini_api_key', '').strip()
+        model_name = getattr(self.config, 'gemini_model', 'gpt-5-nano')
+
+        if not prompt or not api_key:
+            return None
+
+        payload = self._build_analysis_payload(jobs_df)
+        data_summary = json.dumps(payload, indent=2, ensure_ascii=False)
+
+        try:
+            llm = LLMConnection(api_key=api_key, model=model_name)
+            analysis_prompt = (
+                f"{prompt}\n\nJOB MARKET DATA SUMMARY (JSON):\n{data_summary}\n"
+            )
+            system_msg = (
+                "You are a neutral labor market analyst. Write concise insights based only on the provided data."
+            )
+            analysis = llm.generate_text(analysis_prompt, system=system_msg)
+            if analysis:
+                return analysis.strip()
+        except Exception as exc:
+            logger.error(f"Failed to generate AI analysis: {exc}")
+
+        return None
+
+    def _build_analysis_payload(self, jobs_df: pd.DataFrame) -> dict:
+        """Aggregate job statistics for AI analysis."""
+        payload = {
+            "total_jobs": int(len(jobs_df)),
+            "keywords": self.config.get_keywords_list(),
+            "locations": self.config.get_locations_list(),
+            "time_range": getattr(self.config, 'search_time_range', 'day'),
+            "generated_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        }
+
+        def _top_counts(series: pd.Series, limit: int = 5) -> list:
+            counts = []
+            try:
+                for value, count in series.value_counts().head(limit).items():
+                    if isinstance(value, str) and value.strip():
+                        counts.append({"value": value.strip(), "count": int(count)})
+            except Exception:
+                pass
+            return counts
+
+        if 'company' in jobs_df.columns:
+            payload["top_companies"] = _top_counts(jobs_df['company'].astype(str))
+        if 'location' in jobs_df.columns:
+            payload["top_locations"] = _top_counts(jobs_df['location'].astype(str))
+        if 'title' in jobs_df.columns:
+            payload["top_titles"] = _top_counts(jobs_df['title'].astype(str))
+        if 'source' in jobs_df.columns:
+            payload["sources"] = _top_counts(jobs_df['source'].astype(str))
+
+        salary_info = {
+            "entries_with_salary": 0,
+            "examples": []
+        }
+        if 'salary' in jobs_df.columns:
+            salary_series = jobs_df['salary'].astype(str)
+            salary_with_numbers = salary_series[salary_series.str.contains(r"\d", regex=True, na=False)]
+            salary_info["entries_with_salary"] = int(len(salary_with_numbers))
+            salary_info["examples"] = [s.strip() for s in salary_with_numbers.head(5) if s.strip()]
+        payload["salary_insights"] = salary_info
+
+        return payload
+
     def create_connection(self) -> smtplib.SMTP:
         """Create SMTP connection"""
         try:
@@ -34,13 +116,59 @@ class EmailSender:
             logger.error(f"Failed to create SMTP connection: {e}")
             raise
     
-    def create_job_report_html(self, jobs_df: pd.DataFrame) -> str:
+    def create_job_report_html(self, jobs_df: pd.DataFrame, analysis_text: Optional[str] = None) -> str:
         """Create HTML email template for job report"""
         from datetime import datetime
         
         # Prepare template data
         report_date = pd.Timestamp.now().strftime("%B %d, %Y at %I:%M %p")
         sources = ", ".join(jobs_df['source'].unique()) if not jobs_df.empty else "None"
+
+        def _render_analysis_html(text: str) -> str:
+            parts = []
+            in_list = False
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    if in_list:
+                        parts.append("</ul>")
+                        in_list = False
+                    continue
+                bullet = line[0] in {'-', '•', '*'}
+                if bullet:
+                    if not in_list:
+                        parts.append("<ul>")
+                        in_list = True
+                    item_text = line.lstrip('-•* ').strip()
+                    parts.append(f"<li>{html.escape(item_text)}</li>")
+                else:
+                    if in_list:
+                        parts.append("</ul>")
+                        in_list = False
+                    parts.append(f"<p>{html.escape(line)}</p>")
+            if in_list:
+                parts.append("</ul>")
+            rendered = "".join(parts).strip()
+            if not rendered and text.strip():
+                rendered = f"<p>{html.escape(text.strip())}</p>"
+            return rendered
+
+        analysis_section = ""
+        if analysis_text:
+            analysis_html = _render_analysis_html(analysis_text)
+            if analysis_html:
+                model_label = html.escape(getattr(self.config, 'gemini_model', 'the configured model'))
+                analysis_section = f"""
+            <section class="panel analysis-panel">
+              <div class="panel-header">
+                <span class="chip">🧠 AI Market Insights</span>
+                <span class="muted">Summary generated automatically using {model_label}</span>
+              </div>
+              <div class="panel-body">
+                <div class="analysis-content">{analysis_html}</div>
+              </div>
+            </section>
+            """
         
         html_template = f"""
         <!DOCTYPE html>
@@ -132,6 +260,12 @@ class EmailSender:
               line-height: 1;
             }}
             .panel .panel-body {{ padding: 20px; }}
+            .analysis-panel .panel-header {{ flex-direction: column; align-items: flex-start; gap: 6px; }}
+            .analysis-panel .panel-body {{ padding: 20px 24px; }}
+            .analysis-content {{ font-size: 15px; line-height: 1.6; color: var(--text); }}
+            .analysis-content ul {{ margin: 8px 0; padding-left: 20px; }}
+            .analysis-content li {{ margin-bottom: 6px; }}
+            .analysis-content p {{ margin: 0 0 10px 0; }}
 
             .job-card {{
               background: var(--card-2);
@@ -243,6 +377,8 @@ class EmailSender:
               </div>
             </section>
 
+            {analysis_section}
+
             <section class="panel">
               <div class="panel-header">
                 <span class="chip">💼 Job Opportunities</span>
@@ -312,13 +448,15 @@ class EmailSender:
             msg['From'] = self.email_address
             msg['To'] = self.recipient_email
             msg['Subject'] = subject
-            
+
+            analysis_text = self.generate_ai_analysis(jobs_df)
+
             # Create HTML content
-            html_content = self.create_job_report_html(jobs_df)
+            html_content = self.create_job_report_html(jobs_df, analysis_text)
             html_part = MIMEText(html_content, 'html')
-            
+
             # Create plain text alternative
-            text_content = self.create_text_report(jobs_df)
+            text_content = self.create_text_report(jobs_df, analysis_text)
             text_part = MIMEText(text_content, 'plain')
             
             # Attach both parts
@@ -336,7 +474,7 @@ class EmailSender:
             logger.error(f"Failed to send job report email: {e}")
             return False
     
-    def create_text_report(self, jobs_df: pd.DataFrame) -> str:
+    def create_text_report(self, jobs_df: pd.DataFrame, analysis_text: Optional[str] = None) -> str:
         """Create plain text version of job report"""
         text_lines = [
             "JOB INFORMER DAILY REPORT",
@@ -347,10 +485,22 @@ class EmailSender:
             f"Keywords: {self.config.search_keywords}",
             f"Locations: {self.config.search_locations}",
             "",
+        ]
+
+        if analysis_text:
+            text_lines.extend([
+                "AI MARKET INSIGHTS",
+                "-" * 30,
+                analysis_text.strip(),
+                "-" * 30,
+                "",
+            ])
+
+        text_lines.extend([
             "JOB OPPORTUNITIES:",
             "-" * 30,
-        ]
-        
+        ])
+
         if not jobs_df.empty:
             for _, job in jobs_df.iterrows():
                 text_lines.extend([
@@ -364,13 +514,13 @@ class EmailSender:
                 ])
         else:
             text_lines.append("No jobs found in this search.")
-        
+
         text_lines.extend([
             "",
             "Happy job hunting!",
             "Generated by Job Informer"
         ])
-        
+
         return "\n".join(text_lines)
     
     def send_error_notification(self, error_message: str) -> bool:

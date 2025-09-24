@@ -1,7 +1,7 @@
 """
 Description Parser
 - Incremental, cached parsing of job descriptions into structured JSON
-- Uses Gemini API (same key/model as market_analyst by default)
+- Uses an OpenAI-compatible API (via LLMConnection) for structured extraction
 - Writes results into a separate SQLite table to avoid touching jobs.db schema
 """
 from __future__ import annotations
@@ -68,7 +68,11 @@ class DescriptionTools:
         self.db: JobDatabase = db or JobDatabase()
         self._ensure_table()
         # Unified LLM connection, default to gpt-5-nano; caller prompt controls schema
-        self.llm = LLMConnection(model="gpt-5-nano")
+        parser_model = getattr(self.config, 'desc_parser_model', None) or getattr(
+            self.config, 'gemini_model', 'gpt-5-nano'
+        )
+        parser_api_key = getattr(self.config, 'gemini_api_key', '').strip() or None
+        self.llm = LLMConnection(api_key=parser_api_key, model=parser_model)
         self.prompt: str = getattr(self.config, 'desc_parser_prompt', '')
         # Track how many characters the last progress update used so we can
         # properly clear the line on the next update.

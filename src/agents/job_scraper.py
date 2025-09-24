@@ -74,12 +74,15 @@ class JobScraper:
         self.session.mount('https://', adapter)
         # Runtime state
         self.jobs_data = []
+        self.last_run_threshold_hit = False
         # Initialize database for fast deduplication
         self.db = JobDatabase()
         # Defaults
         self.request_timeout = getattr(self.config, 'request_timeout', 20)
         self._wait_tick_seconds = 1.0
         self._last_progress_line = ""
+        self.max_total_jobs = max(0, int(getattr(self.config, 'max_total_jobs', 0)))
+        self.min_new_jobs_to_continue = max(0, int(getattr(self.config, 'min_new_jobs_to_continue', 1)))
 
     def purge_keywords(self, title: str) -> bool:
         """Fast check for unwanted keywords in a job title using substring matching (case-insensitive). Example: 'student' will match 'Werkstudent', 'steuer' will match 'Steuerfach'."""
@@ -355,8 +358,11 @@ class JobScraper:
         """Scrape jobs from enabled sources.
         """
         all_jobs: List[Dict] = []
+        stop_collecting = False
 
         for keyword in keywords:
+            if stop_collecting:
+                break
             for location in locations:
                 # Add delay between requests
                 time.sleep(self.config.request_delay)
@@ -365,11 +371,31 @@ class JobScraper:
                     linkedin_jobs = self.scrape_linkedin(keyword, location)
                     if limit_per_source is not None and limit_per_source > 0:
                         linkedin_jobs = linkedin_jobs[:limit_per_source]
+
+                    if self.max_total_jobs:
+                        remaining_slots = self.max_total_jobs - len(all_jobs)
+                        if remaining_slots <= 0:
+                            stop_collecting = True
+                            break
+                        if len(linkedin_jobs) > remaining_slots:
+                            linkedin_jobs = linkedin_jobs[:remaining_slots]
+                            stop_collecting = True
                     all_jobs.extend(linkedin_jobs)
-        
+                    if self.max_total_jobs and len(all_jobs) >= self.max_total_jobs:
+                        stop_collecting = True
+                        logger.debug(
+                            "Reached configured MAX_TOTAL_JOBS limit (%d); stopping further scraping",
+                            self.max_total_jobs,
+                        )
+                        break
+            if stop_collecting:
+                break
+
         # Convert to DataFrame and process
         df = pd.DataFrame(all_jobs)
         if not df.empty:
+            if self.max_total_jobs:
+                df = df.head(self.max_total_jobs)
             # Filter out jobs with unwanted keywords in title
             df = self.filter_unwanted_jobs(df)
             # Build job_ids vectorized and drop duplicates
@@ -396,9 +422,10 @@ class JobScraper:
     def execute_job_search(self) -> bool:
         """Execute job search and send notifications"""
         from ..agents.email_sender import EmailSender
-        
+
         email_sender = EmailSender(self.config)
-        
+        self.last_run_threshold_hit = False
+
         try:
             # Run automatic purge before scraping to clean up unwanted jobs (if enabled)
             if getattr(self.config, 'auto_purge_before_scraping', True):
@@ -418,11 +445,13 @@ class JobScraper:
             keywords = [k.strip() for k in self.config.search_keywords.split(',')]
             locations = [l.strip() for l in self.config.search_locations.split(',')]
             jobs_df = self.scrape(keywords, locations)
-            
+
             if not jobs_df.empty:
                 # Apply additional filtering to newly scraped jobs
                 jobs_df = self.filter_scraped_jobs(jobs_df)
-                
+                if self.max_total_jobs:
+                    jobs_df = jobs_df.head(self.max_total_jobs)
+
                 if jobs_df.empty:
                     logger.warning("All scraped jobs were filtered out by purge criteria")
                     # Send notification about filtered results (respect dry run)
@@ -432,10 +461,19 @@ class JobScraper:
                     else:
                         logger.info("DRY_RUN is enabled; skipping filtered-results email")
                     return False
-                
+
                 # Store jobs in SQLite database (fast deduplication)
                 new_jobs_count = self.db.put_into_sql(jobs_df)
-                
+
+                if self.min_new_jobs_to_continue and new_jobs_count < self.min_new_jobs_to_continue:
+                    self.last_run_threshold_hit = True
+                    logger.info(
+                        "Found %d new jobs, below MIN_NEW_JOBS_TO_CONTINUE=%d; skipping notifications",
+                        new_jobs_count,
+                        self.min_new_jobs_to_continue,
+                    )
+                    return False
+
                 # Save CSV for backup/auditing unless dry-run
                 csv_filename = None
                 if not self.config.dry_run:
