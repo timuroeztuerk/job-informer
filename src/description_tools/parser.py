@@ -397,14 +397,11 @@ class DescriptionTools:
             consecutive_empty_batches = 0
             
             while batches_processed < max_batches:
-                logger.info(f"Querying DB for up to {batch_size} jobs missing descriptions")
                 to_fill = scraper.db.get_jobs_missing_descriptions(limit=batch_size, exclude_failed=True)
                 if to_fill.empty:
                     consecutive_empty_batches += 1
                     if consecutive_empty_batches >= 2:
-                        logger.info("No more jobs with missing descriptions found (2 consecutive empty batches).")
                         break
-                    logger.info("No jobs with missing descriptions found in this batch.")
                     time.sleep(1.0)  # Brief pause before checking again
                     continue
                 else:
@@ -444,13 +441,11 @@ class DescriptionTools:
                 if updates:
                     updated = scraper.db.update_job_descriptions(updates)
                     total_updated += updated
-                    logger.info(f"Updated descriptions for {updated} jobs in this batch")
 
                 # Mark failed attempts to avoid retrying
                 if failed_job_ids:
                     marked = scraper.db.mark_description_fetch_failed(failed_job_ids)
                     total_failed += marked
-                    logger.info(f"Marked {marked} jobs as failed to avoid retrying")
 
                 if not updates and not failed_job_ids:
                     logger.info("No descriptions could be fetched and no failures marked in this batch")
@@ -458,11 +453,10 @@ class DescriptionTools:
                 batches_processed += 1
 
                 # brief pause between batches with feedback
-                if batches_processed < max_batches:  # Don't pause after last batch
-                    logger.info("Pausing between backfill batches")
+                if batches_processed < max_batches:
                     time.sleep(1.0)
 
-            logger.success(f"Backfill complete. Descriptions updated: {total_updated}, Failed/skipped: {total_failed}")
+            logger.success(f"Updated: {total_updated}, Failed/skipped: {total_failed}")
             return True
         except Exception as e:
             logger.error(f"Backfill error: {e}")

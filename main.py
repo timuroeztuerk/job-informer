@@ -6,13 +6,35 @@ Automated job posting monitoring and notification system
 
 import os
 import argparse
-import sys
+import sys, logging
 import json
+from loguru import logger
 from pathlib import Path
 import pandas as pd
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+class InterceptHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except Exception:
+            level = "INFO"
+        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+def setup_logging():
+    logger.remove()
+    logger.add(
+        sys.stdout,
+        colorize=True,
+        format="<level>{level.icon}</level> <cyan>{message}</cyan>",
+        level="INFO",
+    )
+
+    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+
+setup_logging()
 
 from src.config.settings import Config
 from src.utils.logging_utils import setup_logging
@@ -20,7 +42,6 @@ from src.scrapers.job_scraper import JobScraper
 from src.description_tools import DescriptionTools
 from src.utils.utilities import Utilities
 from src.ai_job_purger.ai_purger import AIPurger
-from loguru import logger
 
 def create_data_directory():
     """Create data directory if it doesn't exist"""
@@ -101,9 +122,6 @@ def main():
             config.search_time_range = args.time_range
         # Validate configuration for the selected mode
         config.validate_for_mode(mode_str)
-        # Setup logging
-        setup_logging(config.log_level, config.log_file)
-        logger.info(f"Mode: {mode_str}")
         create_data_directory()
         
         if args.run_once:
@@ -149,11 +167,10 @@ def run_all_tests(utils: Utilities):
     
     try:
         utils.config.validate()
-        logger.success("Configuration validation passed")
         try:
             success = utils.email_sender.send_test_email()
             if success:
-                logger.success("Email test successful! Check your inbox.")
+                pass
             else:
                 logger.error("Email test failed!")
                 overall_success = False
@@ -161,7 +178,7 @@ def run_all_tests(utils: Utilities):
             logger.error(f"Email test error: {e}")
             overall_success = False
         if utils.scraper:
-            logger.success("Scraper initialized successfully")
+            pass
         else:
             logger.error("Scraper initialization failed")
             overall_success = False
@@ -173,7 +190,7 @@ def run_all_tests(utils: Utilities):
                 ai_purger = AIPurger(utils.config, test_mode=True)
                 # Test LLM connection
                 if ai_purger.llm_connection():
-                    logger.success("LLM connection successful")
+                    pass
                 else:
                     logger.error("AI LLM connection failed")
                     overall_success = False
@@ -195,7 +212,6 @@ def run_all_tests(utils: Utilities):
 
 def show_database_summary(utils: Utilities):
     """Show database summary statistics"""
-    logger.info("=== Database Summary ===")
     summary = utils.scraper.db.get_job_summary()
     print(f"\n📊 Job Database Summary:")
     print(f"Total jobs: {summary['total_jobs']:,}")
@@ -432,14 +448,11 @@ def run_ai_purge_mode(utils: Utilities):
         summary = ai_purger.run_purge_mode()
         
         # Log summary
-        logger.info(f"AI Purge Summary:")
-        logger.info(f"  - Jobs analyzed: {summary['jobs_analyzed']}")
-        logger.info(f"  - Batches processed: {summary.get('batches_processed', 0)}")
-        logger.info(f"  - Jobs marked for purging: {summary['jobs_to_purge']}")
-        logger.info(f"  - Jobs actually purged: {summary['jobs_purged']}")
+        logger.info(f"AI Purge Summary: Analyzed {summary['jobs_analyzed']:,} jobs in {summary.get('batches_processed', 0)} batches")
+        logger.info(f"Jobs marked for purging: {summary['jobs_to_purge']:,}, Jobs actually purged: {summary['jobs_purged']:,}")
         
         if summary['success']:
-            logger.success("=== AI-Powered Purge Completed Successfully ===")
+            logger.success("=== Done ===")
         else:
             error_msg = summary.get('error', 'Unknown error')
             logger.error(f"=== AI-Powered Purge Failed: {error_msg} ===")
@@ -451,20 +464,18 @@ def run_ai_purge_mode(utils: Utilities):
 
 def get_descriptions(desc: DescriptionTools, utils: Utilities, scraper: JobScraper):
     """Backfill missing job descriptions in the database"""
-    logger.info("=== Backfilling Missing Job Descriptions ===")
     success = desc.backfill_missing_descriptions(utils, scraper)
     if success:
-        logger.success("=== Backfill Completed Successfully ===")
+        logger.success("=== Done ===")
     else:
         logger.error("=== Backfill Failed ===")
         sys.exit(1)
 
 def run_description_parser(desc: DescriptionTools):
     """Run incremental description parsing using LLM with caching"""
-    logger.info("=== Parsing Descriptions (Incremental) ===")
     success = desc.run_description_parser()
     if success:
-        logger.success("=== Description Parsing Completed ===")
+        logger.success("=== Done ===")
     else:
         logger.error("=== Description Parsing Failed ===")
         sys.exit(1)
