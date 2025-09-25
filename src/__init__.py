@@ -14,10 +14,6 @@ def get_job_scraper():
     from .agents.job_scraper import JobScraper
     return JobScraper
 
-# def get_utilities():
-#     """Get Utilities class (deferred import) - REMOVED: functions moved to respective agents"""
-#     from .utils.utilities import Utilities
-#     return Utilities
 
 def get_email_sender():
     """Get EmailSender class (deferred import)"""
@@ -32,7 +28,6 @@ def get_config():
 # Expose deferred imports for convenience
 __all__ = [
     "get_job_scraper",
-    # "get_utilities",  # Removed: functions moved to respective agents
     "get_email_sender",
     "get_config",
     "__version__"

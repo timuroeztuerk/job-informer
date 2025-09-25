@@ -47,7 +47,6 @@ class Config:
     # AI Analysis Configuration
     openai_api_key: str
     openai_model: str
-    analysis_prompt: str
     
     # Description Parser Configuration
     enable_description_parser: bool
@@ -94,8 +93,8 @@ class Config:
             search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Science, Data Analysis, AI'),
             search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
             search_time_range=_get_time_range('SEARCH_TIME_RANGE', DEFAULT_TIME_RANGE),
-            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', 'adobe,abschluss,geo,volon,scrum,portfolio,financial,governance,labor,bestand,mergers,commodity,steuer,solution architect,finanzbuchhalter,projektmanager,gesundheit,laborant,logistikassistent,assistent,finanzbuchalter,reliability,Software Entwickler:in,Softwareingenieur,software engineer,solutions engineer,Gesundheitswissenschaftler,treasury,bioinformatiker,biologe,equity,retail,lehrkraft,cyber,creator,pwc,deloitte,auditor,phd,befristet,risk,compliance,public sector,microsoft,skillfinder,slurm,supplier,emat,praxis,operator,quality,medical,referent,last minute,assetmanagement,vermessungstechnikerin,powerbi,financial risk,vertriebssteuerung,ux designer,pricing,akademische/r,president,c++,devops,regulatory,assistent:in,projektkoordinator:in,cash,pay,sharepoint,teamlead,credit,sas,ontologien,photonics,convince,forensic,real estate,visual,opportunities,credit risk,life science,50%,produktmanager,produktbetreuer,kontakt-center,ce learning,kernel,think tank,aktuar,system,programmmanager,mathematiker,hr,gis,praktikant,geography,underwriter,controller,manager,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,developer,threat,mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,scientist,founding,client,nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,working student,frontend,backend,techniker,manager,planer,nebenberuflich,full stack,lead,dual,duales,studium,controlling,berater,abitur,praktikum,marketing,verkäufer,internship,sales,freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester'),
-            unwanted_companies=os.getenv('UNWANTED_COMPANIES', 'mycareernow GmbH,universität,pwc,deloitte,nachhilfeunterricht'),
+            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', 'professor,traineeship,mitarbeiter,e-commerce,manager,adobe,abschluss,geo,volon,scrum,portfolio,financial,governance,labor,bestand,mergers,commodity,steuer,solution architect,finanzbuchhalter,projektmanager,gesundheit,laborant,logistikassistent,assistent,finanzbuchalter,reliability,Software Entwickler:in,Softwareingenieur,software engineer,solutions engineer,Gesundheitswissenschaftler,treasury,bioinformatiker,biologe,equity,retail,lehrkraft,cyber,creator,pwc,deloitte,auditor,phd,befristet,risk,compliance,public sector,microsoft,skillfinder,slurm,supplier,emat,praxis,operator,quality,medical,referent,last minute,assetmanagement,vermessungstechnikerin,powerbi,financial risk,vertriebssteuerung,ux designer,pricing,akademische/r,president,c++,devops,regulatory,assistent:in,projektkoordinator:in,cash,pay,sharepoint,teamlead,credit,sas,ontologien,photonics,convince,forensic,real estate,visual,opportunities,credit risk,life science,50%,produktmanager,produktbetreuer,kontakt-center,ce learning,kernel,think tank,aktuar,system,programmmanager,mathematiker,hr,gis,praktikant,geography,underwriter,controller,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,threat,mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,founding,client,nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,working student,frontend developer,backend developer,techniker,planer,nebenberuflich,full stack developer,lead developer,dual,duales,studium,controlling,berater,abitur,praktikum,marketing manager,project manager,sales manager,verkäufer,internship,sales,freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester'),
+            unwanted_companies=os.getenv('UNWANTED_COMPANIES', 'ey,mycareernow GmbH,universität,pwc,deloitte,nachhilfeunterricht'),
             
             # Scraping Configuration
             request_delay=float(os.getenv('REQUEST_DELAY', '2.0')),
@@ -113,13 +112,7 @@ class Config:
             # AI Analysis Configuration
             openai_api_key=os.getenv('OPENAI_API_KEY', ''),
             openai_model=os.getenv('OPENAI_MODEL', 'gpt-5-nano'),
-            analysis_prompt=os.getenv('ANALYSIS_PROMPT', (
-                'You are a concise labor market analyst. Given the job market data summary below, write a one-page (max 400 words) report in plain text. '
-                'The report must include:1. Executive summary (3–4 bullet points). 2. Key statistics (total jobs, top companies, top locations, notable job titles, salary insights). '
-                '3. Short commentary on trends or anomalies from the period. 4. Brief note on what to watch in the coming period. '
-                'Be neutral, data-driven, and avoid speculation. Do not include tables, only bullet points and short paragraphs. '
-                'Use only the provided data — no outside sources.'
-            )),
+            
             # Description Parser Configuration
             enable_description_parser=_get_bool('ENABLE_DESCRIPTION_PARSER', 'true'),
             desc_parser_model=os.getenv('DESC_PARSER_MODEL', os.getenv('OPENAI_MODEL', 'gpt-5-nano')),
@@ -203,12 +196,26 @@ class Config:
         return [l.strip() for l in self.search_locations.split(',') if l.strip()]
     
     def get_unwanted_keywords_list(self) -> list:
-        """Get unwanted keywords as a list"""
-        return [k.strip().lower() for k in self.unwanted_keywords.split(',') if k.strip()]
+        """Get unwanted keywords as a list with normalized encoding"""
+        import unicodedata
+        keywords = [k.strip().lower() for k in self.unwanted_keywords.split(',') if k.strip()]
+        # Normalize unicode characters for better matching
+        normalized_keywords = []
+        for kw in keywords:
+            normalized = unicodedata.normalize('NFD', kw).encode('ascii', 'ignore').decode('ascii')
+            normalized_keywords.append(normalized)
+        return normalized_keywords
     
     def get_unwanted_companies_list(self) -> list:
-        """Get unwanted companies as a list"""
-        return [c.strip().lower() for c in self.unwanted_companies.split(',') if c.strip()]
+        """Get unwanted companies as a list with normalized encoding"""
+        import unicodedata
+        companies = [c.strip().lower() for c in self.unwanted_companies.split(',') if c.strip()]
+        # Normalize unicode characters for better matching  
+        normalized_companies = []
+        for company in companies:
+            normalized = unicodedata.normalize('NFD', company).encode('ascii', 'ignore').decode('ascii')
+            normalized_companies.append(normalized)
+        return normalized_companies
     
     def to_dict(self) -> dict:
         """Convert configuration to dictionary"""
@@ -233,7 +240,6 @@ class Config:
             'log_file': self.log_file,
             'openai_api_key': '***HIDDEN***',  # Don't expose API key
             'openai_model': self.openai_model,
-            'analysis_prompt': self.analysis_prompt,
             'enable_description_parser': self.enable_description_parser,
             'desc_parser_model': self.desc_parser_model,
             'desc_parser_batch_size': self.desc_parser_batch_size,

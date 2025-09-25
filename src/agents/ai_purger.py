@@ -44,8 +44,8 @@ class AIPurger:
         self.db = JobDatabase()
         self.parser = DescriptionTools(config=self.config, db=self.db)
         self.parser._ensure_table()
-        purge_model = getattr(self.config, 'gemini_model', 'gpt-5-nano')
-        purge_api_key = getattr(self.config, 'gemini_api_key', '').strip() or None
+        purge_model = getattr(self.config, 'openai_model', 'gpt-5-nano')
+        purge_api_key = getattr(self.config, 'openai_api_key', '').strip() or None
         self.llm = LLMConnection(api_key=purge_api_key, model=purge_model)
         self.batch_size = 25
         self.purge_prompt = """

@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse, parse_qs
 import re
 from datetime import datetime
+from .filtering import should_filter_by_keywords, should_filter_by_company
 from loguru import logger
 
 def remove_historical_duplicates(self, current_df: pd.DataFrame) -> pd.DataFrame:
@@ -44,35 +45,30 @@ def remove_historical_duplicates(self, current_df: pd.DataFrame) -> pd.DataFrame
     
     return filtered_df
 
-def filter_unwanted_jobs(self, df: pd.DataFrame) -> pd.DataFrame:
-    """Filter out jobs with unwanted keywords in the title and unwanted companies"""
+def filter_unwanted_jobs(config, df: pd.DataFrame) -> pd.DataFrame:
+    """Filter out jobs with unwanted keywords in the title and unwanted companies using centralized logic"""
     if df.empty:
         return df
         
     original_count = len(df)
     
-    # Get unwanted keywords from configuration
-    unwanted_keywords = self.config.get_unwanted_keywords_list()
+    # Get unwanted keywords and companies from configuration
+    unwanted_keywords = config.get_unwanted_keywords_list()
     unwanted_companies = []
     try:
-        unwanted_companies = self.config.get_unwanted_companies_list()
+        unwanted_companies = config.get_unwanted_companies_list()
     except Exception:
         unwanted_companies = []
+        
+    # Apply keyword filtering
     if unwanted_keywords:
-        # Substring matching (case-insensitive) for any unwanted keyword
-        import re
-        escaped = [re.escape(k) for k in unwanted_keywords if k]
-        if escaped:
-            pattern = "|".join(escaped)
-            mask = ~df['title'].astype(str).str.contains(pattern, case=False, na=False, regex=True)
-            df = df.loc[mask]
+        mask = ~df['title'].apply(lambda title: should_filter_by_keywords(title, unwanted_keywords))
+        df = df.loc[mask]
+        
+    # Apply company filtering
     if unwanted_companies and 'company' in df.columns:
-        import re
-        terms = [re.escape(c) for c in unwanted_companies if c]
-        if terms:
-            patt = "|".join(terms)
-            mask = ~df['company'].astype(str).str.contains(patt, case=False, na=False, regex=True)
-            df = df.loc[mask]
+        mask = ~df['company'].apply(lambda company: should_filter_by_company(company, unwanted_companies))
+        df = df.loc[mask]
     
     filtered_count = len(df)
     removed_count = original_count - filtered_count

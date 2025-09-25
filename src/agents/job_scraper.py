@@ -19,8 +19,9 @@ from requests.adapters import HTTPAdapter
 
 from ..config.settings import Config, DEFAULT_TIME_RANGE
 from ..utils.database import JobDatabase
-from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url, remove_historical_duplicates, filter_unwanted_jobs
+from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url, remove_historical_duplicates
 from ..utils.terminal_utils import _sleep_with_feedback, _print_progress, _progress_bar, _sleep_quiet
+from ..utils.filtering import normalize_text, should_filter_by_keywords, should_filter_by_company
 
 TIME_RANGE_TO_SECONDS = {
     "day": 24 * 60 * 60,
@@ -37,7 +38,6 @@ class JobScraper:
     _sleep_quiet = _sleep_quiet
     build_normalized_keys = build_normalized_keys
     remove_historical_duplicates = remove_historical_duplicates
-    filter_unwanted_jobs = filter_unwanted_jobs
 
     def _update_progress(self, completed: int, total: int, prefix: str = "") -> None:
         """Render a simple single-line progress bar in the terminal."""
@@ -84,28 +84,30 @@ class JobScraper:
         self.max_total_jobs = max(0, int(getattr(self.config, 'max_total_jobs', 0)))
         self.min_new_jobs_to_continue = max(0, int(getattr(self.config, 'min_new_jobs_to_continue', 1)))
 
-    def purge_keywords(self, title: str) -> bool:
-        """Fast check for unwanted keywords in a job title using substring matching (case-insensitive). Example: 'student' will match 'Werkstudent', 'steuer' will match 'Steuerfach'."""
-        if not title:
-            return False
-        unwanted = self.config.get_unwanted_keywords_list()
-        if not unwanted:
-            return False
-        title_l = title.lower()
-        return any((k or '').lower() in title_l for k in unwanted if k)
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for consistent matching (handles unicode, case, whitespace)."""
+        return normalize_text(text)
 
-    def purge_companies(self, company: str) -> bool:
-        """Check if company name contains any unwanted company substring (case-insensitive)."""
-        if not company:
-            return False
+    def _should_filter_by_keywords(self, title: str) -> bool:
+        """Centralized keyword filtering logic with word boundaries for specificity."""
+        unwanted = self.config.get_unwanted_keywords_list()
+        return should_filter_by_keywords(title, unwanted)
+
+    def _should_filter_by_company(self, company: str) -> bool:
+        """Centralized company filtering logic."""
         try:
             unwanted_companies = self.config.get_unwanted_companies_list()
         except Exception:
             return False
-        if not unwanted_companies:
-            return False
-        c_l = company.lower()
-        return any((c or '').lower() in c_l for c in unwanted_companies if c)
+        return should_filter_by_company(company, unwanted_companies)
+
+    def purge_keywords(self, title: str) -> bool:
+        """Check for unwanted keywords in a job title using word boundaries for specificity (case-insensitive)."""
+        return self._should_filter_by_keywords(title)
+
+    def purge_companies(self, company: str) -> bool:
+        """Check if company name contains any unwanted company substring (case-insensitive)."""
+        return self._should_filter_by_company(company)
 
     def _build_normalized_key_from_fields(self, source: str, title: str, company: str, url: str) -> str:
         """Build the same normalized key used for cross-run de-duplication without DataFrame overhead."""
@@ -396,8 +398,8 @@ class JobScraper:
         if not df.empty:
             if self.max_total_jobs:
                 df = df.head(self.max_total_jobs)
-            # Filter out jobs with unwanted keywords in title
-            df = self.filter_unwanted_jobs(df)
+            # Filter out jobs with unwanted keywords in title using centralized logic
+            df = self.filter_scraped_jobs(df)
             # Build job_ids vectorized and drop duplicates
             df['job_id'] = build_job_ids(df)
             df = df.drop_duplicates(subset=['job_id'], keep='first')
@@ -535,23 +537,17 @@ class JobScraper:
         try:
             import re as _re
             
-            # 1) Remove jobs matching unwanted keywords in TITLE
+            # 1) Remove jobs matching unwanted keywords in TITLE with centralized logic
             unwanted_kw = self.config.get_unwanted_keywords_list()
             if unwanted_kw and 'title' in jobs_df.columns:
-                escaped_kw = [_re.escape(k) for k in unwanted_kw if k]
-                if escaped_kw:
-                    patt_kw = "|".join(escaped_kw)
-                    mask_keep = ~jobs_df['title'].astype(str).str.contains(patt_kw, case=False, na=False, regex=True)
-                    jobs_df = jobs_df[mask_keep]
+                mask_keep = ~jobs_df['title'].apply(self._should_filter_by_keywords)
+                jobs_df = jobs_df[mask_keep]
                     
-            # 2) Remove jobs matching unwanted companies
+            # 2) Remove jobs matching unwanted companies with centralized logic
             unwanted_companies = self.config.get_unwanted_companies_list()
             if unwanted_companies and 'company' in jobs_df.columns:
-                terms = [_re.escape(c) for c in unwanted_companies if c]
-                if terms:
-                    patt_co = "|".join(terms)
-                    mask_keep = ~jobs_df['company'].astype(str).str.contains(patt_co, case=False, na=False, regex=True)
-                    jobs_df = jobs_df[mask_keep]
+                mask_keep = ~jobs_df['company'].apply(self._should_filter_by_company)
+                jobs_df = jobs_df[mask_keep]
             
             # 3) Remove jobs with obvious part-time/internship indicators in title
             if 'title' in jobs_df.columns:
@@ -599,31 +595,20 @@ class JobScraper:
             original_count = len(all_jobs_df)
             logger.info(f"Found {original_count} jobs in database")
 
-            # 1) Remove jobs matching unwanted keywords in TITLE only (substring, case-insensitive)
+            # 1) Remove jobs matching unwanted keywords in TITLE only with centralized logic
             import re as _re
             unwanted_kw = self.config.get_unwanted_keywords_list()
             if unwanted_kw and 'title' in all_jobs_df.columns:
-                # Escape each keyword for regex, but do NOT use word boundaries so partials match (e.g., 'game' -> 'Gameplay')
-                escaped_kw = [_re.escape(k) for k in unwanted_kw if k]
-                if escaped_kw:
-                    patt_kw = "|".join(escaped_kw)
-                    mask_title_unwanted = all_jobs_df['title'].astype(str).str.contains(patt_kw, case=False, na=False, regex=True)
-                    unwanted_by_title = all_jobs_df[mask_title_unwanted]
-                else:
-                    unwanted_by_title = all_jobs_df.iloc[0:0]
+                mask_title_unwanted = all_jobs_df['title'].apply(self._should_filter_by_keywords)
+                unwanted_by_title = all_jobs_df[mask_title_unwanted]
             else:
                 unwanted_by_title = all_jobs_df.iloc[0:0]
 
-            # Unwanted by company names (COMPANY only, case-insensitive substring)
+            # Unwanted by company names (COMPANY only, case-insensitive substring with centralized logic)
             unwanted_companies = self.config.get_unwanted_companies_list()
             if unwanted_companies and 'company' in all_jobs_df.columns:
-                terms = [_re.escape(c) for c in unwanted_companies if c]
-                if terms:
-                    patt_co = "|".join(terms)
-                    mask_company_unwanted = all_jobs_df['company'].astype(str).str.contains(patt_co, case=False, na=False, regex=True)
-                    unwanted_by_company = all_jobs_df[mask_company_unwanted]
-                else:
-                    unwanted_by_company = all_jobs_df.iloc[0:0]
+                mask_company_unwanted = all_jobs_df['company'].apply(self._should_filter_by_company)
+                unwanted_by_company = all_jobs_df[mask_company_unwanted]
             else:
                 unwanted_by_company = all_jobs_df.iloc[0:0]
 
