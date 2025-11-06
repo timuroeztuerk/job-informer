@@ -2,7 +2,7 @@
 Lightweight LLM connection helper.
 
 Purpose
-- Provide a single, simple entry-point to call an OpenAI-compatible model (default: "gpt-5-nano").
+- Provide a single, simple entry-point to call an OpenAI-compatible model (default: "gpt-5-mini").
 - Other modules should only supply a prompt; this class handles auth, endpoint, and parsing.
 
 Usage
@@ -30,7 +30,7 @@ class LLMConnection:
 		self,
 		*,
 		api_key: Optional[str] = None,
-		model: str = "gpt-5-nano",
+		model: str = "gpt-5-mini",
 		timeout: float = 30.0,
 		system_prompt: Optional[str] = None
 	) -> None:

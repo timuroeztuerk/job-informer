@@ -44,7 +44,7 @@ class AIPurger:
         self.db = JobDatabase()
         self.parser = DescriptionTools(config=self.config, db=self.db)
         self.parser._ensure_table()
-        purge_model = getattr(self.config, 'openai_model', 'gpt-5-nano')
+        purge_model = getattr(self.config, 'openai_model', 'gpt-5-mini')
         purge_api_key = getattr(self.config, 'openai_api_key', '').strip() or None
         self.llm = LLMConnection(api_key=purge_api_key, model=purge_model)
         self.batch_size = 25
@@ -54,10 +54,9 @@ class AIPurger:
         IMPORTANT: Be conservative and only purge jobs that are clearly irrelevant or low-quality.
         Looking at the job titles and companies, you should purge jobs that are:
         - Clearly IRRELEVANT to data science, data analysis, machine learning, AI, or software engineering (e.g. sales, retail, manual labor).
-        - I'm looking for data science, machine learning, AI jobs, NOT purely software engineering jobs.
+        - I'm looking for data science, machine learning, AI jobs, NOT purely software engineering jobs. No full stack, backend, frontend, DevOps, or other purely software engineering roles unless they are explicitly focused on data science or AI.
         - Obviously spam, duplicate, or very low-quality postings.
         - AI consultant jobs can stay, if they are not duplicate.
-        DO NOT purge jobs that might be relevant, even if you're unsure.
         
         Each job listing will be labeled with a short numeric ID (e.g., "1", "2").
         Return only these numeric IDs for the jobs that should be purged as a JSON array.

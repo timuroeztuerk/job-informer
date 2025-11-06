@@ -56,6 +56,7 @@ class Config:
     desc_parser_max_batches: int
     desc_parser_version: int
     desc_parser_dry_run: bool
+    desc_parser_concurrency: int
 
     # Feature Toggles
     enable_linkedin: bool
@@ -90,7 +91,7 @@ class Config:
             recipient_email=os.getenv('RECIPIENT_EMAIL', ''),
             
             # Job Search Configuration
-            search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Science, Data Analysis, AI'),
+            search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Scientist, Data Analyst, AI Engineer'),
             search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
             search_time_range=_get_time_range('SEARCH_TIME_RANGE', DEFAULT_TIME_RANGE),
             unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', 'professor,traineeship,mitarbeiter,e-commerce,manager,adobe,abschluss,geo,volon,scrum,portfolio,financial,governance,labor,bestand,mergers,commodity,steuer,solution architect,finanzbuchhalter,projektmanager,gesundheit,laborant,logistikassistent,assistent,finanzbuchalter,reliability,Software Entwickler:in,Softwareingenieur,software engineer,solutions engineer,Gesundheitswissenschaftler,treasury,bioinformatiker,biologe,equity,retail,lehrkraft,cyber,creator,pwc,deloitte,auditor,phd,befristet,risk,compliance,public sector,microsoft,skillfinder,slurm,supplier,emat,praxis,operator,quality,medical,referent,last minute,assetmanagement,vermessungstechnikerin,powerbi,financial risk,vertriebssteuerung,ux designer,pricing,akademische/r,president,c++,devops,regulatory,assistent:in,projektkoordinator:in,cash,pay,sharepoint,teamlead,credit,sas,ontologien,photonics,convince,forensic,real estate,visual,opportunities,credit risk,life science,50%,produktmanager,produktbetreuer,kontakt-center,ce learning,kernel,think tank,aktuar,system,programmmanager,mathematiker,hr,gis,praktikant,geography,underwriter,controller,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,threat,mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,founding,client,nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,working student,frontend developer,backend developer,techniker,planer,nebenberuflich,full stack developer,lead developer,dual,duales,studium,controlling,berater,abitur,praktikum,marketing manager,project manager,sales manager,verkäufer,internship,sales,freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester'),
@@ -111,11 +112,11 @@ class Config:
             
             # AI Analysis Configuration
             openai_api_key=os.getenv('OPENAI_API_KEY', ''),
-            openai_model=os.getenv('OPENAI_MODEL', 'gpt-5-nano'),
+            openai_model=os.getenv('OPENAI_MODEL', 'gpt-5-mini'),
             
             # Description Parser Configuration
             enable_description_parser=_get_bool('ENABLE_DESCRIPTION_PARSER', 'true'),
-            desc_parser_model=os.getenv('DESC_PARSER_MODEL', os.getenv('OPENAI_MODEL', 'gpt-5-nano')),
+            desc_parser_model=os.getenv('DESC_PARSER_MODEL', os.getenv('OPENAI_MODEL', 'gpt-5-mini')),
             desc_parser_prompt=os.getenv('DESC_PARSER_PROMPT', (
                 'Extract the fields below from the job description and return STRICTLY VALID JSON.\n'
                 'Rules: output JSON only (no markdown, no code fences, no prose). Use double quotes. No comments, no trailing commas, no ellipses.\n'
@@ -138,10 +139,11 @@ class Config:
                 '  "summary": "1-2 sentences, max 30 words"\n'
                 '}'
             )),
-            desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '5')),
-            desc_parser_max_batches=int(os.getenv('DESC_PARSER_MAX_BATCHES', '10')),
+                desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '10')),
+            desc_parser_max_batches=int(os.getenv('DESC_PARSER_MAX_BATCHES', '25')),
             desc_parser_version=int(os.getenv('DESC_PARSER_VERSION', '1')),
             desc_parser_dry_run=_get_bool('DESC_PARSER_DRY_RUN', 'false'),
+            desc_parser_concurrency=int(os.getenv('DESC_PARSER_CONCURRENCY', '25')),
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
@@ -155,7 +157,7 @@ class Config:
 
         # Modes that require email configuration
         email_required_modes = {
-            'run-once', 'test', 'summary'
+            'run-once', 'test', 'summary', 'inform'
         }
         # Modes that require LLM access
         ai_required_modes = {'test', 'parse-descriptions', 'ai-purge'}
@@ -246,6 +248,7 @@ class Config:
             'desc_parser_max_batches': self.desc_parser_max_batches,
             'desc_parser_version': self.desc_parser_version,
             'desc_parser_dry_run': self.desc_parser_dry_run,
+            'desc_parser_concurrency': self.desc_parser_concurrency,
             'enable_linkedin': self.enable_linkedin,
             'dry_run': self.dry_run
         }

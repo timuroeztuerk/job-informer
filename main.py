@@ -7,10 +7,13 @@ Automated job posting monitoring and notification system
 import argparse
 import sys
 import json
+import re
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
 from loguru import logger
+
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -21,12 +24,134 @@ from src.agents.parser import DescriptionTools
 from src.agents.email_sender import EmailSender
 from src.agents.ai_purger import AIPurger
 from src.utils.logging_utils import setup_logging
+from src.utils.database import JobDatabase
 
 def create_data_directory():
     """Create data directory if it doesn't exist"""
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
     return data_dir
+
+
+CITY_ALIASES = {
+    "berlin metropolitan area": "Berlin",
+    "berlin area": "Berlin",
+    "cologne": "Cologne",
+    "koeln": "Cologne",
+    "koln": "Cologne",
+    "dusseldorf": "Düsseldorf",
+    "duesseldorf": "Düsseldorf",
+    "frankfurt": "Frankfurt am Main",
+    "frankfurt am main": "Frankfurt am Main",
+    "munchen": "Munich",
+    "muenchen": "Munich",
+    "munich": "Munich",
+    "remote": "Remote",
+    "remote germany": "Remote",
+    "remote - germany": "Remote",
+    "zurich": "Zurich",
+    "zurich area": "Zurich",
+    "zuerich": "Zurich",
+}
+
+
+def normalize_city_name(city: str) -> str:
+    """Normalize city labels to reduce duplicates caused by casing or accents."""
+    if city is None:
+        return "Unknown"
+
+    city_clean = " ".join(str(city).strip().split())
+    if not city_clean:
+        return "Unknown"
+
+    lower_clean = city_clean.lower()
+    if lower_clean in {"nan", "none", "null"}:
+        return "Unknown"
+
+    ascii_key = unicodedata.normalize("NFKD", city_clean).encode("ascii", "ignore").decode("ascii") or city_clean
+    ascii_key_lower = ascii_key.lower()
+
+    alias = CITY_ALIASES.get(ascii_key_lower) or CITY_ALIASES.get(lower_clean)
+    if alias:
+        return alias
+
+    if ascii_key_lower.startswith("remote") or lower_clean.startswith("remote"):
+        return "Remote"
+
+    return city_clean.title()
+
+
+def extract_primary_city(location: str) -> str:
+    """Return normalized primary city extracted from a full location string."""
+    if location is None:
+        return "Unknown"
+
+    primary = str(location).split(",")[0]
+    return normalize_city_name(primary)
+
+
+DEGREE_FIELD_ALIASES = {
+    "computer science": "computer science",
+    "informatics": "computer science",
+    "cs": "computer science",
+    "data science": "data science",
+    "ai": "data science",
+    "artificial intelligence": "data science",
+    "machine learning": "data science",
+    "engineering": "engineering",
+    "electrical engineering": "engineering",
+    "software engineering": "engineering",
+    "statistics": "statistics",
+    "mathematics": "mathematics",
+    "math": "mathematics",
+    "economics": "economics",
+    "business administration": "business administration",
+    "finance": "finance",
+    "related field": "related field",
+    "related fields": "related field",
+    "bwl": "business administration",
+    "wirtschaftsinformatik": "business informatics",
+    "datenwissenschaften": "data science",
+    "psychology": "psychology",
+    "cognitive science": "cognitive science",
+    "linguistics": "linguistics",
+    "robotics": "robotics",
+}
+
+
+def normalize_degree_fields(value: str) -> list[str]:
+    """Return a list of normalized degree fields derived from an LLM payload value."""
+    if value is None:
+        return ["unspecified"]
+
+    if isinstance(value, list):
+        candidates = value
+    else:
+        # Split on common separators (|, /, commas)
+        candidates = re.split(r"[|/,]", str(value))
+
+    normalized: list[str] = []
+    for candidate in candidates:
+        clean = " ".join(candidate.strip().split()).lower()
+        if not clean or clean in {"", "null", "none"}:
+            continue
+        if clean in {"unspecified", "not specified"}:
+            normalized.append("unspecified")
+            continue
+        alias = DEGREE_FIELD_ALIASES.get(clean, clean)
+        normalized.append(alias)
+
+    if not normalized:
+        return ["unspecified"]
+
+    # Preserve insertion order while removing duplicates
+    seen = set()
+    unique = []
+    for item in normalized:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
 
 def main():
     """Main application entry point"""
@@ -46,6 +171,15 @@ def main():
     group.add_argument('--ai-purge', dest='ai_purge', action='store_true', help='Run AI-powered job purging')
     group.add_argument('--get-descriptions', dest='get_descriptions', action='store_true', help='Backfill missing job descriptions')
     group.add_argument('--parse-descriptions', dest='parse_descriptions', action='store_true', help='Parse job descriptions with AI')
+    group.add_argument('--reset-ai-purge', dest='reset_ai_purge', action='store_true', help='Reset AI purge analysis flags')
+    group.add_argument(
+        '--inform',
+        dest='inform',
+        nargs='?',
+        const='last',
+        choices=['last', 'random'],
+        help='Email a digest of jobs (default: last 25)'
+    )
     
     parser.add_argument(
         '--keywords',
@@ -71,7 +205,7 @@ def main():
     # Start with default logging so early errors are visible
     setup_logging()
     # Default to run-once if no mode flag is set
-    if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.get_descriptions, args.parse_descriptions]):
+    if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.get_descriptions, args.parse_descriptions, args.reset_ai_purge, args.inform]):
         args.run_once = True
     # Determine selected mode string for config validation and logging
     if args.run_once:
@@ -84,10 +218,14 @@ def main():
         mode_str = 'purge'
     elif args.ai_purge:
         mode_str = 'ai-purge'
+    elif args.inform:
+        mode_str = 'inform'
     elif args.get_descriptions:
         mode_str = 'get-descriptions'
     elif args.parse_descriptions:
         mode_str = 'parse-descriptions'
+    elif args.reset_ai_purge:
+        mode_str = 'reset-ai-purge'
     else:
         mode_str = 'run-once'
     
@@ -118,10 +256,14 @@ def main():
             purge_unwanted_jobs(config)
         elif args.ai_purge:
             run_ai_purge_mode(config)
+        elif args.inform:
+            run_inform_mode(config, args.inform)
         elif args.get_descriptions:
             get_descriptions(config)
         elif args.parse_descriptions:
             run_description_parser(DescriptionTools(config))
+        elif args.reset_ai_purge:
+            reset_ai_purge_flags(config)
         else:
             logger.error(f"Unsupported mode: {mode_str}")
             sys.exit(1)
@@ -281,8 +423,9 @@ def show_database_summary(config: Config):
                                     languages[lang] = languages.get(lang, 0) + 1
                         
                         # Count degree fields
-                        if 'degree_field' in data and data['degree_field'] and data['degree_field'] != 'unspecified':
-                            degree_fields[data['degree_field']] = degree_fields.get(data['degree_field'], 0) + 1
+                        if 'degree_field' in data:
+                            for field in normalize_degree_fields(data['degree_field']):
+                                degree_fields[field] = degree_fields.get(field, 0) + 1
                         
                         # Count degree types
                         if 'degree_type' in data and data['degree_type'] and data['degree_type'] != 'unspecified':
@@ -358,8 +501,10 @@ def show_database_summary(config: Config):
                 # Show degree fields
                 if degree_fields:
                     sorted_degree_fields = sorted(degree_fields.items(), key=lambda x: x[1], reverse=True)
+                    filtered_degree_fields = [(field, count) for field, count in sorted_degree_fields if field != "unspecified"]
+                    display_degree_fields = filtered_degree_fields or sorted_degree_fields
                     print(f"\n📜 Degree Fields:")
-                    for field, count in sorted_degree_fields[:5]:
+                    for field, count in display_degree_fields[:5]:
                         percentage = (count / len(parsed_df)) * 100
                         print(f"  {field}: {count:,} ({percentage:.1f}%)")
                 
@@ -405,13 +550,14 @@ def show_database_summary(config: Config):
         if all_jobs_df is None or all_jobs_df.empty:
             print(f"\n==== Top 5 Cities ====\nNo jobs to summarize.\n")
         else:
-            cities = all_jobs_df['location'].astype(str).str.split(',').str[0].str.strip().replace({'': 'Unknown'})
-            city_counts = cities.value_counts()
+            city_series = all_jobs_df['location'].apply(extract_primary_city)
+            city_counts = city_series.value_counts()
             top5_counts = city_counts.head(5)
+            total_entries = len(city_series)
 
             print(f"\n🏙️  Top 5 cities:")
             for i, (city, count) in enumerate(top5_counts.items(), 1):
-                percentage = (count / len(all_jobs_df)) * 100
+                percentage = (count / total_entries) * 100 if total_entries else 0.0
                 print(f"  {i}. {city}: {count:,} jobs ({percentage:.1f}%)")
     except Exception as e:
         logger.warning(f"Could not compute city summary: {e}")
@@ -463,6 +609,73 @@ def run_ai_purge_mode(config: Config):
             
     except Exception as e:
         logger.error(f"AI purge mode failed: {e}")
+        sys.exit(1)
+
+def run_inform_mode(config: Config, selection: str):
+    """Send an email digest of jobs from the database"""
+    logger.info("=== Preparing job digest email ===")
+    db = JobDatabase()
+    email_sender = EmailSender(config)
+
+    try:
+        with db._get_connection() as conn:
+            if selection == 'random':
+                query = """
+                    SELECT job_id, title, company, location, source, url, salary, scraped_at
+                    FROM jobs
+                    ORDER BY RANDOM()
+                    LIMIT 25
+                """
+            else:
+                query = """
+                    SELECT job_id, title, company, location, source, url, salary, scraped_at
+                    FROM jobs
+                    ORDER BY COALESCE(created_at, scraped_at) DESC
+                    LIMIT 25
+                """
+            jobs_df = pd.read_sql_query(query, conn)
+
+        if jobs_df.empty:
+            logger.warning("No jobs available in the database to include in the digest")
+            return
+
+        jobs_df = jobs_df.fillna({
+            'title': '',
+            'company': '',
+            'location': '',
+            'source': '',
+            'salary': 'Not specified',
+            'url': ''
+        })
+
+        subject_descriptor = "Random 25 jobs" if selection == 'random' else "Latest 25 jobs"
+        subject = f"Job Informer Digest - {subject_descriptor}"
+
+        if email_sender.send_job_report(jobs_df, subject):
+            logger.success("=== Job digest email sent ===")
+        else:
+            logger.error("Failed to send job digest email")
+            sys.exit(1)
+
+    except Exception as e:
+        logger.error(f"Inform mode failed: {e}")
+        try:
+            email_sender.send_error_notification(str(e))
+        except Exception as notify_error:
+            logger.error(f"Failed to send inform error notification: {notify_error}")
+        sys.exit(1)
+
+def reset_ai_purge_flags(config: Config, *, reset_all: bool = True):
+    """Reset AI purge analyzed flags so jobs can be reconsidered"""
+    logger.info("=== Resetting AI purge analysis flags ===")
+    
+    try:
+        ai_purger = AIPurger(config)
+        reset_count = ai_purger.reset_analyzed_flags(all_jobs=reset_all)
+        logger.info(f"Reset analyzed flag for {reset_count} job records")
+        logger.success("=== Done ===")
+    except Exception as e:
+        logger.error(f"Failed to reset AI purge flags: {e}")
         sys.exit(1)
 
 def get_descriptions(config: Config):

@@ -71,12 +71,9 @@ class TestDataCleaningUtilities(unittest.TestCase):
             ]
         )
 
-        scored = data_utils.add_relevance_score(df, ["data"])
-
         # Highest score should be the title containing the keyword
         self.assertEqual(scored.iloc[0]["title"], "Senior Data Scientist")
         self.assertGreater(scored.iloc[0]["relevance_score"], scored.iloc[-1]["relevance_score"])
-
 
 class TestSummaryAndExportUtilities(unittest.TestCase):
     """Tests focused on summary generation and export helpers."""

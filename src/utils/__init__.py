@@ -15,7 +15,6 @@ from .data_utils import (
     extract_salary_info,
     filter_jobs_by_keywords,
     filter_jobs_by_location,
-    add_relevance_score,
     generate_job_summary,
     export_jobs_to_formats
 )
@@ -37,7 +36,6 @@ __all__ = [
     "extract_salary_info",
     "filter_jobs_by_keywords",
     "filter_jobs_by_location",
-    "add_relevance_score",
     "generate_job_summary",
     "export_jobs_to_formats",
     

@@ -115,7 +115,6 @@ def clean_job_data(jobs_df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-
 def filter_unwanted_job_titles(df: pd.DataFrame) -> pd.DataFrame:
     """Filter out jobs with unwanted keywords in the title"""
     if df.empty or 'title' not in df.columns:
@@ -135,7 +134,6 @@ def filter_unwanted_job_titles(df: pd.DataFrame) -> pd.DataFrame:
         print(f"Filtered out {removed_count} jobs containing unwanted keywords")
     
     return df
-
 
 def extract_salary_info(salary_text: str) -> Dict[str, Optional[str]]:
     """Extract salary information from text"""
@@ -180,7 +178,6 @@ def extract_salary_info(salary_text: str) -> Dict[str, Optional[str]]:
     
     return result
 
-
 def filter_jobs_by_keywords(jobs_df: pd.DataFrame, keywords: List[str], column: str = 'title') -> pd.DataFrame:
     """Filter jobs by keywords in specified column"""
     if jobs_df.empty or not keywords:
@@ -190,7 +187,6 @@ def filter_jobs_by_keywords(jobs_df: pd.DataFrame, keywords: List[str], column: 
     mask = jobs_df[column].str.contains(pattern, case=False, na=False)
     return jobs_df.loc[mask]
 
-
 def filter_jobs_by_location(jobs_df: pd.DataFrame, locations: List[str]) -> pd.DataFrame:
     """Filter jobs by location"""
     if jobs_df.empty or not locations:
@@ -199,28 +195,6 @@ def filter_jobs_by_location(jobs_df: pd.DataFrame, locations: List[str]) -> pd.D
     pattern = '|'.join([re.escape(location) for location in locations])
     mask = jobs_df['location'].str.contains(pattern, case=False, na=False)
     return jobs_df.loc[mask]
-
-
-def add_relevance_score(jobs_df: pd.DataFrame, preferred_keywords: List[str]) -> pd.DataFrame:
-    """Add relevance score based on keyword matches"""
-    if jobs_df.empty:
-        return jobs_df
-    
-    df = jobs_df.copy()
-    df['relevance_score'] = 0
-    
-    for keyword in preferred_keywords:
-        # Check title matches (higher weight)
-        title_matches = df['title'].str.contains(keyword, case=False, na=False)
-        df.loc[title_matches, 'relevance_score'] += 3
-        
-        # Check company matches
-        if 'company' in df.columns:
-            company_matches = df['company'].str.contains(keyword, case=False, na=False)
-            df.loc[company_matches, 'relevance_score'] += 1
-    
-    return df.sort_values('relevance_score', ascending=False)
-
 
 def generate_job_summary(jobs_df: pd.DataFrame) -> Dict:
     """Generate summary statistics for job data"""

@@ -422,10 +422,9 @@ class JobScraper:
         return filepath
 
     def execute_job_search(self) -> bool:
-        """Execute job search and send notifications"""
+        """Execute job search and persist results"""
         from ..agents.email_sender import EmailSender
 
-        email_sender = EmailSender(self.config)
         self.last_run_threshold_hit = False
 
         try:
@@ -448,67 +447,53 @@ class JobScraper:
             locations = [l.strip() for l in self.config.search_locations.split(',')]
             jobs_df = self.scrape(keywords, locations)
 
-            if not jobs_df.empty:
-                # Apply additional filtering to newly scraped jobs
-                jobs_df = self.filter_scraped_jobs(jobs_df)
-                if self.max_total_jobs:
-                    jobs_df = jobs_df.head(self.max_total_jobs)
-
-                if jobs_df.empty:
-                    logger.warning("All scraped jobs were filtered out by purge criteria")
-                    # Send notification about filtered results (respect dry run)
-                    subject = "Job Search Report - No jobs after filtering"
-                    if not self.config.dry_run:
-                        email_sender.send_job_report(jobs_df, subject)
-                    else:
-                        logger.info("DRY_RUN is enabled; skipping filtered-results email")
-                    return False
-
-                # Store jobs in SQLite database (fast deduplication)
-                new_jobs_count = self.db.put_into_sql(jobs_df)
-
-                if self.min_new_jobs_to_continue and new_jobs_count < self.min_new_jobs_to_continue:
-                    self.last_run_threshold_hit = True
-                    logger.info(
-                        "Found %d new jobs, below MIN_NEW_JOBS_TO_CONTINUE=%d; skipping notifications",
-                        new_jobs_count,
-                        self.min_new_jobs_to_continue,
-                    )
-                    return False
-
-                # Save CSV for backup/auditing unless dry-run
-                csv_filename = None
-                if not self.config.dry_run:
-                    csv_filename = self.save_jobs_to_csv(jobs_df)
-                else:
-                    logger.info("DRY_RUN is enabled; skipping CSV save")
-                
-                # Send email with inline list of jobs (HTML + text), no attachment
-                subject = f"Job Search Report - {new_jobs_count} new opportunities found!"
-                if not self.config.dry_run and new_jobs_count > 0:
-                    sent = email_sender.send_job_report(jobs_df, subject)
-                    if not sent:
-                        logger.warning("Email send returned False")
-                elif self.config.dry_run:
-                    logger.info("DRY_RUN is enabled; skipping email send")
-                else:
-                    logger.info("No new jobs detected; skipping email send")
-                return True
-            else:
+            if jobs_df.empty:
                 logger.warning("No jobs found in this search.")
-                
-                # Send notification about empty results (respect dry run)
-                subject = "Job Search Report - No new opportunities found"
-                if not self.config.dry_run:
-                    email_sender.send_job_report(jobs_df, subject)
-                else:
-                    logger.info("DRY_RUN is enabled; skipping empty-results email")
                 return False
-                
+
+            # Apply additional filtering to newly scraped jobs
+            jobs_df = self.filter_scraped_jobs(jobs_df)
+            if self.max_total_jobs:
+                jobs_df = jobs_df.head(self.max_total_jobs)
+
+            if jobs_df.empty:
+                logger.warning("All scraped jobs were filtered out by purge criteria")
+                return False
+
+            # Store jobs in SQLite database (fast deduplication)
+            new_jobs_count = self.db.put_into_sql(jobs_df)
+
+            if self.min_new_jobs_to_continue and new_jobs_count < self.min_new_jobs_to_continue:
+                self.last_run_threshold_hit = True
+                logger.info(
+                    "Found %d new jobs, below MIN_NEW_JOBS_TO_CONTINUE=%d; skipping further processing",
+                    new_jobs_count,
+                    self.min_new_jobs_to_continue,
+                )
+                return False
+
+            # Save CSV for backup/auditing unless dry-run
+            csv_filename = None
+            if not self.config.dry_run:
+                csv_filename = self.save_jobs_to_csv(jobs_df)
+                logger.info("Saved snapshot of scraped jobs to %s", csv_filename)
+            else:
+                logger.info("DRY_RUN is enabled; skipping CSV save")
+
+            logger.info(
+                "Scraping completed: %d new jobs stored%s",
+                new_jobs_count,
+                f" (CSV saved to {csv_filename})" if csv_filename else ""
+            )
+            return True
+
         except Exception as e:
             logger.error(f"Error in job search: {e}")
             # Send error notification
-            email_sender.send_error_notification(str(e))
+            try:
+                EmailSender(self.config).send_error_notification(str(e))
+            except Exception as notify_error:
+                logger.error(f"Failed to send error notification email: {notify_error}")
             return False
 
     def get_search_summary(self) -> dict:

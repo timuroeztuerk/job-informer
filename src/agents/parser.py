@@ -14,6 +14,7 @@ import sqlite3
 import sys
 from datetime import datetime
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 from loguru import logger
@@ -69,7 +70,7 @@ class DescriptionTools:
         self._ensure_table()
         # Unified LLM connection, default to OpenAI model configured
         parser_model = getattr(self.config, 'desc_parser_model', None) or getattr(
-            self.config, 'openai_model', 'gpt-5-nano'
+            self.config, 'openai_model', 'gpt-5-mini'
         )
         parser_api_key = getattr(self.config, 'openai_api_key', '').strip() or None
         self.llm = LLMConnection(api_key=parser_api_key, model=parser_model)
@@ -230,13 +231,20 @@ class DescriptionTools:
             return 0
         version = int(getattr(self.config, 'desc_parser_version', 1))
         dry = bool(getattr(self.config, 'desc_parser_dry_run', False))
+        # Allow parallel LLM calls; default to 10
+        concurrency = max(1, int(getattr(self.config, 'desc_parser_concurrency', 10)))
         created_ts = datetime.utcnow().isoformat()
         
         new_count = 0
-        # Show initial progress indicator
-        self._update_progress(batch_num, total_batches, 0, len(jobs_df), status="Starting batch")
+        total_items = int(len(jobs_df))
+        completed_items = 0
 
-        for current_job_idx, (idx, row) in enumerate(jobs_df.iterrows(), 1):
+        # Show initial progress indicator
+        self._update_progress(batch_num, total_batches, 0, total_items, status="Starting batch")
+
+        # Prepare jobs for processing: skip missing and cached first, then parallelize LLM calls
+        jobs_to_process: List[Dict[str, Any]] = []
+        for _, row in jobs_df.iterrows():
             desc = str(row.get('description') or '').strip()
             job_id = str(row.get('job_id') or '')
             title = str(row.get('title', 'Unknown Title'))
@@ -244,62 +252,96 @@ class DescriptionTools:
 
             if not desc or not job_id:
                 logger.warning(f"Job {job_id}: Skipping due to missing description or job_id")
-                self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df),
+                completed_items += 1
+                self._update_progress(batch_num, total_batches, completed_items, total_items,
                                       status="Skipped — missing description or job_id")
                 continue
-
-            # Update progress bars for current job
-            processing_detail = f"Processing {title[:30]}..."
-            self._update_progress(batch_num, total_batches, current_job_idx - 1, len(jobs_df), status=processing_detail)
 
             h = self._hash_description(desc)
             cached = self._find_cached(job_id, h, version)
             if cached:
                 logger.info(f"Job {job_id}: Found cached result, skipping LLM call")
-                self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df),
+                completed_items += 1
+                self._update_progress(batch_num, total_batches, completed_items, total_items,
                                       status="Cached result found")
                 continue
 
-            if dry:
-                # store a placeholder minimal payload without calling LLM
-                payload = json.dumps({"dry_run": True})
-            else:
-                payload = self._call_llm(desc, job_id)
-                if not payload:
-                    logger.error(f"Job {job_id}: LLM call failed, skipping storage")
-                    self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df),
-                                          status="Failed — LLM call error")
-                    continue
+            jobs_to_process.append({
+                'job_id': job_id,
+                'title': title,
+                'company': company,
+                'description': desc,
+                'desc_hash': h,
+            })
 
-            rec = ParsedDescription(
-                job_id=job_id,
-                desc_hash=h,
-                version=version,
-                model=self.llm.model,
-                payload_json=payload,
-                created_at=created_ts,
-            )
-            
-            try:
-                self._store(rec)
-                new_count += 1
+        # If dry-run, bypass LLM and just store placeholders synchronously
+        if dry:
+            for item in jobs_to_process:
+                rec = ParsedDescription(
+                    job_id=item['job_id'],
+                    desc_hash=item['desc_hash'],
+                    version=version,
+                    model=self.llm.model,
+                    payload_json=json.dumps({"dry_run": True}),
+                    created_at=created_ts,
+                )
+                try:
+                    self._store(rec)
+                    new_count += 1
+                except Exception as e:
+                    logger.error(f"Job {item['job_id']}: Failed to store parsed description (dry-run): {e}")
+                finally:
+                    completed_items += 1
+                    self._update_progress(batch_num, total_batches, completed_items, total_items,
+                                          status=f"Dry-run stored {item['title'][:30]}...")
+        else:
+            # Parallelize LLM calls, but serialize DB writes to avoid SQLite locks
+            def worker(item: Dict[str, Any]) -> Dict[str, Any]:
+                try:
+                    payload = self._call_llm(item['description'], item['job_id'])
+                    return {**item, 'payload': payload}
+                except Exception as e:
+                    logger.error(f"Job {item['job_id']}: Worker error: {e}")
+                    return {**item, 'payload': None, 'error': str(e)}
 
-                # Update progress bars after successful processing
-                completion_detail = f"Completed {title[:30]}..."
-                self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df), status=completion_detail)
+            if jobs_to_process:
+                status_msg = f"Dispatching {len(jobs_to_process)} LLM calls (concurrency={concurrency})"
+                self._update_progress(batch_num, total_batches, completed_items, total_items, status=status_msg)
 
-                # Add a small delay between jobs to slow down processing
-                if not dry and current_job_idx < len(jobs_df):
-                    import time
-                    time.sleep(2)  # 2 second delay between LLM calls
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                future_map = {executor.submit(worker, item): item for item in jobs_to_process}
+                for future in as_completed(future_map):
+                    result = future.result()
+                    job_id = result['job_id']
+                    title = result['title']
+                    payload = result.get('payload')
 
-            except Exception as e:
-                logger.error(f"Job {job_id}: Failed to store parsed description: {e}")
-                self._update_progress(batch_num, total_batches, current_job_idx, len(jobs_df),
-                                      status="Failed — storage error")
+                    if not payload:
+                        logger.error(f"Job {job_id}: LLM call failed, skipping storage")
+                    else:
+                        rec = ParsedDescription(
+                            job_id=job_id,
+                            desc_hash=result['desc_hash'],
+                            version=version,
+                            model=self.llm.model,
+                            payload_json=payload,
+                            created_at=created_ts,
+                        )
+                        try:
+                            self._store(rec)
+                            new_count += 1
+                        except Exception as e:
+                            logger.error(f"Job {job_id}: Failed to store parsed description: {e}")
+
+                    completed_items += 1
+                    running = len(jobs_to_process) - (completed_items - (total_items - len(jobs_to_process)))
+                    status = f"{completed_items}/{total_items} done — {max(running,0)} running"
+                    # Include a short title preview for user feedback
+                    status = f"{status} | Last: {title[:30]}..."
+                    self._update_progress(batch_num, total_batches, completed_items, total_items, status=status)
 
         # Final progress update
-        self._update_progress(batch_num, total_batches, len(jobs_df), len(jobs_df), status="Batch complete")
+        self._update_progress(batch_num, total_batches, total_items, total_items, status="Batch complete")
         logger.info(f"Batch processing complete: {new_count} new descriptions parsed and stored")
         return new_count
 
@@ -396,7 +438,8 @@ class DescriptionTools:
                 return True
             batch_size = int(getattr(self.config, 'desc_parser_batch_size', 25))
             max_batches = int(getattr(self.config, 'desc_parser_max_batches', 4))
-            logger.info(f"Running description parser: batch_size={batch_size}, max_batches={max_batches}, version={getattr(self.config, 'desc_parser_version', 1)}")
+            concurrency = int(getattr(self.config, 'desc_parser_concurrency', 10))
+            logger.info(f"Running description parser: batch_size={batch_size}, max_batches={max_batches}, version={getattr(self.config, 'desc_parser_version', 1)}, concurrency={concurrency}")
             new_items = self.run_incremental(batch_size=batch_size, max_batches=max_batches)
             logger.info(f"Description parser stored {new_items} new parsed payloads")
             return True
