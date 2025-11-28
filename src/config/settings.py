@@ -139,8 +139,8 @@ class Config:
                 '  "summary": "1-2 sentences, max 30 words"\n'
                 '}'
             )),
-                desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '10')),
-            desc_parser_max_batches=int(os.getenv('DESC_PARSER_MAX_BATCHES', '25')),
+                desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '25')),
+            desc_parser_max_batches=int(os.getenv('DESC_PARSER_MAX_BATCHES', '10')),
             desc_parser_version=int(os.getenv('DESC_PARSER_VERSION', '1')),
             desc_parser_dry_run=_get_bool('DESC_PARSER_DRY_RUN', 'false'),
             desc_parser_concurrency=int(os.getenv('DESC_PARSER_CONCURRENCY', '25')),

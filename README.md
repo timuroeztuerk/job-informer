@@ -8,6 +8,19 @@ Job Informer scrapes fresh data-focused job postings, filters them with lightwei
 - Copy `.env.example` → `.env` and fill in credentials, especially `OPENAI_API_KEY` and email SMTP settings.
 - Run a one-off scrape: `python main.py --run-once`
 
+## Minimal API for the frontend
+- Start the API: `uvicorn api:app --reload --port 8000`
+- Trigger a scrape: `curl -X POST http://localhost:8000/runs`
+- Poll run status: `curl http://localhost:8000/runs/<run_id>`
+- Read jobs: `curl 'http://localhost:8000/jobs?limit=20'`
+- Single job: `curl http://localhost:8000/jobs/<job_id>`
+
+## Frontend (Vue)
+- `cd frontend && npm install`
+- Copy `.env.example` → `.env` and set `VITE_API_BASE` (defaults to `http://localhost:8000`).
+- Run dev server: `npm run dev` (Vite on port 5173).
+- The UI can start runs, watch status, list jobs, and open details/descriptions.
+
 ## Common Tasks
 - `python main.py --run-once --keywords "Data Scientist" --locations "Berlin"` – scrape with custom filters.
 - `python main.py --parse-descriptions` – backfill structured summaries for stored job descriptions.
