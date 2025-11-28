@@ -7,11 +7,14 @@ import os
 from dotenv import load_dotenv
 from typing import Optional
 from dataclasses import dataclass
+from pathlib import Path
 import re
 
 
 VALID_TIME_RANGES = {"day", "week", "month"}
 DEFAULT_TIME_RANGE = "day"
+BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_LOG_FILE = str(BASE_DIR / "logs" / "job_informer.log")
 
 
 @dataclass
@@ -69,7 +72,14 @@ class Config:
         if env_file:
             load_dotenv(env_file)
         else:
-            load_dotenv()  # Load from .env file in current directory
+            default_env = BASE_DIR / ".env"
+            fallback_env = BASE_DIR.parent / ".env"
+            if default_env.exists():
+                load_dotenv(default_env)
+            elif fallback_env.exists():
+                load_dotenv(fallback_env)
+            else:
+                load_dotenv()  # Fallback to current directory
         
         def _get_bool(name: str, default: str = 'false') -> bool:
             value = os.getenv(name, default)
@@ -108,7 +118,7 @@ class Config:
             
             # Logging Configuration
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
-            log_file=os.getenv('LOG_FILE', 'logs/job_informer.log'),
+            log_file=os.getenv('LOG_FILE', DEFAULT_LOG_FILE),
             
             # AI Analysis Configuration
             openai_api_key=os.getenv('OPENAI_API_KEY', ''),

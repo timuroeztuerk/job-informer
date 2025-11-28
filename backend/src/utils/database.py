@@ -3,6 +3,7 @@ Database utilities for job storage using SQLite
 Provides fast deduplication and querying capabilities
 """
 
+import os
 import sqlite3
 import pandas as pd
 from pathlib import Path
@@ -11,11 +12,17 @@ from datetime import datetime, timedelta
 from loguru import logger
 import numpy as np
 
+# Default DB relative to backend directory unless overridden by env
+DEFAULT_DB_PATH = os.getenv(
+    "JOBS_DB_PATH",
+    str(Path(__file__).resolve().parents[2] / "data" / "jobs.db"),
+)
+
 
 class JobDatabase:
     """SQLite-based job storage with fast deduplication and querying"""
     
-    def __init__(self, db_path: str = "data/jobs.db"):
+    def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
         self._ensure_data_dir()
         self._init_db()

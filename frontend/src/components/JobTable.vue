@@ -1,27 +1,55 @@
 <template>
-  <section>
+  <section class="panel job-table">
     <div class="table-header">
       <div>
         <p class="label">Jobs</p>
         <h3>{{ total ? total.toLocaleString() : "No" }} records</h3>
       </div>
       <div class="controls">
-        <input v-model="search" class="input" placeholder="Search title or company" @keyup.enter="load" />
-        <select v-model="source" class="input" @change="load">
+        <input v-model="search" class="input" placeholder="Search title or company" @keyup.enter="load(true)" />
+        <select v-model="source" class="input" @change="load(true)">
           <option value="">Any source</option>
-          <option value="indeed">Indeed</option>
-          <option value="linkedin">LinkedIn</option>
-          <option value="stepstone">StepStone</option>
+          <option v-for="s in sourceOptions" :key="s" :value="s">{{ s }}</option>
         </select>
-        <button class="ghost" type="button" @click="load" :disabled="loading">Refresh</button>
+        <select v-model="company" class="input" @change="load(true)">
+          <option value="">Any company</option>
+          <option v-for="c in companyOptions" :key="c" :value="c">{{ c }}</option>
+        </select>
       </div>
     </div>
 
+    <div class="filters inline">
+      <label class="tiny">
+        <span>Date from</span>
+        <input v-model="dateFrom" type="date" class="input" @change="load(true)" />
+      </label>
+      <label class="tiny">
+        <span>Date to</span>
+        <input v-model="dateTo" type="date" class="input" @change="load(true)" />
+      </label>
+      <label class="tiny">
+        <span>Sort</span>
+        <select v-model="sort" class="input" @change="load(true)">
+          <option value="scraped_at_desc">Newest</option>
+          <option value="scraped_at_asc">Oldest</option>
+          <option value="title_asc">Title A-Z</option>
+          <option value="title_desc">Title Z-A</option>
+        </select>
+      </label>
+      <button class="ghost sm" type="button" @click="load(true)" :disabled="loading">Refresh</button>
+      <button class="ghost sm" type="button" @click="clearFilters" :disabled="loading">Clear</button>
+    </div>
+
     <div class="table-card">
-      <div v-if="error" class="error">{{ error }}</div>
+      <div v-if="error" class="error">
+        {{ error }}
+        <button class="ghost sm" type="button" @click="load()" :disabled="loading">Retry</button>
+      </div>
       <div v-else>
-        <div v-if="loading" class="empty">Loading jobs…</div>
-        <div v-else-if="jobs.length === 0" class="empty">No jobs found for this filter.</div>
+        <div v-if="loading" class="skeletons">
+          <div v-for="i in 5" :key="i" class="skeleton-row"></div>
+        </div>
+        <div v-else-if="jobs.length === 0" class="empty">No jobs found. Try loosening filters.</div>
         <div v-else class="list">
           <article
             v-for="job in jobs"
@@ -63,20 +91,35 @@ const emit = defineEmits<{
   (e: "select", job: Job | null): void;
 }>();
 
+const props = defineProps<{
+  sources: string[];
+  companies: string[];
+}>();
+
+const sourceOptions = computed(() => props.sources || []);
+const companyOptions = computed(() => props.companies || []);
+
 const jobs = ref<Job[]>([]);
 const total = ref(0);
 const offset = ref(0);
-const limit = 20;
+const limit = 5;
 const loading = ref(false);
 const error = ref<string | null>(null);
 const search = ref("");
 const source = ref("");
+const company = ref("");
+const dateFrom = ref("");
+const dateTo = ref("");
+const sort = ref<"scraped_at_desc" | "scraped_at_asc" | "title_asc" | "title_desc">("scraped_at_desc");
 const selectedId = ref<string | null>(null);
 
 const pageNumber = computed(() => Math.floor(offset.value / limit) + 1);
 const hasNext = computed(() => offset.value + limit < total.value);
 
-const load = async () => {
+const load = async (reset = false) => {
+  if (reset) {
+    offset.value = 0;
+  }
   loading.value = true;
   error.value = null;
   try {
@@ -85,6 +128,10 @@ const load = async () => {
       offset: offset.value,
       search: search.value,
       source: source.value,
+      company: company.value,
+      dateFrom: dateFrom.value,
+      dateTo: dateTo.value,
+      sort: sort.value,
     });
     jobs.value = data.items;
     total.value = data.total;
@@ -119,16 +166,42 @@ const formatDate = (value?: string) => {
   return new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(value));
 };
 
+const clearFilters = () => {
+  search.value = "";
+  source.value = "";
+  company.value = "";
+  dateFrom.value = "";
+  dateTo.value = "";
+  sort.value = "scraped_at_desc";
+  load(true);
+};
+
 onMounted(load);
+
+defineExpose({
+  reload: (reset = true) => load(reset),
+});
 </script>
 
 <style scoped>
+.job-table {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
 .table-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 8px;
+}
+
+.table-header .label {
+  margin-bottom: 2px;
+  display: inline-block;
 }
 
 .controls {
@@ -139,11 +212,47 @@ onMounted(load);
 }
 
 .input {
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid var(--border);
   background: #f8fafc;
-  min-width: 170px;
+  min-width: 140px;
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.filters::-webkit-scrollbar {
+  display: none;
+}
+
+.filters > * {
+  flex: 0 0 auto;
+}
+
+.filters.inline .input {
+  width: 120px;
+  min-width: 110px;
+  padding: 6px 8px;
+  height: 32px;
+}
+
+.tiny {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .table-card {
@@ -151,6 +260,8 @@ onMounted(load);
   border-radius: 14px;
   overflow: hidden;
   background: var(--card);
+  max-height: 420px;
+  overflow-y: auto;
 }
 
 .list {
@@ -228,6 +339,10 @@ onMounted(load);
   margin: 8px;
 }
 
+.error .sm {
+  margin-left: 8px;
+}
+
 .pagination {
   display: flex;
   align-items: center;
@@ -235,23 +350,30 @@ onMounted(load);
   margin-top: 10px;
 }
 
-.ghost {
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
-}
-
-.label {
-  font-size: 12px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin: 0;
-}
-
 h3 {
   margin: 2px 0 0;
+}
+
+.skeletons {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+}
+
+.skeleton-row {
+  height: 64px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, #eef2f7 25%, #f5f7fb 50%, #eef2f7 75%);
+  background-size: 400% 100%;
+  animation: shimmer 1.1s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
 }
 </style>

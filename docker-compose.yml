@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      API_TOKEN: ${API_TOKEN:-}
+      JOBS_DB_PATH: /app/data/jobs.db
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/logs:/app/logs
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://backend:8000}
+        VITE_API_TOKEN: ${VITE_API_TOKEN:-}
+    env_file:
+      - .env
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
