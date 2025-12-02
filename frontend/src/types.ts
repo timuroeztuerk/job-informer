@@ -21,10 +21,8 @@ export interface JobsResponse {
 export type CliMode =
   | "run-once"
   | "purge"
-  | "ai-purge"
   | "reset-ai-purge"
   | "parse-descriptions"
-  | "get-descriptions"
   | "db-summary"
   | "test";
 
@@ -111,6 +109,13 @@ export interface NumericRangeStat {
 }
 
 export interface ParsedInsights {
+  coverage_pct?: number | null;
+  orphaned_jobs?: number;
+  historical_payloads?: number | null;
+  seniority_mix?: {
+    senior: SenioritySlice;
+    non_senior: SenioritySlice;
+  };
   total_records: number;
   programming_languages: CountStat[];
   skills: CountStat[];
@@ -144,4 +149,11 @@ export interface DbSummary {
   parsed_descriptions_stats?: Record<string, number>;
   parsed_insights: ParsedInsights;
   city_summary: CitySummary;
+}
+
+export interface SenioritySlice {
+  count: number;
+  percentage?: number;
+  avg_experience?: number | null;
+  avg_salary?: number | null;
 }

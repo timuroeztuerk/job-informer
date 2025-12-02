@@ -25,30 +25,6 @@
     </header>
 
     <main v-if="viewMode === 'dashboard'" class="layout">
-      <aside class="sidebar left">
-        <section class="panel stats" v-if="stats">
-          <div class="stat">
-            <div class="label">Total jobs</div>
-            <div class="value">{{ stats.total_jobs.toLocaleString() }}</div>
-          </div>
-          <div class="stat">
-            <div class="label">Last 7 days</div>
-            <div class="value">{{ stats.recent_jobs_7_days.toLocaleString() }}</div>
-          </div>
-          <div class="stat">
-            <div class="label">Date range</div>
-            <div class="value">
-              <span v-if="stats.date_range.earliest">
-                {{ shortDate(stats.date_range.earliest) }} – {{ shortDate(stats.date_range.latest || "") }}
-              </span>
-              <span v-else>n/a</span>
-            </div>
-          </div>
-        </section>
-        <section v-else-if="statsError" class="panel warning">{{ statsError }}</section>
-        <RecentRuns ref="runsRef" />
-      </aside>
-
       <div class="main">
         <RunPane class="highlight" />
         <div class="jobs">
@@ -72,7 +48,6 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import RunPane from "./components/RunPane.vue";
 import JobTable from "./components/JobTable.vue";
 import JobDetail from "./components/JobDetail.vue";
-import RecentRuns from "./components/RecentRuns.vue";
 import SummaryPage from "./components/SummaryPage.vue";
 import { fetchStats } from "./api";
 import type { Job, JobStats } from "./types";
@@ -84,7 +59,6 @@ const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const viewMode = ref<"dashboard" | "summary">("dashboard");
 const now = ref(new Date());
 const tableRef = ref<InstanceType<typeof JobTable> | null>(null);
-const runsRef = ref<InstanceType<typeof RecentRuns> | null>(null);
 let clock: number | null = null;
 
 const onSelectJob = (job: Job | null) => {
@@ -116,7 +90,6 @@ onBeforeUnmount(() => {
 const onDeleted = () => {
   selectedJob.value = null;
   tableRef.value?.reload?.(true);
-  runsRef.value?.reload?.();
 };
 </script>
 
@@ -241,22 +214,15 @@ h1 {
 
 .layout {
   display: grid;
-  grid-template-columns: var(--sidebar-left) minmax(0, var(--content-columns));
+  grid-template-columns: 1fr;
   gap: 16px;
   align-items: start;
-}
-
-.sidebar {
-  position: sticky;
-  top: 16px;
-  align-self: start;
 }
 
 .main {
   display: grid;
   gap: 12px;
 }
-
 
 .jobs {
   display: grid;
@@ -265,19 +231,7 @@ h1 {
   align-items: start;
 }
 
-.summary-shell {
-  margin-top: 10px;
-}
-
 @media (max-width: 1100px) {
-  .layout {
-    grid-template-columns: 1fr;
-  }
-
-  .sidebar {
-    position: static;
-  }
-
   .jobs {
     grid-template-columns: 1fr;
   }

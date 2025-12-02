@@ -49,20 +49,16 @@ const modeLabel = (mode: CliMode) => {
   switch (mode) {
     case "run-once":
       return "Run";
-    case "ai-purge":
-      return "AI purge";
     case "reset-ai-purge":
       return "Reset AI purge";
     case "parse-descriptions":
       return "Parse descriptions";
-    case "get-descriptions":
-      return "Get descriptions";
     case "db-summary":
       return "DB summary";
     case "test":
       return "Test";
     case "purge":
-      return "Purge";
+      return "Purge (rules + AI)";
     default:
       return mode;
   }
@@ -126,11 +122,6 @@ defineExpose({ reload: load });
   color: #be123c;
 }
 
-.pill.mode-ai-purge {
-  background: #e0f2fe;
-  color: #0284c7;
-}
-
 .pill.mode-reset-ai-purge {
   background: #f1f5f9;
   color: #0f172a;
@@ -139,11 +130,6 @@ defineExpose({ reload: load });
 .pill.mode-parse-descriptions {
   background: #ecfeff;
   color: #0ea5e9;
-}
-
-.pill.mode-get-descriptions {
-  background: #e0f7f0;
-  color: #0f766e;
 }
 
 .pill.mode-db-summary {

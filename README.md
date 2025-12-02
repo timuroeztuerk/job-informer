@@ -32,8 +32,8 @@ Job Informer scrapes fresh data-focused job postings, filters them with lightwei
 
 ## Common Tasks
 - `python backend/main.py --run-once --keywords "Data Scientist" --locations "Berlin"` – scrape with custom filters.
-- `python backend/main.py --parse-descriptions` – backfill structured summaries for stored job descriptions.
-- `python backend/main.py --ai-purge` – flag irrelevant postings via the configured `gpt-5-mini` model.
+- `python backend/main.py --parse-descriptions` – fetch any missing descriptions and parse structured summaries in one go.
+- `python backend/main.py --purge` – apply rules-based cleanup and AI-powered purging in a single run.
 
 ## Configuration Highlights
 - `OPENAI_MODEL` (default `gpt-5-mini`) drives all LLM calls; override `DESC_PARSER_MODEL` for the parser only.
@@ -44,3 +44,11 @@ Job Informer scrapes fresh data-focused job postings, filters them with lightwei
 - SQLite databases live in `backend/data/`; historical scrapes are retained for de-duplication and auditing.
 - AI parsing outputs are cached in `parsed_descriptions` to avoid redundant LLM calls.
 - Runtime logs stream to `backend/logs/job_informer.log` (level configured via `LOG_LEVEL`).
+
+- ## Contributor Notes
+- `--parse-descriptions` now fetches missing descriptions before parsing; the deprecated `--get-descriptions` flag was removed from the UI. Keep frontend mode shortcuts aligned with backend CLI modes when adding new ones.
+- `--purge` now runs both rules-based cleanup and the AI purge; `--ai-purge` remains only as a backend alias. The frontend surfaces `--purge` as the single purge action, and the test button is intentionally absent there (use the terminal instead).
+- The summary view and parsed insights use only current jobs in the database; orphaned parsed payloads from purged jobs are still counted in backend stats for transparency but are excluded from coverage metrics.
+- Parsed insights also surface senior vs non-senior deltas (counts, coverage, avg experience, avg salary) so keep those fields populated when extending the parser or UI.
+- Frontend layout: Dashboard and Summary are reachable via the header toggle. Job filters are slimmed to company + sort + clear beneath the records count, and the table shows 5 rows per page without internal scrolling.
+- Parsed insights also surface senior vs non-senior deltas (counts, coverage, avg experience, avg salary) so keep those fields populated when extending the parser or UI.

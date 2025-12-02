@@ -50,10 +50,25 @@ def main():
     group.add_argument('--run-once', dest='run_once', action='store_true', help='Run job search once')
     group.add_argument('--test', action='store_true', help='Run combined tests')
     group.add_argument('--db-summary', dest='db_summary', action='store_true', help='Show database summary')
-    group.add_argument('--purge', action='store_true', help='Purge unwanted jobs')
-    group.add_argument('--ai-purge', dest='ai_purge', action='store_true', help='Run AI-powered job purging')
-    group.add_argument('--get-descriptions', dest='get_descriptions', action='store_true', help='Backfill missing job descriptions')
-    group.add_argument('--parse-descriptions', dest='parse_descriptions', action='store_true', help='Parse job descriptions with AI')
+    group.add_argument('--purge', action='store_true', help='Purge unwanted jobs (rules + AI)')
+    group.add_argument(
+        '--ai-purge',
+        dest='ai_purge',
+        action='store_true',
+        help='[Deprecated] Alias for --purge (runs rules + AI purge)'
+    )
+    group.add_argument(
+        '--parse-descriptions',
+        dest='parse_descriptions',
+        action='store_true',
+        help='Fetch missing job descriptions and parse them with AI'
+    )
+    group.add_argument(
+        '--get-descriptions',
+        dest='get_descriptions',
+        action='store_true',
+        help='[Deprecated] Alias for --parse-descriptions (fetch + parse descriptions)'
+    )
     group.add_argument('--reset-ai-purge', dest='reset_ai_purge', action='store_true', help='Reset AI purge analysis flags')
     group.add_argument(
         '--inform',
@@ -85,10 +100,22 @@ def main():
 
     args = parser.parse_args()
 
+    used_deprecated_ai_flag = getattr(args, 'ai_purge', False)
+    used_deprecated_flag = getattr(args, 'get_descriptions', False)
+    # Unify deprecated flag with the new combined workflow
+    if used_deprecated_ai_flag:
+        args.purge = True
+    if used_deprecated_flag:
+        args.parse_descriptions = True
+
     # Start with default logging so early errors are visible
     setup_logging()
+    if used_deprecated_ai_flag:
+        logger.warning("--ai-purge is deprecated; use --purge for the combined purge pipeline")
+    if used_deprecated_flag:
+        logger.warning("--get-descriptions is deprecated; use --parse-descriptions for the combined workflow")
     # Default to run-once if no mode flag is set
-    if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.get_descriptions, args.parse_descriptions, args.reset_ai_purge, args.inform]):
+    if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.parse_descriptions, args.reset_ai_purge, args.inform]):
         args.run_once = True
     # Determine selected mode string for config validation and logging
     if args.run_once:
@@ -100,11 +127,9 @@ def main():
     elif args.purge:
         mode_str = 'purge'
     elif args.ai_purge:
-        mode_str = 'ai-purge'
+        mode_str = 'purge'
     elif args.inform:
         mode_str = 'inform'
-    elif args.get_descriptions:
-        mode_str = 'get-descriptions'
     elif args.parse_descriptions:
         mode_str = 'parse-descriptions'
     elif args.reset_ai_purge:
@@ -136,15 +161,13 @@ def main():
         elif args.db_summary:
             show_database_summary(config)
         elif args.purge:
-            purge_unwanted_jobs(config)
+            run_purge_pipeline(config)
         elif args.ai_purge:
-            run_ai_purge_mode(config)
+            run_purge_pipeline(config)
         elif args.inform:
             run_inform_mode(config, args.inform)
-        elif args.get_descriptions:
-            get_descriptions(config)
         elif args.parse_descriptions:
-            run_description_parser(DescriptionTools(config))
+            run_description_pipeline(config)
         elif args.reset_ai_purge:
             reset_ai_purge_flags(config)
         else:
@@ -308,6 +331,12 @@ def purge_unwanted_jobs(config: Config):
         logger.error(f"Database purge error: {e}")
         sys.exit(1)
 
+def run_purge_pipeline(config: Config):
+    """Run rule-based purge, then AI purge."""
+    logger.info("=== Running purge pipeline (rules + AI) ===")
+    purge_unwanted_jobs(config)
+    run_ai_purge_mode(config)
+
 def run_ai_purge_mode(config: Config):
     """Run AI-powered job purging using LLM analysis"""
     logger.info("=== Starting AI-Powered Job Purging ===")
@@ -408,21 +437,20 @@ def reset_ai_purge_flags(config: Config, *, reset_all: bool = True):
         logger.error(f"Failed to reset AI purge flags: {e}")
         sys.exit(1)
 
-def get_descriptions(config: Config):
-    """Backfill missing job descriptions in the database"""
+def run_description_pipeline(config: Config):
+    """Fetch missing descriptions, then parse them with AI."""
     desc = DescriptionTools(config)
     scraper = JobScraper(config)
-    success = desc.backfill_missing_descriptions(scraper)
-    if success:
-        logger.success("=== Done ===")
-    else:
-        logger.error("=== Backfill Failed ===")
+
+    logger.info("=== Fetching missing job descriptions ===")
+    backfill_success = desc.backfill_missing_descriptions(scraper)
+    if not backfill_success:
+        logger.error("=== Description backfill failed ===")
         sys.exit(1)
 
-def run_description_parser(desc: DescriptionTools):
-    """Run incremental description parsing using LLM with caching"""
-    success = desc.run_description_parser()
-    if success:
+    logger.info("=== Parsing job descriptions with AI ===")
+    parse_success = desc.run_description_parser()
+    if parse_success:
         logger.success("=== Done ===")
     else:
         logger.error("=== Description Parsing Failed ===")

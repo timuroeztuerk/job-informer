@@ -6,11 +6,14 @@
           <p class="label">Summary</p>
           <h2>Database snapshot</h2>
           <p class="muted">
-            Review parsed description trends, coverage, and city distribution without touching the CLI.
+            Review parsed description trends, coverage, and city distribution for the current jobs in the database.
           </p>
         </div>
         <div class="intro-actions">
-          <span v-if="parsed" class="pill small tone">Parsed payloads: {{ parsed.total_records.toLocaleString() }}</span>
+          <span v-if="parsed" class="pill small tone">
+            Active payloads: {{ parsed.total_records.toLocaleString() }} / {{ summary?.totals.total_jobs.toLocaleString() }}
+            ({{ coverageDisplay }})
+          </span>
           <button class="ghost" type="button" @click="reload" :disabled="loading">Refresh</button>
         </div>
       </div>
@@ -41,11 +44,12 @@
         <div class="stat-card" v-if="summary.parsed_descriptions_stats">
           <p class="label">Parsed coverage</p>
           <p class="stat-value">
-            {{ (summary.parsed_descriptions_stats.jobs_with_descriptions || parsed?.total_records || 0).toLocaleString() }}
+            {{ parsed?.total_records.toLocaleString() || "0" }} / {{ summary.totals.total_jobs.toLocaleString() }}
           </p>
           <p class="muted tiny">
-            Parsed jobs: {{ parsed?.total_records.toLocaleString() || "0" }} | Orphans:
-            {{ (summary.parsed_descriptions_stats.orphaned_parsed_descriptions || 0).toLocaleString() }}
+            Coverage: {{ coverageDisplay }} · Orphaned payloads:
+            {{ orphanedJobs.toLocaleString() }} · Historical:
+            {{ historicalPayloads.toLocaleString() }}
           </p>
         </div>
       </div>
@@ -177,6 +181,23 @@
         </p>
         <p class="muted tiny" v-else>Waiting for parsed salary ranges.</p>
       </div>
+      <div class="stat-card tight">
+        <p class="label">Seniority mix</p>
+        <p class="stat-value small">
+          <span class="block">
+            Senior: {{ seniorSlice?.count?.toLocaleString() || "0" }} ({{ safePct(seniorSlice?.percentage) }})
+          </span>
+          <span class="block">
+            Other: {{ nonSeniorSlice?.count?.toLocaleString() || "0" }} ({{ safePct(nonSeniorSlice?.percentage) }})
+          </span>
+        </p>
+        <p class="muted tiny">
+          Experience: {{ safeYears(seniorSlice?.avg_experience) }} vs {{ safeYears(nonSeniorSlice?.avg_experience) }}
+        </p>
+        <p class="muted tiny">
+          Salary: {{ safeSalary(seniorSlice?.avg_salary) }} vs {{ safeSalary(nonSeniorSlice?.avg_salary) }}
+        </p>
+      </div>
     </section>
 
     <section v-if="citySummary" class="panel city-panel">
@@ -217,6 +238,35 @@ const error = ref<string | null>(null);
 
 const parsed = computed(() => summary.value?.parsed_insights || null);
 const citySummary = computed(() => summary.value?.city_summary || null);
+const orphanedJobs = computed(
+  () =>
+    summary.value?.parsed_descriptions_stats?.orphaned_parsed_descriptions ??
+    parsed.value?.orphaned_jobs ??
+    0
+);
+const historicalPayloads = computed(
+  () =>
+    parsed.value?.historical_payloads ??
+    summary.value?.parsed_descriptions_stats?.total_parsed_descriptions ??
+    0
+);
+const coveragePct = computed(() => {
+  const totalJobs = summary.value?.totals.total_jobs || 0;
+  if (!totalJobs) return null;
+  return ((parsed.value?.total_records || 0) / totalJobs) * 100;
+});
+const coverageDisplay = computed(() => {
+  if (coveragePct.value === null) return "n/a";
+  return `${coveragePct.value.toFixed(1)}%`;
+});
+
+const seniorityMix = computed(() => parsed.value?.seniority_mix);
+const seniorSlice = computed(() => seniorityMix.value?.senior);
+const nonSeniorSlice = computed(() => seniorityMix.value?.non_senior);
+const safePct = (value?: number) => (value === undefined || value === null ? "0.0%" : `${value.toFixed(1)}%`);
+const safeYears = (value?: number | null) => (value === null || value === undefined ? "n/a" : `${value.toFixed(1)} yrs`);
+const safeSalary = (value?: number | null) =>
+  value === null || value === undefined ? "n/a" : `€${Math.round(value).toLocaleString()}`;
 
 const shortDate = (value?: string | null) => {
   if (!value) return "n/a";
@@ -293,6 +343,9 @@ defineExpose({ reload });
 
 .stat-value.small {
   font-size: 16px;
+}
+.block {
+  display: block;
 }
 
 .insight-panel {

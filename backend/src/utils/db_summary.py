@@ -152,11 +152,20 @@ def _safe_avg(values: list[float]) -> float | None:
         return None
     return sum(values) / len(values)
 
+SENIOR_LABELS = {"senior", "lead", "principal"}
 
-def compute_parsed_insights(db: JobDatabase) -> dict:
-    """Summarize parsed description payloads (latest version per job)."""
+
+def compute_parsed_insights(db: JobDatabase, *, total_jobs: int | None = None, parsed_stats: dict | None = None) -> dict:
+    """Summarize parsed description payloads (latest version per current job)."""
     insights: dict = {
         "total_records": 0,
+        "coverage_pct": None,
+        "orphaned_jobs": 0,
+        "historical_payloads": None,
+        "seniority_mix": {
+            "senior": {"count": 0, "percentage": 0.0, "avg_experience": None, "avg_salary": None},
+            "non_senior": {"count": 0, "percentage": 0.0, "avg_experience": None, "avg_salary": None},
+        },
         "programming_languages": [],
         "skills": [],
         "tools": [],
@@ -181,6 +190,7 @@ def compute_parsed_insights(db: JobDatabase) -> dict:
                     FROM parsed_descriptions
                     GROUP BY job_id
                 ) latest ON p.job_id = latest.job_id AND p.version = latest.max_version
+                INNER JOIN jobs j ON j.job_id = p.job_id
                 """,
                 conn,
             )
@@ -202,6 +212,10 @@ def compute_parsed_insights(db: JobDatabase) -> dict:
     degree_types: Counter[str] = Counter()
     experience_years: list[int] = []
     salary_ranges: list[float] = []
+    seniority_groups = {
+        "senior": {"count": 0, "experience": [], "salary": []},
+        "non_senior": {"count": 0, "experience": [], "salary": []},
+    }
 
     for _, row in parsed_df.iterrows():
         try:
@@ -224,6 +238,9 @@ def compute_parsed_insights(db: JobDatabase) -> dict:
         seniority = data.get("seniority")
         if seniority and seniority != "unspecified":
             seniority_levels[str(seniority)] += 1
+        # Bucket for senior vs other roles (including unspecified as non_senior to keep ratios simple)
+        group = "senior" if str(seniority).lower() in SENIOR_LABELS else "non_senior"
+        seniority_groups[group]["count"] += 1
 
         employment_type = data.get("employment_type")
         if employment_type and employment_type != "unspecified":
@@ -251,22 +268,35 @@ def compute_parsed_insights(db: JobDatabase) -> dict:
                 years_val = int(years_min)
                 if 0 <= years_val <= 20:
                     experience_years.append(years_val)
+                    seniority_groups[group]["experience"].append(years_val)
             except (ValueError, TypeError):
                 pass
 
         salary_range = data.get("salary_eur_range") or {}
         salary_min = salary_range.get("min")
         salary_max = salary_range.get("max")
+        salary_avg = None
         if salary_min is not None and salary_max is not None:
             try:
-                avg_salary = (float(salary_min) + float(salary_max)) / 2
-                if 20000 <= avg_salary <= 200000:
-                    salary_ranges.append(avg_salary)
+                salary_avg = (float(salary_min) + float(salary_max)) / 2
+                if 20000 <= salary_avg <= 200000:
+                    salary_ranges.append(salary_avg)
             except (ValueError, TypeError):
                 pass
+        if salary_avg is not None:
+            seniority_groups[group]["salary"].append(salary_avg)
 
     total_records = len(parsed_df)
     insights["total_records"] = total_records
+    if total_jobs:
+        insights["coverage_pct"] = (total_records / total_jobs) * 100 if total_jobs else 0.0
+
+    if parsed_stats:
+        insights["orphaned_jobs"] = int(parsed_stats.get("orphaned_parsed_descriptions", 0) or 0)
+        insights["historical_payloads"] = int(parsed_stats.get("total_parsed_descriptions", total_records) or total_records)
+    else:
+        insights["orphaned_jobs"] = 0
+        insights["historical_payloads"] = total_records
     insights["programming_languages"] = _sorted_counter(programming_languages, total_records, limit=8)
     insights["skills"] = _sorted_counter(skills, total_records, limit=8)
     insights["tools"] = _sorted_counter(tools, total_records, limit=10)
@@ -300,6 +330,25 @@ def compute_parsed_insights(db: JobDatabase) -> dict:
             "max": max(salary_ranges),
         }
 
+    # Senior vs non-senior comparison
+    if total_records:
+        for group_name, payload in seniority_groups.items():
+            pct = (payload["count"] / total_records) * 100 if total_records else 0.0
+            insights["seniority_mix"][group_name] = {
+                "count": payload["count"],
+                "percentage": pct,
+                "avg_experience": _safe_avg(payload["experience"]),
+                "avg_salary": _safe_avg(payload["salary"]),
+            }
+    else:
+        for group_name in seniority_groups:
+            insights["seniority_mix"][group_name] = {
+                "count": 0,
+                "percentage": 0.0,
+                "avg_experience": None,
+                "avg_salary": None,
+            }
+
     return insights
 
 
@@ -331,6 +380,7 @@ def compute_city_summary(db: JobDatabase) -> dict:
 def build_db_summary(db: JobDatabase) -> dict:
     """Assemble a structured DB summary for API/CLI consumers."""
     base = db.get_job_summary()
+    parsed_stats = base.get("parsed_descriptions_stats") or {}
 
     return {
         "totals": {
@@ -341,6 +391,10 @@ def build_db_summary(db: JobDatabase) -> dict:
         "jobs_by_source": base.get("jobs_by_source", {}),
         "top_companies": base.get("top_companies", {}),
         "parsed_descriptions_stats": base.get("parsed_descriptions_stats", {}),
-        "parsed_insights": compute_parsed_insights(db),
+        "parsed_insights": compute_parsed_insights(
+            db,
+            total_jobs=base.get("total_jobs"),
+            parsed_stats=parsed_stats,
+        ),
         "city_summary": compute_city_summary(db),
     }

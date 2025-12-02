@@ -170,7 +170,7 @@ class Config:
             'run-once', 'test', 'summary', 'inform'
         }
         # Modes that require LLM access
-        ai_required_modes = {'test', 'parse-descriptions', 'ai-purge'}
+        ai_required_modes = {'test', 'parse-descriptions', 'purge'}
 
         if mode in email_required_modes:
             if not self.email_address:

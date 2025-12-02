@@ -5,27 +5,15 @@
         <p class="label">Jobs</p>
         <h3>{{ total ? total.toLocaleString() : "No" }} records</h3>
       </div>
-      <div class="controls">
-        <input v-model="search" class="input" placeholder="Search title or company" @keyup.enter="load(true)" />
-        <select v-model="source" class="input" @change="load(true)">
-          <option value="">Any source</option>
-          <option v-for="s in sourceOptions" :key="s" :value="s">{{ s }}</option>
-        </select>
-        <select v-model="company" class="input" @change="load(true)">
-          <option value="">Any company</option>
-          <option v-for="c in companyOptions" :key="c" :value="c">{{ c }}</option>
-        </select>
-      </div>
     </div>
 
     <div class="filters inline">
       <label class="tiny">
-        <span>Date from</span>
-        <input v-model="dateFrom" type="date" class="input" @change="load(true)" />
-      </label>
-      <label class="tiny">
-        <span>Date to</span>
-        <input v-model="dateTo" type="date" class="input" @change="load(true)" />
+        <span>Company</span>
+        <select v-model="company" class="input" @change="load(true)">
+          <option value="">Any company</option>
+          <option v-for="c in companyOptions" :key="c" :value="c">{{ c }}</option>
+        </select>
       </label>
       <label class="tiny">
         <span>Sort</span>
@@ -36,7 +24,6 @@
           <option value="title_desc">Title Z-A</option>
         </select>
       </label>
-      <button class="ghost sm" type="button" @click="load(true)" :disabled="loading">Refresh</button>
       <button class="ghost sm" type="button" @click="clearFilters" :disabled="loading">Clear</button>
     </div>
 
@@ -96,7 +83,6 @@ const props = defineProps<{
   companies: string[];
 }>();
 
-const sourceOptions = computed(() => props.sources || []);
 const companyOptions = computed(() => props.companies || []);
 
 const jobs = ref<Job[]>([]);
@@ -105,11 +91,7 @@ const offset = ref(0);
 const limit = 5;
 const loading = ref(false);
 const error = ref<string | null>(null);
-const search = ref("");
-const source = ref("");
 const company = ref("");
-const dateFrom = ref("");
-const dateTo = ref("");
 const sort = ref<"scraped_at_desc" | "scraped_at_asc" | "title_asc" | "title_desc">("scraped_at_desc");
 const selectedId = ref<string | null>(null);
 
@@ -126,11 +108,7 @@ const load = async (reset = false) => {
     const data = await fetchJobs({
       limit,
       offset: offset.value,
-      search: search.value,
-      source: source.value,
       company: company.value,
-      dateFrom: dateFrom.value,
-      dateTo: dateTo.value,
       sort: sort.value,
     });
     jobs.value = data.items;
@@ -167,11 +145,7 @@ const formatDate = (value?: string) => {
 };
 
 const clearFilters = () => {
-  search.value = "";
-  source.value = "";
   company.value = "";
-  dateFrom.value = "";
-  dateTo.value = "";
   sort.value = "scraped_at_desc";
   load(true);
 };
@@ -204,13 +178,6 @@ defineExpose({
   display: inline-block;
 }
 
-.controls {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
 .input {
   padding: 8px 10px;
   border-radius: 10px;
@@ -226,7 +193,7 @@ defineExpose({
   margin-bottom: 6px;
   flex-wrap: nowrap;
   overflow-x: auto;
-  padding-bottom: 4px;
+  padding: 4px 2px;
   scrollbar-width: none;
   white-space: nowrap;
 }
@@ -260,8 +227,6 @@ defineExpose({
   border-radius: 14px;
   overflow: hidden;
   background: var(--card);
-  max-height: 420px;
-  overflow-y: auto;
 }
 
 .list {

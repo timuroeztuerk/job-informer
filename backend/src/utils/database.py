@@ -232,8 +232,24 @@ class JobDatabase:
                     # Total parsed descriptions
                     cursor.execute("SELECT COUNT(*) FROM parsed_descriptions")
                     total_parsed = cursor.fetchone()[0]
-                    
-                    # Unique jobs with parsed descriptions
+
+                    # Parsed descriptions tied to current jobs (all versions)
+                    cursor.execute("""
+                        SELECT COUNT(*) 
+                        FROM parsed_descriptions pd
+                        INNER JOIN jobs j ON pd.job_id = j.job_id
+                    """)
+                    active_parsed = cursor.fetchone()[0]
+
+                    # Unique jobs with parsed descriptions (current jobs only)
+                    cursor.execute("""
+                        SELECT COUNT(DISTINCT pd.job_id)
+                        FROM parsed_descriptions pd
+                        INNER JOIN jobs j ON pd.job_id = j.job_id
+                    """)
+                    active_jobs_parsed = cursor.fetchone()[0]
+
+                    # Unique jobs with parsed descriptions (all, including deleted)
                     cursor.execute("SELECT COUNT(DISTINCT job_id) FROM parsed_descriptions")
                     unique_jobs_parsed = cursor.fetchone()[0]
                     
@@ -248,9 +264,10 @@ class JobDatabase:
                     
                     parsed_descriptions_stats = {
                         'total_parsed_descriptions': total_parsed,
+                        'active_parsed_descriptions': active_parsed,
                         'unique_jobs_with_parsed_descriptions': unique_jobs_parsed,
                         'orphaned_parsed_descriptions': orphaned_parsed,
-                        'jobs_with_descriptions': unique_jobs_parsed - orphaned_parsed
+                        'jobs_with_descriptions': active_jobs_parsed
                     }
             except Exception as e:
                 logger.warning(f"Could not get parsed descriptions stats: {e}")

@@ -54,15 +54,29 @@ def require_token(x_api_token: str | None = Header(default=None)):
 CLI_MODES: dict[str, list[str]] = {
     "run-once": ["--run-once"],
     "purge": ["--purge"],
-    "ai-purge": ["--ai-purge"],
+    # Legacy alias routes to combined purge pipeline
+    "ai-purge": ["--purge"],
     "reset-ai-purge": ["--reset-ai-purge"],
     "parse-descriptions": ["--parse-descriptions"],
-    "get-descriptions": ["--get-descriptions"],
+    # Legacy alias routes to combined fetch + parse workflow
+    "get-descriptions": ["--parse-descriptions"],
     "db-summary": ["--db-summary"],
     "test": ["--test"],
 }
 
 DEFAULT_MODE = "run-once"
+CANONICAL_MODES = {
+    "ai-purge": "purge",
+    "get-descriptions": "parse-descriptions",
+}
+
+
+def _canonical_mode(mode: str) -> str:
+    return CANONICAL_MODES.get(mode, mode)
+CANONICAL_MODES = {
+    "ai-purge": "purge",
+    "get-descriptions": "parse-descriptions",
+}
 
 
 class RunRequest(BaseModel):
@@ -269,11 +283,12 @@ def start_run(payload: RunRequest, _: bool = Depends(require_token)) -> RunStatu
     log_path = ROOT / "logs" / f"api_run_{run_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    mode = payload.mode or DEFAULT_MODE
-    if mode not in CLI_MODES:
-        raise HTTPException(status_code=400, detail=f"Unsupported mode: {mode}")
+    requested_mode = payload.mode or DEFAULT_MODE
+    if requested_mode not in CLI_MODES:
+        raise HTTPException(status_code=400, detail=f"Unsupported mode: {requested_mode}")
 
-    cmd = [sys.executable, str(ROOT / "main.py"), *CLI_MODES[mode]]
+    mode = _canonical_mode(requested_mode)
+    cmd = [sys.executable, str(ROOT / "main.py"), *CLI_MODES[requested_mode]]
     if payload.keywords:
         cmd += ["--keywords", payload.keywords]
     if payload.locations:
@@ -314,7 +329,7 @@ def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
     started = datetime.fromisoformat(stored["started_at"]) if stored.get("started_at") else datetime.utcnow()
     return RunStatus(
         run_id=stored["run_id"],
-        mode=stored.get("mode") or DEFAULT_MODE,
+        mode=_canonical_mode(stored.get("mode") or DEFAULT_MODE),
         status=stored["status"],
         return_code=stored["return_code"],
         log_tail=_read_log_tail(Path(stored["log_path"])),
@@ -338,7 +353,7 @@ def list_runs(limit: int = Query(20, ge=1, le=100), _: bool = Depends(require_to
         summaries.append(
             RunSummary(
                 run_id=record["run_id"],
-                mode=record.get("mode") or DEFAULT_MODE,
+                mode=_canonical_mode(record.get("mode") or DEFAULT_MODE),
                 status=record["status"],
                 return_code=record["return_code"],
                 started_at=datetime.fromisoformat(record["started_at"]),

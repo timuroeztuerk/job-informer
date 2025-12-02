@@ -57,6 +57,7 @@ class AIPurger:
         - I'm looking for data science, machine learning, AI jobs, NOT purely software engineering jobs. No full stack, backend, frontend, DevOps, or other purely software engineering roles unless they are explicitly focused on data science or AI.
         - Obviously spam, duplicate, or very low-quality postings.
         - AI consultant jobs can stay, if they are not duplicate.
+        - No study related positions such as doctorates, master, pre-master, HiWi, internships, student jobs, etc.
         
         Each job listing will be labeled with a short numeric ID (e.g., "1", "2").
         Return only these numeric IDs for the jobs that should be purged as a JSON array.
@@ -320,7 +321,7 @@ class AIPurger:
         Returns summary of the operation
         """
         summary = {
-            "mode": "ai-purge-test" if self.test_mode else "ai-purge",
+            "mode": "purge-test" if self.test_mode else "purge",
             "timestamp": datetime.now().isoformat(),
             "jobs_analyzed": 0,
             "batches_processed": 0,

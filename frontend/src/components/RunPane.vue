@@ -3,7 +3,6 @@
     <div class="header">
       <div>
         <p class="label">Run scraper</p>
-        <h2>Kick off a fresh scrape</h2>
       </div>
       <div class="header-actions">
         <button class="ghost" type="button" @click="refreshStatus" :disabled="!currentRunId">
@@ -15,10 +14,10 @@
     <div class="quick-actions">
       <div class="qa-head">
         <div>
-          <p class="label">CLI shortcuts</p>
-          <p class="hint">Launch any backend mode without opening a terminal.</p>
+          <p class="label">Shortcuts</p>
+          <p class="hint">Launch any command from the backend.</p>
         </div>
-        <span class="hint subtle">Buttons call python main.py with the selected flag.</span>
+        <span class="hint subtle"></span>
       </div>
       <div class="qa-grid">
         <button
@@ -80,45 +79,27 @@ const error = ref<string | null>(null);
 const quickActions: QuickAction[] = [
   {
     mode: "run-once",
-    title: "Run scrape",
+    title: "",
     description: "Kick off the default job search using the keywords/locations below.",
-    subhead: "main.py --run-once",
+    subhead: "",
   },
   {
     mode: "purge",
-    title: "Purge",
-    description: "Apply hard filters to trim out irrelevant or duplicate jobs.",
-    subhead: "main.py --purge",
-  },
-  {
-    mode: "ai-purge",
-    title: "AI purge",
-    description: "Use the LLM filter to flag noisy postings for removal.",
-    subhead: "main.py --ai-purge",
+    title: "",
+    description: "Apply rule-based filters, then run the AI purge for noisy postings.",
+    subhead: "",
   },
   {
     mode: "parse-descriptions",
-    title: "Parse descriptions",
-    description: "Re-run the AI description parser to enrich stored jobs.",
-    subhead: "main.py --parse-descriptions",
-  },
-  {
-    mode: "get-descriptions",
-    title: "Backfill descriptions",
-    description: "Fetch missing job descriptions before parsing them.",
-    subhead: "main.py --get-descriptions",
+    title: "",
+    description: "Fetch any missing descriptions and parse them with the LLM.",
+    subhead: "",
   },
   {
     mode: "reset-ai-purge",
-    title: "Reset AI purge",
+    title: "",
     description: "Clear AI purge flags so you can re-run the smart filter.",
-    subhead: "main.py --reset-ai-purge",
-  },
-  {
-    mode: "test",
-    title: "Run tests",
-    description: "Check config, email, scraper init, and AI connectivity.",
-    subhead: "main.py --test",
+    subhead: "",
   },
 ];
 
@@ -172,18 +153,10 @@ const modeLabel = (mode: CliMode) => {
   switch (mode) {
     case "run-once":
       return "Run";
-    case "ai-purge":
-      return "AI purge";
     case "reset-ai-purge":
-      return "Reset AI purge";
+      return "Reset AI Purge";
     case "parse-descriptions":
-      return "Parse descriptions";
-    case "get-descriptions":
-      return "Get descriptions";
-    case "db-summary":
-      return "DB summary";
-    case "test":
-      return "Test";
+      return "Descriptions";
     case "purge":
       return "Purge";
     default:
@@ -401,11 +374,6 @@ select {
   color: #be123c;
 }
 
-.pill.mode-ai-purge {
-  background: #e0f2fe;
-  color: #0284c7;
-}
-
 .pill.mode-reset-ai-purge {
   background: #f1f5f9;
   color: #0f172a;
@@ -414,11 +382,6 @@ select {
 .pill.mode-parse-descriptions {
   background: #ecfeff;
   color: #0ea5e9;
-}
-
-.pill.mode-get-descriptions {
-  background: #e0f7f0;
-  color: #0f766e;
 }
 
 .pill.mode-db-summary {
