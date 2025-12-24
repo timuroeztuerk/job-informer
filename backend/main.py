@@ -71,6 +71,12 @@ def main():
     )
     group.add_argument('--reset-ai-purge', dest='reset_ai_purge', action='store_true', help='Reset AI purge analysis flags')
     group.add_argument(
+        '--refetch-titles',
+        dest='refetch_titles',
+        action='store_true',
+        help='Refetch job titles/companies from stored URLs when they look masked'
+    )
+    group.add_argument(
         '--inform',
         dest='inform',
         nargs='?',
@@ -115,7 +121,7 @@ def main():
     if used_deprecated_flag:
         logger.warning("--get-descriptions is deprecated; use --parse-descriptions for the combined workflow")
     # Default to run-once if no mode flag is set
-    if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.parse_descriptions, args.reset_ai_purge, args.inform]):
+    if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.parse_descriptions, args.reset_ai_purge, args.inform, args.refetch_titles]):
         args.run_once = True
     # Determine selected mode string for config validation and logging
     if args.run_once:
@@ -130,6 +136,8 @@ def main():
         mode_str = 'purge'
     elif args.inform:
         mode_str = 'inform'
+    elif args.refetch_titles:
+        mode_str = 'refetch-titles'
     elif args.parse_descriptions:
         mode_str = 'parse-descriptions'
     elif args.reset_ai_purge:
@@ -166,6 +174,8 @@ def main():
             run_purge_pipeline(config)
         elif args.inform:
             run_inform_mode(config, args.inform)
+        elif args.refetch_titles:
+            run_title_backfill(config)
         elif args.parse_descriptions:
             run_description_pipeline(config)
         elif args.reset_ai_purge:
@@ -455,6 +465,18 @@ def run_description_pipeline(config: Config):
     else:
         logger.error("=== Description Parsing Failed ===")
         sys.exit(1)
+
+def run_title_backfill(config: Config, limit: int = 200):
+    """Refetch masked job titles/companies from stored URLs."""
+    scraper = JobScraper(config)
+    result = scraper.backfill_masked_titles(limit=limit)
+    updated = result.get("updated", 0)
+    failed = result.get("failed", 0)
+    logger.info("Titles refetched: updated=%d, failed=%d", updated, failed)
+    if updated:
+        logger.success("=== Title backfill completed ===")
+    else:
+        logger.warning("=== No titles updated ===")
 
 if __name__ == "__main__":
     main()

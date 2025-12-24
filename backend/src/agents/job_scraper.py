@@ -84,6 +84,22 @@ class JobScraper:
         self.max_total_jobs = max(0, int(getattr(self.config, 'max_total_jobs', 0)))
         self.min_new_jobs_to_continue = max(0, int(getattr(self.config, 'min_new_jobs_to_continue', 1)))
 
+    def _clean_text_field(self, text: str) -> str:
+        """Normalize whitespace and strip text fields."""
+        if text is None:
+            return ""
+        return " ".join(str(text).split())
+
+    def _looks_masked_value(self, text: str) -> bool:
+        """Detect obviously masked values such as '***********'."""
+        if text is None:
+            return True
+        value = str(text).strip()
+        if not value:
+            return True
+        star_count = value.count('*')
+        return star_count >= 4 and (star_count / max(len(value), 1)) >= 0.4
+
     def _normalize_text(self, text: str) -> str:
         """Normalize text for consistent matching (handles unicode, case, whitespace)."""
         return normalize_text(text)
@@ -209,6 +225,81 @@ class JobScraper:
         except Exception as e:
             logger.debug(f"LinkedIn description parse error: {e}")
         return ''
+
+    def _extract_linkedin_job_meta(self, job_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Fetch a LinkedIn job page and return cleaned (title, company, location)."""
+        resp = self._http_get_with_retries(job_url, timeout=25)
+        if not resp:
+            return None, None, None
+        try:
+            page = BeautifulSoup(resp.content, 'lxml')
+
+            title_el = (
+                page.select_one('h1.top-card-layout__title')
+                or page.select_one('h1.topcard__title')
+                or page.select_one('h1.sub-nav-cta__header')
+            )
+            company_el = (
+                page.select_one('a.topcard__org-name-link')
+                or page.select_one('span.topcard__flavor a')
+                or page.select_one('span.top-card-layout__entity-info a')
+                or page.select_one('span.topcard__flavor')
+            )
+            location_el = (
+                page.select_one('span.topcard__flavor--bullet')
+                or page.select_one('span.top-card-layout__first-subline span')
+                or page.select_one('span.topcard__flavor')
+            )
+
+            title = self._clean_text_field(title_el.get_text()) if isinstance(title_el, Tag) else ''
+            company = self._clean_text_field(company_el.get_text()) if isinstance(company_el, Tag) else ''
+            location = self._clean_text_field(location_el.get_text()) if isinstance(location_el, Tag) else ''
+
+            # Fallback: parse og:title ("Job Title - Company Name | LinkedIn")
+            if not title or not company:
+                og = page.find('meta', property='og:title')
+                og_content = og.get('content') if og else ''
+                if og_content:
+                    parts = og_content.split(' - ', 1)
+                    if len(parts) == 2:
+                        title = title or self._clean_text_field(parts[0])
+                        company_part = parts[1].split('|', 1)[0]
+                        company = company or self._clean_text_field(company_part)
+
+            # Fallback: JSON-LD block
+            if not title or not company:
+                ld = page.find('script', type='application/ld+json')
+                ld_str = getattr(ld, 'string', None) if ld else None
+                if ld_str:
+                    import json
+                    try:
+                        data = json.loads(ld_str)
+                        if isinstance(data, dict):
+                            title = title or self._clean_text_field(data.get('title', ''))
+                            hiring_org = data.get('hiringOrganization', {}) or {}
+                            if isinstance(hiring_org, dict):
+                                company = company or self._clean_text_field(hiring_org.get('name', ''))
+                            location = location or self._clean_text_field(data.get('jobLocation', {}).get('address', {}).get('addressLocality', ''))
+                    except Exception:
+                        pass
+
+            if self._looks_masked_value(title):
+                title = None
+            if self._looks_masked_value(company):
+                company = None
+            if self._looks_masked_value(location):
+                location = None
+
+            return title, company, location
+        except Exception as e:
+            logger.debug(f"LinkedIn title/company parse error: {e}")
+            return None, None, None
+
+    def _fetch_job_metadata_from_url(self, url: str, source: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Dispatch to source-specific metadata extraction."""
+        if (source or '').strip().lower() == 'linkedin':
+            return self._extract_linkedin_job_meta(url)
+        return None, None, None
 
     def scrape_linkedin(self, keywords: str, location: str) -> List[Dict]:
         """Scrape job postings from LinkedIn public listings with pagination and optional descriptions.
@@ -420,6 +511,64 @@ class JobScraper:
         filepath = str(data_dir / filename)
         df.to_csv(filepath, index=False)
         return filepath
+
+    def backfill_masked_titles(self, limit: int = 100) -> dict:
+        """Refetch job titles/companies/locations for records that look masked (e.g., ********)."""
+        masked = self.db.get_jobs_with_masked_titles(limit=limit)
+        if masked.empty:
+            logger.info("No jobs with masked titles/companies/locations found to backfill")
+            return {"checked": 0, "updated": 0, "failed": 0}
+
+        updates: List[Dict[str, str]] = []
+        failures: List[str] = []
+        total = len(masked)
+        self._update_progress(0, total, prefix="Refetch titles: ")
+
+        for idx, row in masked.iterrows():
+            job_id = str(row.get('job_id'))
+            url = str(row.get('url') or '').strip()
+            source = str(row.get('source') or '').strip()
+
+            if not url:
+                failures.append(job_id)
+                self._update_progress(idx + 1, total, prefix="Refetch titles: ")
+                continue
+
+            title, company, location = self._fetch_job_metadata_from_url(url, source)
+
+            # Preserve existing non-masked values if new ones not found
+            existing_company = self._clean_text_field(row.get('company', ''))
+            existing_location = self._clean_text_field(row.get('location', ''))
+            if not company and existing_company and not self._looks_masked_value(existing_company):
+                company = existing_company
+            if not location and existing_location and not self._looks_masked_value(existing_location):
+                location = existing_location
+
+            if title and not self._looks_masked_value(title):
+                normalized_key = normalize_job_url(url, source) or (
+                    f"{source.lower()}|{title.lower()}|{(company or '').lower()}"
+                )
+                updates.append({
+                    'job_id': job_id,
+                    'title': title,
+                    'company': company or '',
+                    'location': location or '',
+                    'normalized_key': normalized_key,
+                })
+            else:
+                failures.append(job_id)
+
+            time.sleep(max(0.5, self.config.request_delay))
+            self._update_progress(idx + 1, total, prefix="Refetch titles: ")
+
+        updated = self.db.update_titles_and_companies(updates) if updates else 0
+        logger.info(
+            "Title/company backfill complete: checked %d, updated %d, failed %d",
+            total, updated, len(failures)
+        )
+        if failures and len(failures) <= 5:
+            logger.debug("Backfill failures for job_ids: %s", failures)
+        return {"checked": total, "updated": updated, "failed": len(failures)}
 
     def execute_job_search(self) -> bool:
         """Execute job search and persist results"""

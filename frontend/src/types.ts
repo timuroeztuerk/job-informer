@@ -24,7 +24,8 @@ export type CliMode =
   | "reset-ai-purge"
   | "parse-descriptions"
   | "db-summary"
-  | "test";
+  | "test"
+  | "refetch-titles";
 
 export interface ParsedPayload {
   seniority?: string;

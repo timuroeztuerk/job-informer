@@ -354,6 +354,25 @@ class JobDatabase:
                 )
         return df
 
+    def get_jobs_with_masked_titles(self, limit: int = 200) -> pd.DataFrame:
+        """Return jobs whose title/company/location looks masked (e.g., asterisks or empty)."""
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query(
+                """
+                SELECT job_id, url, source, title, company, location, scraped_at, created_at
+                FROM jobs
+                WHERE (
+                    title LIKE '%*%' OR company LIKE '%*%' OR location LIKE '%*%' OR
+                    TRIM(title) = '' OR TRIM(company) = '' OR TRIM(location) = ''
+                )
+                ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
+                LIMIT ?
+                """,
+                conn,
+                params=[limit],
+            )
+        return df
+
     def reset_failed_descriptions(self) -> int:
         """Reset jobs marked as FETCH_FAILED back to empty string to allow retrying."""
         with sqlite3.connect(self.db_path) as conn:
@@ -407,6 +426,30 @@ class JobDatabase:
                 return cur.rowcount or 0
             except Exception as e:
                 logger.error(f"Failed updating descriptions: {e}")
+                return 0
+
+    def update_titles_and_companies(self, updates: List[Dict[str, str]]) -> int:
+        """Batch update job titles/companies/locations. Each item requires job_id, title, company, location, normalized_key."""
+        if not updates:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            try:
+                cur.executemany(
+                    """
+                    UPDATE jobs
+                    SET title = ?, company = ?, location = ?, normalized_key = ?
+                    WHERE job_id = ?
+                    """,
+                    [
+                        (u['title'], u['company'], u.get('location', ''), u.get('normalized_key', ''), u['job_id'])
+                        for u in updates
+                    ],
+                )
+                conn.commit()
+                return cur.rowcount or 0
+            except Exception as e:
+                logger.error(f"Failed updating titles/companies: {e}")
                 return 0
 
     def _ensure_job_ids(self, df: pd.DataFrame) -> pd.DataFrame:

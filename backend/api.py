@@ -62,6 +62,7 @@ CLI_MODES: dict[str, list[str]] = {
     "get-descriptions": ["--parse-descriptions"],
     "db-summary": ["--db-summary"],
     "test": ["--test"],
+    "refetch-titles": ["--refetch-titles"],
 }
 
 DEFAULT_MODE = "run-once"
@@ -89,6 +90,7 @@ class RunRequest(BaseModel):
         "get-descriptions",
         "db-summary",
         "test",
+        "refetch-titles",
     ] = DEFAULT_MODE
     keywords: Optional[str] = None
     locations: Optional[str] = None
