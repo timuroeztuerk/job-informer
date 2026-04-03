@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import JobDetail from "./components/JobDetail";
 import JobTable, { JobTableHandle } from "./components/JobTable";
+import RecentRuns from "./components/RecentRuns";
 import RunPane from "./components/RunPane";
 import SummaryPage from "./components/SummaryPage";
-import { fetchStats } from "./api";
+import { API_BASE, fetchStats } from "./api";
 import type { Job, JobStats } from "./types";
+import { readTextParam, replaceSearchParams } from "./urlState";
 
 type ViewMode = "dashboard" | "summary";
 
@@ -12,10 +14,13 @@ const App: React.FC = () => {
   const [stats, setStats] = useState<JobStats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("dashboard");
+  const [viewMode, setViewMode] = useState<ViewMode>(() => (readTextParam("view") === "dashboard" ? "dashboard" : "summary"));
   const [now, setNow] = useState(new Date());
   const tableRef = useRef<JobTableHandle | null>(null);
-  const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+
+  useEffect(() => {
+    replaceSearchParams({ view: viewMode });
+  }, [viewMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -25,6 +30,7 @@ const App: React.FC = () => {
         const data = await fetchStats();
         if (!cancelled) {
           setStats(data);
+          setStatsError(null);
         }
       } catch (err) {
         if (!cancelled) {
@@ -34,11 +40,13 @@ const App: React.FC = () => {
     };
 
     loadStats();
-    const timer = window.setInterval(() => setNow(new Date()), 30000);
+    const nowTimer = window.setInterval(() => setNow(new Date()), 30000);
+    const statsTimer = window.setInterval(loadStats, 30000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      window.clearInterval(nowTimer);
+      window.clearInterval(statsTimer);
     };
   }, []);
 
@@ -50,6 +58,10 @@ const App: React.FC = () => {
   const handleDeleted = () => {
     setSelectedJob(null);
     tableRef.current?.reload?.(true);
+  };
+
+  const handleAnnotationSaved = () => {
+    tableRef.current?.reload?.(false);
   };
 
   return (
@@ -65,12 +77,13 @@ const App: React.FC = () => {
         <div className="hero-actions">
           <div className="badge">
             <span className="dot" />
-            API {apiBase}
+            API {API_BASE}
           </div>
           <div className="view-toggle">
             <button
               type="button"
               className={viewMode === "dashboard" ? "active" : ""}
+              aria-pressed={viewMode === "dashboard"}
               onClick={() => setViewMode("dashboard")}
             >
               Dashboard
@@ -78,9 +91,10 @@ const App: React.FC = () => {
             <button
               type="button"
               className={viewMode === "summary" ? "active" : ""}
+              aria-pressed={viewMode === "summary"}
               onClick={() => setViewMode("summary")}
             >
-              Summary
+              Intelligence
             </button>
           </div>
         </div>
@@ -104,12 +118,13 @@ const App: React.FC = () => {
                 sources={stats?.sources_list || []}
                 companies={stats?.companies_list || []}
               />
-              <JobDetail job={selectedJob} onDeleted={handleDeleted} />
+              <JobDetail job={selectedJob} onDeleted={handleDeleted} onAnnotationSaved={handleAnnotationSaved} />
             </div>
+            <RecentRuns />
           </div>
         </main>
       ) : (
-        <SummaryPage className="summary-shell" />
+        <SummaryPage className="summary-shell" onOpenDashboard={() => setViewMode("dashboard")} />
       )}
     </div>
   );

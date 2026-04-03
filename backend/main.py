@@ -361,6 +361,8 @@ def run_ai_purge_mode(config: Config):
         # Log summary
         logger.info(f"AI Purge Summary: Analyzed {summary['jobs_analyzed']:,} jobs in {summary.get('batches_processed', 0)} batches")
         logger.info(f"Jobs marked for purging: {summary['jobs_to_purge']:,}, Jobs actually purged: {summary['jobs_purged']:,}")
+        if summary.get("llm_stats"):
+            logger.info("LLM stats (AI purge): {}", summary["llm_stats"])
         
         if summary['success']:
             logger.success("=== Done ===")
@@ -503,6 +505,7 @@ def run_description_pipeline(config: Config):
     logger.info("=== Parsing job descriptions with AI ===")
     parse_success = desc.run_description_parser()
     if parse_success:
+        logger.info("LLM stats (parser): {}", desc.llm.get_stats())
         logger.success("=== Done ===")
     else:
         logger.error("=== Description Parsing Failed ===")
@@ -512,9 +515,10 @@ def run_title_backfill(config: Config, limit: int = 200):
     """Refetch masked job titles/companies from stored URLs."""
     scraper = JobScraper(config)
     result = scraper.backfill_masked_titles(limit=limit)
+    checked = result.get("checked", 0)
     updated = result.get("updated", 0)
     failed = result.get("failed", 0)
-    logger.info("Titles refetched: updated=%d, failed=%d", updated, failed)
+    logger.info("Titles refetched: checked={}, updated={}, failed={}", checked, updated, failed)
     if updated:
         logger.success("=== Title backfill completed ===")
     else:

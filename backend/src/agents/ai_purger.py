@@ -4,7 +4,7 @@ import json
 import sqlite3
 from datetime import datetime
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
@@ -18,9 +18,20 @@ class JobEntry:
     title: str
     company: str
 
+
+class AIPurgeCandidate(BaseModel):
+    """Single structured AI purge decision."""
+    id: str
+    reason: str = Field(default="No reason provided")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    purge: bool = Field(default=True)
+
+
 class AIPurger_JSON_CLASS(BaseModel):
-    """Structured response model for AI purger"""
-    job_ids_to_purge: List[str]
+    """Structured response model for AI purger."""
+    purge_candidates: List[AIPurgeCandidate] = Field(default_factory=list)
+    job_ids_to_purge: List[str] = Field(default_factory=list)
+    notes: str = Field(default="")
 
 class AIPurger:
     """
@@ -46,24 +57,163 @@ class AIPurger:
         self.parser._ensure_table()
         purge_model = getattr(self.config, 'openai_model', 'gpt-5-mini')
         purge_api_key = getattr(self.config, 'openai_api_key', '').strip() or None
-        self.llm = LLMConnection(api_key=purge_api_key, model=purge_model)
+        self.llm = LLMConnection(
+            api_key=purge_api_key,
+            model=purge_model,
+            timeout_seconds=float(getattr(self.config, 'llm_timeout_seconds', 45)),
+            max_retries=int(getattr(self.config, 'llm_max_retries', 3)),
+            retry_base_delay=float(getattr(self.config, 'llm_retry_base_delay', 0.75)),
+            retry_max_delay=float(getattr(self.config, 'llm_retry_max_delay', 8)),
+            retry_jitter=float(getattr(self.config, 'llm_retry_jitter', 0.2)),
+        )
         self.batch_size = 25
+        self.min_confidence = max(0.0, min(1.0, float(getattr(self.config, 'ai_purge_min_confidence', 0.75))))
+        self.max_ratio = max(0.0, min(1.0, float(getattr(self.config, 'ai_purge_max_ratio', 0.35))))
+        self.max_jobs = max(0, int(getattr(self.config, 'ai_purge_max_jobs', 0)))
         self.purge_prompt = """
         You are an AI job filter. Analyze the provided job listings and identify jobs that should be purged.
         
         IMPORTANT: Be conservative and only purge jobs that are clearly irrelevant or low-quality.
         Looking at the job titles and companies, you should purge jobs that are:
-        - Clearly IRRELEVANT to data science, data analysis, machine learning, AI, or software engineering (e.g. sales, retail, manual labor).
-        - I'm looking for data science, machine learning, AI jobs, NOT purely software engineering jobs. No full stack, backend, frontend, DevOps, or other purely software engineering roles unless they are explicitly focused on data science or AI.
+        - Clearly IRRELEVANT to data science, data analysis, machine learning, AI, analytics engineering, data/platform engineering, or adjacent technical roles (e.g. sales, retail, manual labor, nursing, accounting, field service).
+        - Study-track or internship-style roles such as internships, working-student jobs, thesis roles, apprenticeships, doctoral student roles, and similar student positions.
         - Obviously spam, duplicate, or very low-quality postings.
+        - Keep adjacent technical roles if they are plausibly relevant to data/AI work. Do NOT purge a role just because it is software engineering, platform, backend, full stack, DevOps, or MLOps-adjacent.
         - AI consultant jobs can stay, if they are not duplicate.
-        - No study related positions such as doctorates, master, pre-master, HiWi, internships, student jobs, etc.
         
         Each job listing will be labeled with a short numeric ID (e.g., "1", "2").
-        Return only these numeric IDs for the jobs that should be purged as a JSON array.
-        Example: ["1", "2"]
+        Return JSON only, with this shape:
+        {
+          "purge_candidates": [
+            {
+              "id": "1",
+              "reason": "Clear IRRELEVANT non-technical role",
+              "confidence": 0.93,
+              "purge": true
+            }
+          ],
+          "job_ids_to_purge": ["1", "2"],
+          "notes": "Optional short note"
+        }
+        Use the same ID format, and include both a reason and confidence for each candidate.
         """
         self.json_structure = AIPurger_JSON_CLASS
+
+    def _extract_id(self, value: Any) -> str:
+        """Extract a stable string id from dict/object/string values."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float)):
+            return str(int(value))
+        if isinstance(value, dict):
+            return str(value.get("id", "")).strip()
+        return str(value).strip()
+
+    def _coerce_confidence(self, value: Any, default: float) -> float:
+        """Normalize confidence values to [0, 1]."""
+        if value is None:
+            return default
+        try:
+            conf = float(value)
+        except (TypeError, ValueError):
+            return default
+        if conf < 0.0:
+            return 0.0
+        if conf > 1.0:
+            return 1.0
+        return conf
+
+    def _normalize_candidate_payload(self, analysis: Any, reference_map: Dict[str, JobEntry],
+                                    batch_job_ids: set[str]) -> List[Dict[str, Any]]:
+        """
+        Convert model output into a normalized internal candidate list.
+        """
+        decisions: List[Dict[str, Any]] = []
+        raw_candidates: List[Any] = []
+
+        if isinstance(analysis, dict):
+            raw_candidates.extend(analysis.get("purge_candidates", []) or [])
+            if not raw_candidates:
+                legacy_ids = analysis.get("job_ids_to_purge") or []
+                raw_candidates.extend([{"id": c} for c in legacy_ids])
+        else:
+            if hasattr(analysis, "purge_candidates"):
+                raw_candidates.extend(getattr(analysis, "purge_candidates") or [])
+            if hasattr(analysis, "job_ids_to_purge"):
+                raw_candidates.extend([{"id": c} for c in (getattr(analysis, "job_ids_to_purge") or [])])
+
+        for raw in raw_candidates:
+            candidate_id = self._extract_id(getattr(raw, "id", raw.get("id") if isinstance(raw, dict) else raw))
+            if not candidate_id:
+                continue
+
+            if hasattr(raw, "reason"):
+                reason = str(getattr(raw, "reason", "")).strip() or "No reason provided"
+            elif isinstance(raw, dict):
+                reason = str(raw.get("reason", "No reason provided")).strip() or "No reason provided"
+            else:
+                reason = "No reason provided"
+
+            if hasattr(raw, "confidence"):
+                raw_confidence = getattr(raw, "confidence")
+            elif isinstance(raw, dict):
+                raw_confidence = raw.get("confidence")
+            else:
+                raw_confidence = None
+            confidence = self._coerce_confidence(raw_confidence, self.min_confidence)
+
+            if hasattr(raw, "purge"):
+                raw_purge = getattr(raw, "purge")
+            elif isinstance(raw, dict):
+                raw_purge = raw.get("purge")
+            else:
+                raw_purge = None
+            if isinstance(raw_purge, str):
+                purge = raw_purge.strip().lower() in {"true", "1", "yes", "y", "on"}
+            elif isinstance(raw_purge, (int, float)):
+                purge = bool(raw_purge)
+            elif raw_purge is None:
+                purge = True
+            else:
+                purge = bool(raw_purge)
+
+            if not purge:
+                continue
+
+            if candidate_id in reference_map:
+                actual_id = reference_map[candidate_id].id
+            elif candidate_id in batch_job_ids:
+                actual_id = candidate_id
+            else:
+                continue
+
+            # Default legacy fallback: if confidence was not supplied, keep at threshold.
+            if raw_confidence is None:
+                confidence = max(confidence, self.min_confidence)
+
+            if confidence < self.min_confidence:
+                continue
+
+            decisions.append({
+                "job_id": actual_id,
+                "id": candidate_id,
+                "reason": reason,
+                "confidence": confidence,
+                "purge": purge,
+            })
+
+        seen: set[str] = set()
+        unique: List[Dict[str, Any]] = []
+        for item in decisions:
+            job_id = item["job_id"]
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            unique.append(item)
+
+        return unique
 
     def prepare(self) -> Optional[Dict[str, Any]]:
         """
@@ -103,6 +253,7 @@ class AIPurger:
         
         # Split into batches and process
         all_purge_ids = []
+        all_decisions: List[Dict[str, Any]] = []
         batch_size = self.batch_size
         batches = [jobs[i:i + batch_size] for i in range(0, len(jobs), batch_size)]
         
@@ -140,45 +291,50 @@ class AIPurger:
                 if not analysis_result:
                     continue
                 
-                # Handle both parsed object and JSON string responses
-                if isinstance(analysis_result, str):
+                if isinstance(analysis_result, list):
+                    legacy_candidates: List[AIPurgeCandidate] = []
+                    for legacy_entry in analysis_result:
+                        legacy_id = self._extract_id(legacy_entry)
+                        if legacy_id:
+                            legacy_candidates.append(AIPurgeCandidate(id=legacy_id))
+                    if not legacy_candidates:
+                        logger.warning("Legacy LLM payload had no valid IDs; skipping batch")
+                        continue
+                    analysis = AIPurger_JSON_CLASS(purge_candidates=legacy_candidates)
+                elif isinstance(analysis_result, str):
                     try:
-                        analysis = AIPurger_JSON_CLASS.model_validate_json(analysis_result)
+                        parsed_payload = json.loads(analysis_result)
+                        analysis = AIPurger_JSON_CLASS.model_validate(parsed_payload)
                     except Exception as parse_error:
                         logger.error(f"Failed to parse JSON: {parse_error}")
                         continue
                 else:
-                    # Assume it's already a parsed object
                     analysis = analysis_result
                 
                 batches_processed += 1
                 
-                # Validate IDs exist in batch
                 batch_job_ids = {job.id for job in batch}
-                valid_ids: List[str] = []
-                seen_actual_ids: set[str] = set()
-                for returned_id in analysis.job_ids_to_purge:
-                    if returned_id in reference_map:
-                        actual_id = reference_map[returned_id].id
-                    elif returned_id in batch_job_ids:
-                        actual_id = returned_id
-                    else:
-                        continue
+                valid_decisions = self._normalize_candidate_payload(analysis, reference_map, batch_job_ids)
 
-                    if actual_id not in seen_actual_ids:
-                        valid_ids.append(actual_id)
-                        seen_actual_ids.add(actual_id)
+                valid_ids = [item["job_id"] for item in valid_decisions]
                 
                 # Test mode: print candidates
                 if self.test_mode and valid_ids:
                     job_lookup = {job.id: job for job in batch}
                     logger.info(f"TEST MODE - Jobs to purge ({len(valid_ids)}):")
-                    for job_id in valid_ids[:5]:  # Show max 5
-                        job = job_lookup.get(job_id)
-                        if job:
-                            logger.info(f"  {job.title} @ {job.company}")
+                    for job in valid_decisions[:5]:
+                        current = job_lookup.get(job["job_id"])
+                        if current:
+                            logger.info(
+                                "  {} @ {} | reason: {} | confidence: {:.2f}",
+                                current.title,
+                                current.company,
+                                job.get("reason"),
+                                job.get("confidence"),
+                            )
                 
                 all_purge_ids.extend(valid_ids)
+                all_decisions.extend(valid_decisions)
                 
                 # Mark all jobs in this batch as analyzed (both purged and kept)
                 batch_job_ids_list = list(batch_job_ids)
@@ -192,11 +348,33 @@ class AIPurger:
             except Exception as e:
                 logger.error(f"Batch {batch_num} processing error: {e}")
                 continue
+
+        # Apply conservative global caps after all batches have been analyzed
+        if (self.max_jobs > 0 or self.max_ratio > 0.0) and all_decisions:
+            all_decisions.sort(key=lambda item: item.get("confidence", 0.0), reverse=True)
+            cap_by_ratio = 0
+            if self.max_ratio > 0 and jobs:
+                cap_by_ratio = max(1, int(len(jobs) * self.max_ratio))
+            cap = cap_by_ratio if cap_by_ratio > 0 else len(all_decisions)
+            cap = min(cap, len(all_decisions))
+            if self.max_jobs > 0:
+                cap = min(cap, self.max_jobs)
+            if cap < len(all_decisions):
+                dropped = len(all_decisions) - cap
+                logger.warning(
+                    "AI purge cap applied: keeping top {} of {} candidates (dropped {}).",
+                    cap,
+                    len(all_decisions),
+                    dropped,
+                )
+                all_decisions = all_decisions[:cap]
+                all_purge_ids = [item["job_id"] for item in all_decisions]
         
         return {
             "job_ids_to_purge": all_purge_ids,
             "jobs_analyzed": len(jobs),
-            "batches_processed": batches_processed
+            "batches_processed": batches_processed,
+            "purge_decisions": all_decisions,
         }
 
     def _mark_jobs_as_analyzed(self, job_ids: List[str]) -> None:
@@ -328,6 +506,7 @@ class AIPurger:
             "jobs_to_purge": 0,
             "jobs_purged": 0,
             "test_mode": self.test_mode,
+            "llm_stats": {},
             "success": False,
             "error": None
         }
@@ -346,6 +525,8 @@ class AIPurger:
             summary["batches_processed"] = analysis_result["batches_processed"]
                 
             summary["jobs_to_purge"] = len(job_ids_to_purge)
+            summary["purge_decisions"] = analysis_result.get("purge_decisions", [])
+            summary["llm_stats"] = self.llm.get_stats()
             
             if not job_ids_to_purge:
                 logger.info("No jobs identified for purging")
@@ -366,10 +547,12 @@ class AIPurger:
                     summary["success"] = True
                 else:
                     summary["error"] = "No jobs were actually purged"
+                    summary["llm_stats"] = self.llm.get_stats()
             
             return summary
             
         except Exception as e:
             logger.error(f"AI-Purger error: {e}")
             summary["error"] = str(e)
+            summary["llm_stats"] = self.llm.get_stats()
             return summary

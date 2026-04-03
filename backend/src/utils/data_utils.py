@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse, parse_qs
 import re
 from datetime import datetime
-from .filtering import should_filter_by_keywords, should_filter_by_company
+from .filtering import should_filter_by_keywords, should_filter_by_company, should_filter_study_title
 from loguru import logger
 
 def remove_historical_duplicates(self, current_df: pd.DataFrame) -> pd.DataFrame:
@@ -116,22 +116,19 @@ def clean_job_data(jobs_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def filter_unwanted_job_titles(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter out jobs with unwanted keywords in the title"""
+    """Filter out study-track roles such as internships or thesis positions."""
     if df.empty or 'title' not in df.columns:
         return df
     
     original_count = len(df)
-    unwanted_keywords = ['internship', 'sales']
-    
-    for keyword in unwanted_keywords:
-        mask = ~df['title'].str.contains(keyword, case=False, na=False)
-        df = df.loc[mask]
+    mask = ~df['title'].apply(should_filter_study_title)
+    df = df.loc[mask]
     
     filtered_count = len(df)
     removed_count = original_count - filtered_count
     
     if removed_count > 0:
-        print(f"Filtered out {removed_count} jobs containing unwanted keywords")
+        print(f"Filtered out {removed_count} study-track jobs")
     
     return df
 

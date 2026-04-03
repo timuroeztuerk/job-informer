@@ -1,59 +1,186 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchDbSummary } from "../api";
-import type { CountStat, DbSummary } from "../types";
+import type { CountStat, DbSummary, TrendDelta, WeeklyJobCount } from "../types";
+import { replaceSearchParams } from "../urlState";
 
 interface SummaryPageProps {
   className?: string;
+  onOpenDashboard: () => void;
 }
 
-const SummaryPage: React.FC<SummaryPageProps> = ({ className }) => {
+interface MomentumCardProps {
+  title: string;
+  subtitle: string;
+  items: TrendDelta[];
+  onSelect?: (item: TrendDelta) => void;
+}
+
+interface MetricCardProps {
+  label: string;
+  value: string;
+  detail: string;
+}
+
+interface DistributionPanelProps {
+  title: string;
+  subtitle: string;
+  items: CountStat[];
+  onSelect?: (item: CountStat) => void;
+}
+
+const formatDate = (value?: string | null, withTime = false): string => {
+  if (!value) return "n/a";
+  const options: Intl.DateTimeFormatOptions = withTime
+    ? { dateStyle: "medium", timeStyle: "short" }
+    : { dateStyle: "medium" };
+  return new Intl.DateTimeFormat("en", options).format(new Date(value));
+};
+
+const toDateInputValue = (value?: string | null): string => {
+  if (!value) return "";
+  const date = new Date(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const addDays = (value: string, days: number): string => {
+  const date = new Date(`${value}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const formatCount = (value?: number | null): string => (value === null || value === undefined ? "n/a" : value.toLocaleString());
+const formatPct = (value?: number | null): string => (value === null || value === undefined ? "n/a" : `${value.toFixed(1)}%`);
+const formatDecimal = (value?: number | null): string => (value === null || value === undefined ? "n/a" : value.toFixed(1));
+const formatCurrency = (value?: number | null): string =>
+  value === null || value === undefined ? "n/a" : `EUR ${Math.round(value).toLocaleString()}`;
+const formatYears = (value?: number | null): string => (value === null || value === undefined ? "n/a" : `${value.toFixed(1)} yrs`);
+const normalizeName = (value: string): string => value.replace(/_/g, " ");
+
+const MetricCard: React.FC<MetricCardProps> = ({ label, value, detail }) => (
+  <div className="intel-card">
+    <p className="label">{label}</p>
+    <p className="intel-value">{value}</p>
+    <p className="muted tiny">{detail}</p>
+  </div>
+);
+
+const DistributionPanel: React.FC<DistributionPanelProps> = ({ title, subtitle, items, onSelect }) => {
+  const peak = useMemo(() => Math.max(...items.map((item) => item.count), 1), [items]);
+
+  return (
+    <section className="intel-panel">
+      <div className="insight-head">
+        <p className="label">{title}</p>
+        <p className="muted tiny">{subtitle}</p>
+      </div>
+      {items.length ? (
+        <div className="intel-list">
+          {items.map((item) => {
+            const width = Math.max(8, item.percentage ?? (item.count / peak) * 100);
+            const content = (
+              <>
+                <div className="intel-list-copy">
+                  <span className="name">{normalizeName(item.name)}</span>
+                  <span className="muted tiny">
+                    {item.count.toLocaleString()}
+                    {item.percentage !== undefined ? ` (${item.percentage.toFixed(1)}%)` : ""}
+                  </span>
+                </div>
+                <div className="intel-bar">
+                  <span style={{ width: `${width}%` }} />
+                </div>
+              </>
+            );
+
+            return onSelect ? (
+              <button key={item.name} type="button" className="intel-list-item interactive" onClick={() => onSelect(item)}>
+                {content}
+              </button>
+            ) : (
+              <div key={item.name} className="intel-list-item">
+                {content}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="muted small">No data yet.</p>
+      )}
+    </section>
+  );
+};
+
+const MomentumCard: React.FC<MomentumCardProps> = ({ title, subtitle, items, onSelect }) => {
+  return (
+    <section className="intel-panel momentum-card">
+      <div className="insight-head">
+        <p className="label">{title}</p>
+        <p className="muted tiny">{subtitle}</p>
+      </div>
+      {items.length ? (
+        <div className="momentum-list">
+          {items.map((item) => (
+            <button
+              key={item.name}
+              type="button"
+              className={`momentum-item ${onSelect ? "interactive" : ""}`}
+              onClick={onSelect ? () => onSelect(item) : undefined}
+              disabled={!onSelect}
+            >
+              <div>
+                <span className="name">{normalizeName(item.name)}</span>
+                <p className="muted tiny">
+                  {item.recent_count} recent · {item.previous_count} previous
+                </p>
+              </div>
+              <span className="delta up">+{item.delta}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="muted small">No rising signals in this window yet.</p>
+      )}
+    </section>
+  );
+};
+
+const SummaryPage: React.FC<SummaryPageProps> = ({ className, onOpenDashboard }) => {
   const [summary, setSummary] = useState<DbSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const parsed = useMemo(() => summary?.parsed_insights || null, [summary]);
   const citySummary = useMemo(() => summary?.city_summary || null, [summary]);
+  const trendSummary = useMemo(() => summary?.trend_summary || null, [summary]);
+  const observationStats = useMemo(() => summary?.observation_stats || null, [summary]);
+  const observationSummary = useMemo(() => summary?.observation_summary || null, [summary]);
   const orphanedJobs = useMemo(
-    () =>
-      summary?.parsed_descriptions_stats?.orphaned_parsed_descriptions ??
-      parsed?.orphaned_jobs ??
-      0,
+    () => summary?.parsed_descriptions_stats?.orphaned_parsed_descriptions ?? parsed?.orphaned_jobs ?? 0,
     [parsed, summary]
   );
   const historicalPayloads = useMemo(
-    () =>
-      parsed?.historical_payloads ??
-      summary?.parsed_descriptions_stats?.total_parsed_descriptions ??
-      0,
+    () => parsed?.historical_payloads ?? summary?.parsed_descriptions_stats?.total_parsed_descriptions ?? 0,
     [parsed, summary]
   );
+  const totalJobs = summary?.totals.total_jobs || 0;
   const coveragePct = useMemo(() => {
-    const totalJobs = summary?.totals.total_jobs || 0;
     if (!totalJobs) return null;
     return ((parsed?.total_records || 0) / totalJobs) * 100;
-  }, [parsed, summary]);
-  const coverageDisplay = useMemo(() => {
-    if (coveragePct === null) return "n/a";
-    return `${coveragePct.toFixed(1)}%`;
-  }, [coveragePct]);
-
+  }, [parsed, totalJobs]);
+  const coverageDisplay = useMemo(() => formatPct(coveragePct), [coveragePct]);
+  const salaryCoverage = useMemo(() => {
+    if (!parsed?.total_records) return null;
+    return (parsed.salary_eur.count / parsed.total_records) * 100;
+  }, [parsed]);
   const seniorityMix = useMemo(() => parsed?.seniority_mix, [parsed]);
   const seniorSlice = useMemo(() => seniorityMix?.senior, [seniorityMix]);
   const nonSeniorSlice = useMemo(() => seniorityMix?.non_senior, [seniorityMix]);
-  const safePct = (value?: number) => (value === undefined || value === null ? "0.0%" : `${value.toFixed(1)}%`);
-  const safeYears = (value?: number | null) => (value === null || value === undefined ? "n/a" : `${value.toFixed(1)} yrs`);
-  const safeSalary = (value?: number | null) =>
-    value === null || value === undefined ? "n/a" : `€${Math.round(value).toLocaleString()}`;
-
-  const shortDate = (value?: string | null) => {
-    if (!value) return "n/a";
-    return new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(value));
-  };
-
-  const pct = (entry: CountStat) => `${(entry.percentage ?? 0).toFixed(1)}%`;
-  const top = (entries: CountStat[] = [], take = 5) => entries.slice(0, take);
-  const barWidth = (entry: CountStat) => `${Math.max(6, Math.min(100, entry.percentage ?? 0))}%`;
-  const round = (value: number | null) => (value === null || value === undefined ? "0" : Math.round(value).toLocaleString());
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -73,28 +200,88 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className }) => {
   }, [reload]);
 
   const wrapperClass = ["summary-page", className].filter(Boolean).join(" ");
+  const weeklyPeak = useMemo(
+    () => Math.max(...(trendSummary?.weekly_job_counts || []).map((entry) => entry.jobs), 1),
+    [trendSummary]
+  );
+  const recentWindowLabel = useMemo(() => {
+    if (!trendSummary) return "n/a";
+    return `${formatDate(trendSummary.recent_window.start)} - ${formatDate(trendSummary.recent_window.end)}`;
+  }, [trendSummary]);
+  const previousWindowLabel = useMemo(() => {
+    if (!trendSummary) return "n/a";
+    return `${formatDate(trendSummary.previous_window.start)} - ${formatDate(trendSummary.previous_window.end)}`;
+  }, [trendSummary]);
+  const sourceMix = useMemo(
+    () =>
+      Object.entries(summary?.jobs_by_source || {})
+        .map(([name, count]) => ({
+          name,
+          count,
+          percentage: totalJobs ? (count / totalJobs) * 100 : 0,
+        }))
+        .sort((left, right) => right.count - left.count),
+    [summary, totalJobs]
+  );
+  const topCompanies = useMemo(
+    () =>
+      Object.entries(summary?.top_companies || {})
+        .map(([name, count]) => ({
+          name,
+          count,
+          percentage: totalJobs ? (count / totalJobs) * 100 : 0,
+        }))
+        .sort((left, right) => right.count - left.count),
+    [summary, totalJobs]
+  );
+
+  const top = (entries: CountStat[] = [], take = 6) => entries.slice(0, take);
+
+  const openDashboard = useCallback(
+    (nextParams: Record<string, string>) => {
+      replaceSearchParams({
+        view: "dashboard",
+        search: "",
+        location: "",
+        source: "",
+        company: "",
+        status: "",
+        priority: "",
+        from: "",
+        to: "",
+        sort: "",
+        job: "",
+        page: "",
+        ...nextParams,
+      });
+      onOpenDashboard();
+    },
+    [onOpenDashboard]
+  );
+
+  const openWindow = useCallback(
+    (start?: string | null, end?: string | null, inclusiveEndOffsetDays = 0) => {
+      const from = toDateInputValue(start);
+      const baseTo = toDateInputValue(end);
+      const to = baseTo ? addDays(baseTo, inclusiveEndOffsetDays) : "";
+      openDashboard({ from, to });
+    },
+    [openDashboard]
+  );
 
   return (
     <div className={wrapperClass}>
-      <section className="panel intro">
-        <div className="intro-row">
+      <section className="panel intro intelligence-hero">
+        <div className="intro-row intelligence-hero-row">
           <div>
-            <p className="label">Summary</p>
-            <h2>Database snapshot</h2>
+            <p className="label">Intelligence</p>
+            <h2>Job market snapshot</h2>
             <p className="muted">
-              Review parsed description trends, coverage, and city distribution for the current jobs in the database.
+              Track market movement, source mix, and data trust without leaving the current dataset.
             </p>
           </div>
           <div className="intro-actions">
-            {parsed && (
-              <span className="pill small tone">
-                Active payloads: {parsed.total_records.toLocaleString()} /{" "}
-                {summary?.totals.total_jobs.toLocaleString()}
-                {" ("}
-                {coverageDisplay}
-                {")"}
-              </span>
-            )}
+            <span className="pill small tone">Default home</span>
             <button className="ghost" type="button" onClick={reload} disabled={loading}>
               Refresh
             </button>
@@ -102,234 +289,251 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className }) => {
         </div>
 
         {error && <div className="error">{error}</div>}
-        {!error && loading && <div className="muted">Loading summary...</div>}
-        {!error && !loading && summary && (
-          <div className="stat-grid">
-            <div className="stat-card">
-              <p className="label">Total jobs</p>
-              <p className="stat-value">{summary.totals.total_jobs.toLocaleString()}</p>
-              <p className="muted tiny">All rows currently stored.</p>
-            </div>
-            <div className="stat-card">
-              <p className="label">Last 7 days</p>
-              <p className="stat-value">{summary.totals.recent_jobs_7_days.toLocaleString()}</p>
-              <p className="muted tiny">Fresh additions in the last week.</p>
-            </div>
-            <div className="stat-card">
-              <p className="label">Date range</p>
-              <p className="stat-value small">
-                {summary.totals.date_range.earliest ? (
-                  <>
-                    {shortDate(summary.totals.date_range.earliest)} - {shortDate(summary.totals.date_range.latest)}
-                  </>
-                ) : (
-                  <span>n/a</span>
-                )}
-              </p>
-              <p className="muted tiny">Earliest and latest scrape dates.</p>
-            </div>
-            {summary.parsed_descriptions_stats && (
-              <div className="stat-card">
-                <p className="label">Parsed coverage</p>
-                <p className="stat-value">
-                  {parsed?.total_records.toLocaleString() || "0"} / {summary.totals.total_jobs.toLocaleString()}
-                </p>
-                <p className="muted tiny">
-                  Coverage: {coverageDisplay} · Orphaned payloads: {orphanedJobs.toLocaleString()} · Historical:{" "}
-                  {historicalPayloads.toLocaleString()}
-                </p>
-              </div>
-            )}
+        {!error && loading && !summary && <div className="muted">Loading intelligence...</div>}
+      </section>
+
+      <section className="panel intelligence-section">
+        <div className="section-head">
+          <div>
+            <p className="label">Snapshot</p>
+            <h3>Current database posture</h3>
           </div>
+          <p className="muted small">
+            {summary?.totals.date_range.earliest
+              ? `${formatDate(summary.totals.date_range.earliest)} - ${formatDate(summary.totals.date_range.latest)}`
+              : "Date range n/a"}
+          </p>
+        </div>
+        <div className="intel-grid four">
+          <MetricCard label="Total jobs" value={formatCount(summary?.totals.total_jobs)} detail="All rows currently stored." />
+          <MetricCard label="Recent jobs (7d)" value={formatCount(summary?.totals.recent_jobs_7_days)} detail="Fresh additions in the last week." />
+          <MetricCard
+            label="Parsed coverage"
+            value={parsed ? `${formatCount(parsed.total_records)} / ${formatCount(summary?.totals.total_jobs)}` : "n/a"}
+            detail={`Coverage ${coverageDisplay}`}
+          />
+          <MetricCard
+            label="Repeat jobs"
+            value={formatCount(observationStats?.repeat_jobs ?? observationSummary?.repeat_jobs)}
+            detail="Jobs seen in more than one scrape."
+          />
+        </div>
+      </section>
+
+      <section className="panel intelligence-section">
+        <div className="section-head">
+          <div>
+            <p className="label">What changed recently</p>
+            <h3>Movement in the market</h3>
+          </div>
+          {trendSummary && (
+            <div className="window-stats">
+              <button
+                className="pill small tone interactive-pill"
+                type="button"
+                onClick={() => openWindow(trendSummary.recent_window.start, trendSummary.recent_window.end)}
+              >
+                Recent jobs: {trendSummary.recent_window.jobs.toLocaleString()}
+              </button>
+              <button
+                className="pill small interactive-pill"
+                type="button"
+                onClick={() => openWindow(trendSummary.previous_window.start, trendSummary.previous_window.end, -1)}
+              >
+                Previous jobs: {trendSummary.previous_window.jobs.toLocaleString()}
+              </button>
+            </div>
+          )}
+        </div>
+        {trendSummary ? (
+          <>
+            <p className="muted small window-copy">
+              Recent window: {recentWindowLabel}. Compared against: {previousWindowLabel}.
+            </p>
+            <section className="intel-panel weekly-panel">
+              <div className="insight-head">
+                <p className="label">Weekly volume</p>
+                <p className="muted tiny">{trendSummary.window_days}-day momentum window.</p>
+              </div>
+              <div className="weekly-list featured">
+                {trendSummary.weekly_job_counts.map((entry: WeeklyJobCount) => {
+                  const weekStart = toDateInputValue(entry.week_start);
+                  const weekEnd = weekStart ? addDays(weekStart, 6) : "";
+                  return (
+                    <button
+                      key={entry.week_start}
+                      type="button"
+                      className="weekly-row interactive"
+                      onClick={() => openDashboard({ from: weekStart, to: weekEnd })}
+                    >
+                      <div className="weekly-meta">
+                        <span className="name">{formatDate(entry.week_start)}</span>
+                        <span className="muted tiny">
+                          {entry.jobs.toLocaleString()} jobs · {entry.parsed_jobs.toLocaleString()} parsed
+                        </span>
+                      </div>
+                      <div className="weekly-bar">
+                        <span style={{ width: `${Math.max((entry.jobs / weeklyPeak) * 100, entry.jobs ? 6 : 0)}%` }} />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+            <div className="intel-grid">
+              <MomentumCard
+                title="Companies"
+                subtitle="Companies showing up more often than before."
+                items={trendSummary.momentum.companies}
+                onSelect={(item) => openDashboard({ company: item.name })}
+              />
+              <MomentumCard
+                title="Cities"
+                subtitle="Locations with more recent openings."
+                items={trendSummary.momentum.cities}
+                onSelect={(item) => openDashboard({ location: item.name })}
+              />
+              <MomentumCard title="Skills" subtitle="Skills appearing more often in the last window." items={trendSummary.momentum.skills} />
+              <MomentumCard title="Tools" subtitle="Platforms and tooling demand that is rising." items={trendSummary.momentum.tools} />
+              <MomentumCard
+                title="Languages"
+                subtitle="Programming languages with upward momentum."
+                items={trendSummary.momentum.programming_languages}
+              />
+            </div>
+          </>
+        ) : (
+          <p className="muted small">No trend data yet.</p>
         )}
       </section>
 
-      {parsed && parsed.total_records ? (
-        <section className="panel insight-panel">
-          <div className="insight-grid">
-            <div className="insight">
-              <div className="insight-head">
-                <p className="label">Programming languages</p>
-                <p className="muted tiny">Share of parsed payloads.</p>
-              </div>
-              <ul>
-                {top(parsed.programming_languages, 6).map((item) => (
-                  <li key={item.name}>
-                    <span className="name">{item.name}</span>
-                    <span className="value">
-                      {item.count.toLocaleString()}
-                      <span className="muted tiny">({pct(item)})</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="insight">
-              <div className="insight-head">
-                <p className="label">Skills</p>
-                <p className="muted tiny">Most common skills in parsed text.</p>
-              </div>
-              <ul>
-                {top(parsed.skills, 6).map((item) => (
-                  <li key={item.name}>
-                    <span className="name">{item.name}</span>
-                    <span className="value">
-                      {item.count.toLocaleString()}
-                      <span className="muted tiny">({pct(item)})</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="insight">
-              <div className="insight-head">
-                <p className="label">Tools</p>
-                <p className="muted tiny">Libraries, databases, and platforms.</p>
-              </div>
-              <ul>
-                {top(parsed.tools, 8).map((item) => (
-                  <li key={item.name}>
-                    <span className="name">{item.name}</span>
-                    <span className="value">
-                      {item.count.toLocaleString()}
-                      <span className="muted tiny">({pct(item)})</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="insight">
-              <div className="insight-head">
-                <p className="label">Degree fields</p>
-                <p className="muted tiny">Normalized fields requested.</p>
-              </div>
-              <ul>
-                {top(parsed.degree_fields, 6).map((item) => (
-                  <li key={item.name}>
-                    <span className="name">{item.name}</span>
-                    <span className="value">
-                      {item.count.toLocaleString()}
-                      <span className="muted tiny">({pct(item)})</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="insight">
-              <div className="insight-head">
-                <p className="label">Seniority</p>
-                <p className="muted tiny">Level mix across postings.</p>
-              </div>
-              <ul>
-                {top(parsed.seniority_levels, 4).map((item) => (
-                  <li key={item.name}>
-                    <span className="name">{item.name}</span>
-                    <span className="value">
-                      {item.count.toLocaleString()}
-                      <span className="muted tiny">({pct(item)})</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="insight">
-              <div className="insight-head">
-                <p className="label">Employment type</p>
-                <p className="muted tiny">Contract mix.</p>
-              </div>
-              <ul>
-                {top(parsed.employment_types, 4).map((item) => (
-                  <li key={item.name}>
-                    <span className="name">{item.name}</span>
-                    <span className="value">
-                      {item.count.toLocaleString()}
-                      <span className="muted tiny">({pct(item)})</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+      <section className="panel intelligence-section">
+        <div className="section-head">
+          <div>
+            <p className="label">Market profile</p>
+            <h3>Where the current dataset leans</h3>
           </div>
-        </section>
-      ) : summary && !loading ? (
-        <section className="panel note">
-          <p className="muted">No parsed descriptions yet. Run the description parser to populate this view.</p>
-        </section>
-      ) : null}
+        </div>
+        <div className="intel-grid">
+          <DistributionPanel title="Source mix" subtitle="Share of jobs by source." items={top(sourceMix)} onSelect={(item) => openDashboard({ source: item.name })} />
+          <DistributionPanel
+            title="Top companies"
+            subtitle="Most common employers in the current set."
+            items={top(topCompanies)}
+            onSelect={(item) => openDashboard({ company: item.name })}
+          />
+          <DistributionPanel
+            title="Top cities"
+            subtitle="Primary cities mentioned in listings."
+            items={top(citySummary?.top_cities || [])}
+            onSelect={(item) => openDashboard({ location: item.name })}
+          />
+          <DistributionPanel title="Remote options" subtitle="Parsed working model mix." items={top(parsed?.remote_options || [])} />
+          <DistributionPanel title="Seniority" subtitle="Parsed role levels." items={top(parsed?.seniority_levels || [])} />
+        </div>
+      </section>
 
-      {parsed && parsed.total_records ? (
-        <section className="panel small-grid">
-          <div className="stat-card tight">
-            <p className="label">Experience requirements</p>
-            <p className="stat-value">
-              {parsed.experience_years.count ? `${parsed.experience_years.average?.toFixed(1) || "0.0"} years avg` : "n/a"}
-            </p>
-            <p className="muted tiny">
-              {parsed.experience_years.count
-                ? `Range: ${parsed.experience_years.min} - ${parsed.experience_years.max} · ${parsed.experience_years.count.toLocaleString()} jobs`
-                : "Waiting for parsed experience fields."}
-            </p>
+      <section className="panel intelligence-section">
+        <div className="section-head">
+          <div>
+            <p className="label">Data trust and recurrence</p>
+            <h3>Quality and repeat-sighting signals</h3>
           </div>
-          <div className="stat-card tight">
-            <p className="label">Salary (EUR)</p>
-            <p className="stat-value">
-              {parsed.salary_eur.count ? `€${round(parsed.salary_eur.average)}` : "n/a"}
-            </p>
-            <p className="muted tiny">
-              {parsed.salary_eur.count
-                ? `Range: €${round(parsed.salary_eur.min)} - €${round(parsed.salary_eur.max)} · ${parsed.salary_eur.count.toLocaleString()} jobs`
-                : "Waiting for parsed salary ranges."}
-            </p>
-          </div>
-          <div className="stat-card tight">
-            <p className="label">Seniority mix</p>
-            <p className="stat-value small">
-              <span className="block">
-                Senior: {seniorSlice?.count?.toLocaleString() || "0"} ({safePct(seniorSlice?.percentage)})
-              </span>
-              <span className="block">
-                Other: {nonSeniorSlice?.count?.toLocaleString() || "0"} ({safePct(nonSeniorSlice?.percentage)})
-              </span>
-            </p>
-            <p className="muted tiny">
-              Experience: {safeYears(seniorSlice?.avg_experience)} vs {safeYears(nonSeniorSlice?.avg_experience)}
-            </p>
-            <p className="muted tiny">Salary: {safeSalary(seniorSlice?.avg_salary)} vs {safeSalary(nonSeniorSlice?.avg_salary)}</p>
-          </div>
-        </section>
-      ) : null}
-
-      {citySummary && (
-        <section className="panel city-panel">
-          <div className="intro-row">
-            <div>
-              <p className="label">Cities</p>
-              <h3>Top locations</h3>
+        </div>
+        <div className="intel-grid two-up">
+          <section className="intel-panel">
+            <div className="insight-head">
+              <p className="label">Parsed data quality</p>
+              <p className="muted tiny">Coverage and payload hygiene for parsed descriptions.</p>
             </div>
-            <span className="pill small tone">Locations scanned: {citySummary.total_jobs.toLocaleString()}</span>
+            <div className="metric-grid">
+              <div>
+                <p className="muted tiny">Total parsed</p>
+                <p className="metric-value">{formatCount(summary?.parsed_descriptions_stats?.total_parsed_descriptions)}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Active parsed</p>
+                <p className="metric-value">{formatCount(summary?.parsed_descriptions_stats?.active_parsed_descriptions)}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Jobs with descriptions</p>
+                <p className="metric-value">{formatCount(summary?.parsed_descriptions_stats?.jobs_with_descriptions)}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Orphaned payloads</p>
+                <p className="metric-value">{formatCount(orphanedJobs)}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Historical payloads</p>
+                <p className="metric-value">{formatCount(historicalPayloads)}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Coverage</p>
+                <p className="metric-value">{coverageDisplay}</p>
+              </div>
+            </div>
+          </section>
+
+          <section className="intel-panel">
+            <div className="insight-head">
+              <p className="label">Observation and recurrence</p>
+              <p className="muted tiny">How often jobs reappear and how long they stay active.</p>
+            </div>
+            <div className="metric-grid">
+              <div>
+                <p className="muted tiny">Total observations</p>
+                <p className="metric-value">{formatCount(observationStats?.total_observations ?? observationSummary?.total_observations)}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Repeat jobs</p>
+                <p className="metric-value">{formatCount(observationStats?.repeat_jobs ?? observationSummary?.repeat_jobs)}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Avg seen count</p>
+                <p className="metric-value">{formatDecimal(observationStats?.average_seen_count ?? observationSummary?.average_seen_count)}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Max seen count</p>
+                <p className="metric-value">{formatCount(observationStats?.max_seen_count ?? observationSummary?.max_seen_count)}</p>
+              </div>
+            </div>
+            <div className="recurrence-actions">
+              <button className="ghost" type="button" onClick={() => openDashboard({ sort: "seen_count_desc" })}>
+                Most recurring
+              </button>
+              <button className="ghost" type="button" onClick={() => openDashboard({ sort: "last_seen_desc" })}>
+                Recently seen again
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <section className="intel-panel recurring-panel">
+          <div className="insight-head">
+            <p className="label">Top recurring jobs</p>
+            <p className="muted tiny">Open a recurring posting directly in the dashboard.</p>
           </div>
-          {citySummary.top_cities.length ? (
-            <div className="city-list">
-              {citySummary.top_cities.map((city, idx) => (
-                <div key={city.name} className="city-row">
-                  <div className="city-rank">{idx + 1}</div>
-                  <div className="city-body">
-                    <div className="city-name">{city.name}</div>
-                    <div className="muted tiny">
-                      {city.count.toLocaleString()} jobs · {pct(city)}
-                    </div>
-                    <div className="bar">
-                      <span style={{ width: barWidth(city) }} />
-                    </div>
+          {observationSummary?.top_recurring_jobs?.length ? (
+            <div className="recurring-list">
+              {observationSummary.top_recurring_jobs.map((item) => (
+                <button key={item.job_id} type="button" className="recurring-item" onClick={() => openDashboard({ job: item.job_id })}>
+                  <div>
+                    <p className="recurring-title">{item.title}</p>
+                    <p className="muted tiny">{item.company}</p>
                   </div>
-                </div>
+                  <div className="recurring-meta">
+                    <span className="tag soft">Seen {item.seen_count}x</span>
+                    <span className="tag soft">{item.active_days} active days</span>
+                    <span className="tag soft">Last seen {formatDate(item.last_seen_at, true)}</span>
+                  </div>
+                </button>
               ))}
             </div>
           ) : (
-            <p className="muted">No jobs to summarize yet.</p>
+            <p className="muted small">Recurrence tracking is not available yet.</p>
           )}
         </section>
-      )}
+      </section>
     </div>
   );
 };

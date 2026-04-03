@@ -54,8 +54,11 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
   const pollHandle = useRef<number | null>(null);
   const logTailRef = useRef<HTMLPreElement | null>(null);
   const runIdRef = useRef("");
+  const pollErrorStreak = useRef(0);
 
   const currentRunId = useMemo(() => status?.run_id || "", [status]);
+  const isRunActive = useMemo(() => status?.status === "running", [status]);
+  const isActionDisabled = loading || isRunActive;
 
   const modeLabel = (mode: CliMode) => {
     switch (mode) {
@@ -87,15 +90,23 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
     const runId = runIdRef.current;
     if (!runId) return;
     try {
-      setError(null);
       const nextStatus = await getRunStatus(runId);
+      pollErrorStreak.current = 0;
+      setError(null);
       setStatus(nextStatus);
       if (nextStatus.status !== "running") {
         stopPolling();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load status.");
-      stopPolling();
+      const streak = pollErrorStreak.current + 1;
+      pollErrorStreak.current = streak;
+      const message = err instanceof Error ? err.message : "Failed to load status.";
+      if (streak >= 5) {
+        setError(`${message} Polling disabled after repeated failures; use Refresh status manually.`);
+        stopPolling();
+      } else {
+        setError(`${message} Retrying…`);
+      }
     }
   };
 
@@ -105,9 +116,14 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
   };
 
   const startCliRun = async (mode: CliMode) => {
+    if (isActionDisabled) {
+      return;
+    }
+
+    pollErrorStreak.current = 0;
+    setError(null);
     setLoading(true);
     setLoadingMode(mode);
-    setError(null);
     try {
       const nextStatus = await startRun({ mode });
       runIdRef.current = nextStatus.run_id;
@@ -177,7 +193,7 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
               key={action.mode}
               type="button"
               className="qa-card"
-              disabled={loading}
+              disabled={isActionDisabled}
               onClick={() => startCliRun(action.mode)}
             >
               <div className="qa-row">

@@ -5,6 +5,27 @@ import re
 import unicodedata
 from typing import List
 
+STUDY_ROLE_PATTERNS = [
+    r"\bintern(?:ship)?\b",
+    r"\bpraktik(?:ant|um)?\b",
+    r"\bwerkstudent(?:in)?\b",
+    r"\bworking student\b",
+    r"\bstudent(?:ische| assistant| helper)?\b",
+    r"\bstudentenjob\b",
+    r"\bthesis\b",
+    r"\bmaster(?:arbeit|thesis)\b",
+    r"\bbachelor(?:arbeit|thesis)\b",
+    r"\bdissertation\b",
+    r"\bdoctoral\b",
+    r"\bphd(?: student)?\b",
+    r"\btrainee(?:ship)?\b",
+    r"\bausbildung\b",
+    r"\bduales?(?: studium)?\b",
+    r"\bstudien[-/ ]?abschlussarbeit\b",
+    r"\bresearch assistant\b",
+    r"\bhiwi\b",
+]
+
 
 def normalize_text(text: str) -> str:
     """Normalize text for consistent matching (handles unicode, case, whitespace)."""
@@ -52,3 +73,12 @@ def should_filter_by_company(company: str, unwanted_companies: List[str]) -> boo
     
     # Companies should already be normalized
     return any(unwanted_company in company_normalized for unwanted_company in unwanted_companies if unwanted_company)
+
+
+def should_filter_study_title(title: str) -> bool:
+    """Return True when the title clearly describes internship/student/study-track roles."""
+    if not title:
+        return False
+
+    title_normalized = normalize_text(title)
+    return any(re.search(pattern, title_normalized) for pattern in STUDY_ROLE_PATTERNS)

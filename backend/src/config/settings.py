@@ -15,6 +15,12 @@ VALID_TIME_RANGES = {"day", "week", "month"}
 DEFAULT_TIME_RANGE = "day"
 BASE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_LOG_FILE = str(BASE_DIR / "logs" / "job_informer.log")
+DEFAULT_UNWANTED_KEYWORDS = (
+    "intern,internship,praktikant,praktikum,werkstudent,working student,"
+    "student assistant,student helper,studentenjob,thesis,masterarbeit,masterthesis,"
+    "bachelorarbeit,bachelorthesis,dissertation,doctoral,phd student,trainee,traineeship,"
+    "ausbildung,duales studium,research assistant,hiwi"
+)
 
 
 @dataclass
@@ -50,6 +56,14 @@ class Config:
     # AI Analysis Configuration
     openai_api_key: str
     openai_model: str
+    ai_purge_min_confidence: float
+    ai_purge_max_ratio: float
+    ai_purge_max_jobs: int
+    llm_timeout_seconds: float
+    llm_max_retries: int
+    llm_retry_base_delay: float
+    llm_retry_max_delay: float
+    llm_retry_jitter: float
     
     # Description Parser Configuration
     enable_description_parser: bool
@@ -58,6 +72,8 @@ class Config:
     desc_parser_batch_size: int
     desc_parser_max_batches: int
     desc_parser_version: int
+    desc_parser_min_chars: int
+    desc_parser_max_chars: int
     desc_parser_dry_run: bool
     desc_parser_concurrency: int
     scrape_descriptions_on_search: bool
@@ -98,6 +114,18 @@ class Config:
                 return DEFAULT_TIME_RANGE
             return value
 
+        def _get_float(name: str, default: str) -> float:
+            try:
+                return float(os.getenv(name, default))
+            except (TypeError, ValueError):
+                return float(default)
+
+        def _get_int(name: str, default: str) -> int:
+            try:
+                return int(os.getenv(name, default))
+            except (TypeError, ValueError):
+                return int(default)
+
         return cls(
             # Email Configuration
             smtp_server=os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
@@ -110,8 +138,8 @@ class Config:
             search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Scientist, Data Analyst, AI Engineer'),
             search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
             search_time_range=_get_time_range('SEARCH_TIME_RANGE', DEFAULT_TIME_RANGE),
-            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', 'professor,traineeship,mitarbeiter,e-commerce,manager,adobe,abschluss,geo,volon,scrum,portfolio,financial,governance,labor,bestand,mergers,commodity,steuer,solution architect,finanzbuchhalter,projektmanager,gesundheit,laborant,logistikassistent,assistent,finanzbuchalter,reliability,Software Entwickler:in,Softwareingenieur,software engineer,solutions engineer,Gesundheitswissenschaftler,treasury,bioinformatiker,biologe,equity,retail,lehrkraft,cyber,creator,pwc,deloitte,auditor,phd,befristet,risk,compliance,public sector,microsoft,skillfinder,slurm,supplier,emat,praxis,operator,quality,medical,referent,last minute,assetmanagement,vermessungstechnikerin,powerbi,financial risk,vertriebssteuerung,ux designer,pricing,akademische/r,president,c++,devops,regulatory,assistent:in,projektkoordinator:in,cash,pay,sharepoint,teamlead,credit,sas,ontologien,photonics,convince,forensic,real estate,visual,opportunities,credit risk,life science,50%,produktmanager,produktbetreuer,kontakt-center,ce learning,kernel,think tank,aktuar,system,programmmanager,mathematiker,hr,gis,praktikant,geography,underwriter,controller,ausbildung,hilfskraft,wiss.,Ingenieur,Research assistant,Pflichtpraktikum,Akademische:r,Studien-/Abschlussarbeit,bachelor,data collection,wissenschaflicher,chair,threat,mapping,postdoctoral,power bi,hackers,masterthesis,masterarbeit,pharmaberater,abiturientenprogramm,biologist,customer,logistics,teilzeit,founders,D365,365,MSD365,founding,client,nebenberufliche*n,programme,executive,representative,energy,operations,talent,claims,application,entwicklungsingenieur,creative,sap,test,network,director,researcher,production,product,rwe,support,teil-,risikocontrolling,coordinator,crm,planner,risikomanagement,programm,abiturientenprogramm,security,produktionsplaner,supervisor,pharma,paralegal,Sicherheitstechniker,founder,head,working student,frontend developer,backend developer,techniker,planer,nebenberuflich,full stack developer,lead developer,dual,duales,studium,controlling,berater,abitur,praktikum,marketing manager,project manager,sales manager,verkäufer,internship,sales,freelance,werkstudent,intern,trainee,thesis,student,part-time,lecturer,tester'),
-            unwanted_companies=os.getenv('UNWANTED_COMPANIES', 'ey,mycareernow GmbH,universität,pwc,deloitte,nachhilfeunterricht'),
+            unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', DEFAULT_UNWANTED_KEYWORDS),
+            unwanted_companies=os.getenv('UNWANTED_COMPANIES', ''),
             
             # Scraping Configuration
             request_delay=float(os.getenv('REQUEST_DELAY', '2.0')),
@@ -132,6 +160,14 @@ class Config:
             # AI Analysis Configuration
             openai_api_key=os.getenv('OPENAI_API_KEY', ''),
             openai_model=os.getenv('OPENAI_MODEL', 'gpt-5-mini'),
+            ai_purge_min_confidence=_get_float('AI_PURGE_MIN_CONFIDENCE', '0.75'),
+            ai_purge_max_ratio=_get_float('AI_PURGE_MAX_RATIO', '0.35'),
+            ai_purge_max_jobs=_get_int('AI_PURGE_MAX_JOBS', '0'),
+            llm_timeout_seconds=_get_float('LLM_TIMEOUT_SECONDS', '45'),
+            llm_max_retries=_get_int('LLM_MAX_RETRIES', '3'),
+            llm_retry_base_delay=_get_float('LLM_RETRY_BASE_DELAY', '0.75'),
+            llm_retry_max_delay=_get_float('LLM_RETRY_MAX_DELAY', '8.0'),
+            llm_retry_jitter=_get_float('LLM_RETRY_JITTER', '0.2'),
             
             # Description Parser Configuration
             enable_description_parser=_get_bool('ENABLE_DESCRIPTION_PARSER', 'true'),
@@ -154,13 +190,15 @@ class Config:
                 '  "years_experience_min": 0,\n'
                 '  "location": ["city in germany"],\n'
                 '  "salary_eur_range": {"min": null, "max": null},\n'
-                '  "extra benefits": "[flexible hours, deutschlandticket, gym, ...]",\n'
+                '  "extra benefits": ["flexible hours", "deutschlandticket", "gym", "..."],\n'
                 '  "summary": "1-2 sentences, max 30 words"\n'
                 '}'
             )),
-                desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '25')),
+            desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '25')),
             desc_parser_max_batches=int(os.getenv('DESC_PARSER_MAX_BATCHES', '10')),
             desc_parser_version=int(os.getenv('DESC_PARSER_VERSION', '1')),
+            desc_parser_min_chars=_get_int('DESC_PARSER_MIN_CHARS', '80'),
+            desc_parser_max_chars=_get_int('DESC_PARSER_MAX_CHARS', '12000'),
             desc_parser_dry_run=_get_bool('DESC_PARSER_DRY_RUN', 'false'),
             desc_parser_concurrency=int(os.getenv('DESC_PARSER_CONCURRENCY', '25')),
             scrape_descriptions_on_search=_get_bool('SCRAPE_DESCRIPTIONS', 'true'),
@@ -265,11 +303,21 @@ class Config:
             'log_file': self.log_file,
             'openai_api_key': '***HIDDEN***',  # Don't expose API key
             'openai_model': self.openai_model,
+            'ai_purge_min_confidence': self.ai_purge_min_confidence,
+            'ai_purge_max_ratio': self.ai_purge_max_ratio,
+            'ai_purge_max_jobs': self.ai_purge_max_jobs,
+            'llm_timeout_seconds': self.llm_timeout_seconds,
+            'llm_max_retries': self.llm_max_retries,
+            'llm_retry_base_delay': self.llm_retry_base_delay,
+            'llm_retry_max_delay': self.llm_retry_max_delay,
+            'llm_retry_jitter': self.llm_retry_jitter,
             'enable_description_parser': self.enable_description_parser,
             'desc_parser_model': self.desc_parser_model,
             'desc_parser_batch_size': self.desc_parser_batch_size,
             'desc_parser_max_batches': self.desc_parser_max_batches,
             'desc_parser_version': self.desc_parser_version,
+            'desc_parser_min_chars': self.desc_parser_min_chars,
+            'desc_parser_max_chars': self.desc_parser_max_chars,
             'desc_parser_dry_run': self.desc_parser_dry_run,
             'desc_parser_concurrency': self.desc_parser_concurrency,
             'scrape_descriptions_on_search': self.scrape_descriptions_on_search,

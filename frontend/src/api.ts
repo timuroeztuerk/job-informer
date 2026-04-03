@@ -1,6 +1,17 @@
-import type { DbSummary, Job, JobStats, JobsResponse, RunRequest, RunStatus, RunSummary } from "./types";
+import type {
+  DbSummary,
+  Job,
+  JobAnnotation,
+  JobAnnotationPriority,
+  JobAnnotationStatus,
+  JobStats,
+  JobsResponse,
+  RunRequest,
+  RunStatus,
+  RunSummary,
+} from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "/";
+export const API_BASE = import.meta.env.VITE_API_BASE || "/";
 const API_TOKEN = import.meta.env.VITE_API_TOKEN;
 
 function authHeaders(extra?: Record<string, string>): HeadersInit {
@@ -57,9 +68,29 @@ export interface JobsQuery {
   location?: string;
   source?: string;
   company?: string;
+  annotationStatus?: JobAnnotationStatus | "";
+  annotationPriority?: JobAnnotationPriority | "";
   dateFrom?: string;
   dateTo?: string;
-  sort?: "scraped_at_desc" | "scraped_at_asc" | "title_asc" | "title_desc";
+  sort?:
+    | "scraped_at_desc"
+    | "scraped_at_asc"
+    | "last_seen_desc"
+    | "last_seen_asc"
+    | "seen_count_desc"
+    | "seen_count_asc"
+    | "title_asc"
+    | "title_desc";
+}
+
+function normalizeDateStart(value?: string): string | undefined {
+  if (!value) return undefined;
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value;
+}
+
+function normalizeDateEnd(value?: string): string | undefined {
+  if (!value) return undefined;
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59` : value;
 }
 
 export async function fetchJobs(query: JobsQuery = {}): Promise<JobsResponse> {
@@ -71,10 +102,13 @@ export async function fetchJobs(query: JobsQuery = {}): Promise<JobsResponse> {
       location: query.location,
       source: query.source,
       company: query.company,
-      date_from: query.dateFrom,
-      date_to: query.dateTo,
+      annotation_status: query.annotationStatus,
+      annotation_priority: query.annotationPriority,
+      date_from: normalizeDateStart(query.dateFrom),
+      date_to: normalizeDateEnd(query.dateTo),
       sort: query.sort,
-    })
+    }),
+    { headers: authHeaders() }
   );
   return handleJson<JobsResponse>(res);
 }
@@ -93,6 +127,15 @@ export async function deleteJob(jobId: string): Promise<void> {
     const text = await res.text();
     throw new Error(text || `Delete failed with status ${res.status}`);
   }
+}
+
+export async function updateJobAnnotation(jobId: string, payload: JobAnnotation): Promise<JobAnnotation> {
+  const res = await fetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/annotation`), {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  return handleJson<JobAnnotation>(res);
 }
 
 export async function fetchStats(): Promise<JobStats> {

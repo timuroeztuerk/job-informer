@@ -152,6 +152,135 @@ def _safe_avg(values: list[float]) -> float | None:
         return None
     return sum(values) / len(values)
 
+
+def _normalize_token(value: Any) -> str:
+    clean = " ".join(str(value).strip().split())
+    if not clean:
+        return ""
+    lower_clean = clean.lower()
+    if lower_clean in {"unspecified", "none", "null", "nan"}:
+        return ""
+    return lower_clean
+
+
+def _increment_counter(counter: Counter[str], values: Any) -> None:
+    if values is None:
+        return
+
+    if isinstance(values, list):
+        candidates = values
+    else:
+        candidates = [values]
+
+    for candidate in candidates:
+        token = _normalize_token(candidate)
+        if token:
+            counter[token] += 1
+
+
+def _load_jobs_with_dates(db: JobDatabase) -> pd.DataFrame:
+    try:
+        with db._get_connection() as conn:  # noqa: SLF001
+            jobs_df = pd.read_sql_query(
+                """
+                SELECT
+                    job_id,
+                    title,
+                    company,
+                    location,
+                    source,
+                    COALESCE(scraped_at, created_at) AS observed_at
+                FROM jobs
+                """,
+                conn,
+            )
+    except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
+        logger.warning(f"Could not load jobs for summary: {exc}")
+        return pd.DataFrame()
+
+    if jobs_df.empty:
+        return jobs_df
+
+    jobs_df["observed_at"] = pd.to_datetime(jobs_df["observed_at"], errors="coerce")
+    jobs_df = jobs_df.dropna(subset=["observed_at"]).copy()
+    return jobs_df
+
+
+def _load_latest_parsed_rows(db: JobDatabase) -> pd.DataFrame:
+    try:
+        with db._get_connection() as conn:  # noqa: SLF001
+            parsed_df = pd.read_sql_query(
+                """
+                SELECT
+                    ranked.job_id,
+                    ranked.payload_json,
+                    ranked.version,
+                    ranked.created_at,
+                    ranked.company,
+                    ranked.location,
+                    ranked.source,
+                    ranked.observed_at
+                FROM (
+                    SELECT
+                        p.job_id,
+                        p.payload_json,
+                        p.version,
+                        p.created_at,
+                        j.company,
+                        j.location,
+                        j.source,
+                        COALESCE(j.scraped_at, j.created_at) AS observed_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY p.job_id
+                            ORDER BY
+                                p.version DESC,
+                                datetime(p.created_at) DESC,
+                                p.rowid DESC
+                        ) AS row_num
+                    FROM parsed_descriptions p
+                    INNER JOIN jobs j ON j.job_id = p.job_id
+                ) ranked
+                WHERE ranked.row_num = 1
+                """,
+                conn,
+            )
+    except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
+        logger.warning(f"Could not load parsed descriptions for summary: {exc}")
+        return pd.DataFrame()
+
+    if parsed_df.empty:
+        return parsed_df
+
+    parsed_df["observed_at"] = pd.to_datetime(parsed_df["observed_at"], errors="coerce")
+    return parsed_df.dropna(subset=["observed_at"]).copy()
+
+
+def _week_start(series: pd.Series) -> pd.Series:
+    normalized = pd.to_datetime(series, errors="coerce").dt.normalize()
+    return normalized - pd.to_timedelta(normalized.dt.weekday, unit="D")
+
+
+def _rank_momentum(counter_recent: Counter[str], counter_previous: Counter[str], *, limit: int = 5) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for name in set(counter_recent) | set(counter_previous):
+        recent_count = int(counter_recent.get(name, 0))
+        previous_count = int(counter_previous.get(name, 0))
+        delta = recent_count - previous_count
+        if recent_count <= 0 or delta <= 0:
+            continue
+        ranked.append(
+            {
+                "name": name,
+                "recent_count": recent_count,
+                "previous_count": previous_count,
+                "delta": delta,
+            }
+        )
+
+    ranked.sort(key=lambda item: (item["delta"], item["recent_count"], item["name"]), reverse=True)
+    return ranked[:limit]
+
+
 SENIOR_LABELS = {"senior", "lead", "principal"}
 
 
@@ -179,25 +308,7 @@ def compute_parsed_insights(db: JobDatabase, *, total_jobs: int | None = None, p
         "salary_eur": {"count": 0, "average": None, "min": None, "max": None},
     }
 
-    try:
-        with db._get_connection() as conn:  # noqa: SLF001
-            parsed_df = pd.read_sql_query(
-                """
-                SELECT p.job_id, p.payload_json, p.version
-                FROM parsed_descriptions p
-                INNER JOIN (
-                    SELECT job_id, MAX(version) as max_version
-                    FROM parsed_descriptions
-                    GROUP BY job_id
-                ) latest ON p.job_id = latest.job_id AND p.version = latest.max_version
-                INNER JOIN jobs j ON j.job_id = p.job_id
-                """,
-                conn,
-            )
-    except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
-        logger.warning(f"Could not load parsed descriptions for summary: {exc}")
-        return insights
-
+    parsed_df = _load_latest_parsed_rows(db)
     if parsed_df.empty:
         return insights
 
@@ -223,17 +334,9 @@ def compute_parsed_insights(db: JobDatabase, *, total_jobs: int | None = None, p
         except json.JSONDecodeError:
             continue
 
-        for lang in data.get("programming_languages") or []:
-            if lang and str(lang).strip():
-                programming_languages[str(lang)] += 1
-
-        for skill in data.get("skills") or []:
-            if skill and str(skill).strip():
-                skills[str(skill)] += 1
-
-        for tool in data.get("tools") or []:
-            if tool and str(tool).strip():
-                tools[str(tool)] += 1
+        _increment_counter(programming_languages, data.get("programming_languages"))
+        _increment_counter(skills, data.get("skills"))
+        _increment_counter(tools, data.get("tools"))
 
         seniority = data.get("seniority")
         if seniority and seniority != "unspecified":
@@ -250,9 +353,7 @@ def compute_parsed_insights(db: JobDatabase, *, total_jobs: int | None = None, p
         if remote_value and remote_value != "unspecified":
             remote_options[str(remote_value)] += 1
 
-        for lang in data.get("languages") or []:
-            if lang and str(lang).strip():
-                languages[str(lang)] += 1
+        _increment_counter(languages, data.get("languages"))
 
         for field in normalize_degree_fields(data.get("degree_field")):
             if field:
@@ -377,6 +478,186 @@ def compute_city_summary(db: JobDatabase) -> dict:
     return summary
 
 
+def compute_observation_summary(db: JobDatabase) -> dict:
+    """Summarize repeated sightings and posting longevity."""
+    summary: dict[str, Any] = {
+        "total_observations": 0,
+        "repeat_jobs": 0,
+        "average_seen_count": None,
+        "max_seen_count": 0,
+        "top_recurring_jobs": [],
+    }
+
+    try:
+        with db._get_connection() as conn:  # noqa: SLF001
+            jobs_df = pd.read_sql_query(
+                """
+                SELECT
+                    job_id,
+                    title,
+                    company,
+                    first_seen_at,
+                    last_seen_at,
+                    COALESCE(seen_count, 1) AS seen_count
+                FROM jobs
+                """,
+                conn,
+            )
+    except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
+        logger.warning(f"Could not load observation data for summary: {exc}")
+        return summary
+
+    if jobs_df.empty:
+        return summary
+
+    jobs_df["first_seen_at"] = pd.to_datetime(jobs_df["first_seen_at"], errors="coerce")
+    jobs_df["last_seen_at"] = pd.to_datetime(jobs_df["last_seen_at"], errors="coerce")
+    jobs_df["seen_count"] = pd.to_numeric(jobs_df["seen_count"], errors="coerce").fillna(1).clip(lower=1)
+    jobs_df["active_days"] = (
+        (jobs_df["last_seen_at"] - jobs_df["first_seen_at"]).dt.days.fillna(0).clip(lower=0) + 1
+    )
+
+    seen_counts = jobs_df["seen_count"]
+    summary["repeat_jobs"] = int((seen_counts > 1).sum())
+    summary["average_seen_count"] = float(seen_counts.mean()) if not seen_counts.empty else None
+    summary["max_seen_count"] = int(seen_counts.max()) if not seen_counts.empty else 0
+
+    try:
+        with db._get_connection() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT COUNT(*) FROM job_observations").fetchone()
+            summary["total_observations"] = int(row[0]) if row else 0
+    except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
+        logger.warning(f"Could not count job observations for summary: {exc}")
+
+    recurring = jobs_df.sort_values(
+        by=["seen_count", "active_days", "last_seen_at"],
+        ascending=[False, False, False],
+    ).head(5)
+    summary["top_recurring_jobs"] = [
+        {
+            "job_id": str(row["job_id"]),
+            "title": str(row["title"]),
+            "company": str(row["company"]),
+            "seen_count": int(row["seen_count"]),
+            "active_days": int(row["active_days"]),
+            "first_seen_at": row["first_seen_at"].isoformat() if not pd.isna(row["first_seen_at"]) else None,
+            "last_seen_at": row["last_seen_at"].isoformat() if not pd.isna(row["last_seen_at"]) else None,
+        }
+        for _, row in recurring.iterrows()
+    ]
+    return summary
+
+
+def compute_trend_summary(db: JobDatabase, *, window_days: int = 30, week_buckets: int = 12) -> dict:
+    """Summarize recent market momentum and weekly job volume."""
+    summary: dict[str, Any] = {
+        "window_days": window_days,
+        "recent_window": {"start": None, "end": None, "jobs": 0},
+        "previous_window": {"start": None, "end": None, "jobs": 0},
+        "weekly_job_counts": [],
+        "momentum": {
+            "skills": [],
+            "tools": [],
+            "programming_languages": [],
+            "companies": [],
+            "cities": [],
+        },
+    }
+
+    jobs_df = _load_jobs_with_dates(db)
+    if jobs_df.empty:
+        return summary
+
+    parsed_df = _load_latest_parsed_rows(db)
+    latest_observed = jobs_df["observed_at"].max()
+    recent_start = latest_observed - pd.Timedelta(days=window_days)
+    previous_start = recent_start - pd.Timedelta(days=window_days)
+
+    recent_jobs = jobs_df.loc[jobs_df["observed_at"] >= recent_start].copy()
+    previous_jobs = jobs_df.loc[
+        (jobs_df["observed_at"] >= previous_start) & (jobs_df["observed_at"] < recent_start)
+    ].copy()
+
+    summary["recent_window"] = {
+        "start": recent_start.isoformat(),
+        "end": latest_observed.isoformat(),
+        "jobs": int(recent_jobs["job_id"].nunique()),
+    }
+    summary["previous_window"] = {
+        "start": previous_start.isoformat(),
+        "end": recent_start.isoformat(),
+        "jobs": int(previous_jobs["job_id"].nunique()),
+    }
+
+    current_week_start = _week_start(pd.Series([latest_observed])).iloc[0]
+    week_index = [current_week_start - pd.Timedelta(weeks=offset) for offset in range(week_buckets - 1, -1, -1)]
+
+    jobs_weekly = jobs_df.assign(week_start=_week_start(jobs_df["observed_at"]))
+    jobs_by_week = jobs_weekly.groupby("week_start")["job_id"].nunique().to_dict()
+
+    parsed_by_week: dict[pd.Timestamp, int] = {}
+    if not parsed_df.empty:
+        parsed_weekly = parsed_df.assign(week_start=_week_start(parsed_df["observed_at"]))
+        parsed_by_week = parsed_weekly.groupby("week_start")["job_id"].nunique().to_dict()
+
+    summary["weekly_job_counts"] = [
+        {
+            "week_start": week_start.isoformat(),
+            "jobs": int(jobs_by_week.get(week_start, 0)),
+            "parsed_jobs": int(parsed_by_week.get(week_start, 0)),
+        }
+        for week_start in week_index
+    ]
+
+    company_recent = Counter(_normalize_token(value) for value in recent_jobs["company"] if _normalize_token(value))
+    company_previous = Counter(
+        _normalize_token(value) for value in previous_jobs["company"] if _normalize_token(value)
+    )
+    city_recent = Counter(extract_primary_city(value) for value in recent_jobs["location"] if value)
+    city_previous = Counter(extract_primary_city(value) for value in previous_jobs["location"] if value)
+
+    summary["momentum"]["companies"] = _rank_momentum(company_recent, company_previous)
+    summary["momentum"]["cities"] = _rank_momentum(city_recent, city_previous)
+
+    if parsed_df.empty:
+        return summary
+
+    recent_parsed = parsed_df.loc[parsed_df["observed_at"] >= recent_start]
+    previous_parsed = parsed_df.loc[
+        (parsed_df["observed_at"] >= previous_start) & (parsed_df["observed_at"] < recent_start)
+    ]
+
+    skill_recent: Counter[str] = Counter()
+    skill_previous: Counter[str] = Counter()
+    tool_recent: Counter[str] = Counter()
+    tool_previous: Counter[str] = Counter()
+    language_recent: Counter[str] = Counter()
+    language_previous: Counter[str] = Counter()
+
+    for _, row in recent_parsed.iterrows():
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError:
+            continue
+        _increment_counter(skill_recent, payload.get("skills"))
+        _increment_counter(tool_recent, payload.get("tools"))
+        _increment_counter(language_recent, payload.get("programming_languages"))
+
+    for _, row in previous_parsed.iterrows():
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError:
+            continue
+        _increment_counter(skill_previous, payload.get("skills"))
+        _increment_counter(tool_previous, payload.get("tools"))
+        _increment_counter(language_previous, payload.get("programming_languages"))
+
+    summary["momentum"]["skills"] = _rank_momentum(skill_recent, skill_previous)
+    summary["momentum"]["tools"] = _rank_momentum(tool_recent, tool_previous)
+    summary["momentum"]["programming_languages"] = _rank_momentum(language_recent, language_previous)
+    return summary
+
+
 def build_db_summary(db: JobDatabase) -> dict:
     """Assemble a structured DB summary for API/CLI consumers."""
     base = db.get_job_summary()
@@ -390,6 +671,9 @@ def build_db_summary(db: JobDatabase) -> dict:
         },
         "jobs_by_source": base.get("jobs_by_source", {}),
         "top_companies": base.get("top_companies", {}),
+        "observation_stats": base.get("observation_stats", {}),
+        "observation_summary": compute_observation_summary(db),
+        "profile_fit_summary": db.get_fit_summary(),
         "parsed_descriptions_stats": base.get("parsed_descriptions_stats", {}),
         "parsed_insights": compute_parsed_insights(
             db,
@@ -397,4 +681,5 @@ def build_db_summary(db: JobDatabase) -> dict:
             parsed_stats=parsed_stats,
         ),
         "city_summary": compute_city_summary(db),
+        "trend_summary": compute_trend_summary(db),
     }

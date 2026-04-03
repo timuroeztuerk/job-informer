@@ -7,13 +7,19 @@ while still exercising the same behaviours that were covered before.
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from tempfile import TemporaryDirectory
 
 import pandas as pd
 
+from ..agents.parser import DescriptionTools, JobDescriptionStructure
 from . import data_utils
+from . import filtering
+from . import profile_fit
+from .database import JobDatabase
+from .llm_connection import LLMConnection
 
 
 class TestDataCleaningUtilities(unittest.TestCase):
@@ -73,11 +79,21 @@ class TestDataCleaningUtilities(unittest.TestCase):
 
         # Highest score should be the title containing the keyword
         scored = df.copy()
-        scored["relevance_score"] = scored["title"].str.lower().str.count(r"\\bdata\\b")
+        scored["relevance_score"] = scored["title"].str.lower().str.count(r"\bdata\b")
         scored = scored.sort_values("relevance_score", ascending=False).reset_index(drop=True)
 
         self.assertEqual(scored.iloc[0]["title"], "Senior Data Scientist")
         self.assertGreater(scored.iloc[0]["relevance_score"], scored.iloc[-1]["relevance_score"])
+
+    def test_should_filter_study_title_detects_student_roles(self) -> None:
+        self.assertTrue(filtering.should_filter_study_title("Machine Learning Internship"))
+        self.assertTrue(filtering.should_filter_study_title("Working Student Data Science"))
+        self.assertTrue(filtering.should_filter_study_title("Master Thesis in AI"))
+
+    def test_should_filter_study_title_keeps_adjacent_technical_roles(self) -> None:
+        self.assertFalse(filtering.should_filter_study_title("Software Engineer, AI Platform"))
+        self.assertFalse(filtering.should_filter_study_title("Data Engineer"))
+        self.assertFalse(filtering.should_filter_study_title("Contract Data Scientist"))
 
 class TestSummaryAndExportUtilities(unittest.TestCase):
     """Tests focused on summary generation and export helpers."""
@@ -174,6 +190,260 @@ class TestSalaryAndIdentityUtilities(unittest.TestCase):
         keys = data_utils.build_normalized_keys(df)
 
         self.assertListEqual(keys.tolist(), ["indeed|engineer|acme"])
+
+
+class TestObservationHistory(unittest.TestCase):
+    """Tests for repeated job sightings and observation storage."""
+
+    def test_put_into_sql_records_repeat_observations_without_duplicate_jobs(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "jobs.db")
+            db = JobDatabase(db_path=db_path)
+
+            first_seen = "2026-04-01T08:00:00"
+            second_seen = "2026-04-03T08:00:00"
+            job_frame = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:123",
+                        "title": "Data Scientist",
+                        "company": "ACME",
+                        "location": "Berlin",
+                        "source": "LinkedIn",
+                        "url": "https://www.linkedin.com/jobs/view/123/",
+                        "salary": "Not specified",
+                        "description": "Work on models.",
+                    }
+                ]
+            )
+
+            inserted_first = db.put_into_sql(job_frame, observed_at=first_seen)
+            inserted_second = db.put_into_sql(job_frame, observed_at=second_seen)
+
+            self.assertEqual(inserted_first, 1)
+            self.assertEqual(inserted_second, 0)
+
+            with db._get_connection() as conn:  # noqa: SLF001
+                conn.row_factory = None
+                job_row = conn.execute(
+                    """
+                    SELECT scraped_at, first_seen_at, last_seen_at, seen_count
+                    FROM jobs
+                    WHERE job_id = ?
+                    """,
+                    ("linkedin:123",),
+                ).fetchone()
+                observation_count = conn.execute(
+                    "SELECT COUNT(*) FROM job_observations WHERE job_id = ?",
+                    ("linkedin:123",),
+                ).fetchone()[0]
+
+            self.assertEqual(job_row[0], first_seen)
+            self.assertEqual(job_row[1], first_seen)
+            self.assertEqual(job_row[2], second_seen)
+            self.assertEqual(job_row[3], 2)
+            self.assertEqual(observation_count, 2)
+
+    def test_job_summary_includes_observation_stats(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "jobs.db")
+            db = JobDatabase(db_path=db_path)
+            frame = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:999",
+                        "title": "ML Engineer",
+                        "company": "Beta",
+                        "location": "Remote",
+                        "source": "LinkedIn",
+                        "url": "https://www.linkedin.com/jobs/view/999/",
+                        "salary": "Not specified",
+                        "description": "",
+                    }
+                ]
+            )
+
+            db.put_into_sql(frame, observed_at="2026-04-01T09:00:00")
+            db.put_into_sql(frame, observed_at="2026-04-02T09:00:00")
+            summary = db.get_job_summary()
+
+            observation_stats = summary["observation_stats"]
+            self.assertEqual(observation_stats["total_observations"], 2)
+            self.assertEqual(observation_stats["repeat_jobs"], 1)
+            self.assertEqual(observation_stats["max_seen_count"], 2)
+
+
+class TestProfileFitScoring(unittest.TestCase):
+    """Tests for profile-fit ranking and persistence."""
+
+    def test_score_job_fit_prioritizes_data_scientist_with_llm_signal(self) -> None:
+        result = profile_fit.score_job_fit(
+            {
+                "title": "Senior Data Scientist, Generative AI",
+                "company": "ACME",
+                "location": "Berlin, Germany",
+                "description": "Build LLM and RAG systems for analytics workflows.",
+            },
+            parsed_payload={
+                "seniority": "senior",
+                "skills": ["machine learning", "llm", "statistics"],
+                "tools": ["python", "sql"],
+                "summary": "LLM-focused data scientist role",
+            },
+        )
+
+        self.assertEqual(result["band"], "high")
+        self.assertGreaterEqual(result["score"], 75.0)
+        self.assertTrue(result["signals"]["llm_match"])
+
+    def test_score_job_fit_zeros_consulting_roles(self) -> None:
+        result = profile_fit.score_job_fit(
+            {
+                "title": "AI Consultant",
+                "company": "Deloitte",
+                "location": "Munich, Germany",
+                "description": "Advise enterprise clients on AI transformation.",
+            }
+        )
+
+        self.assertEqual(result["band"], "zero")
+        self.assertEqual(result["score"], 0.0)
+        self.assertEqual(result["signals"]["excluded_reason"], "excluded_company")
+
+    def test_score_job_fit_zeros_principal_titles_even_if_payload_says_senior(self) -> None:
+        result = profile_fit.score_job_fit(
+            {
+                "title": "Principal Applied Scientist, Search/NLP",
+                "company": "ACME",
+                "location": "Berlin, Germany",
+                "description": "Drive applied NLP and retrieval systems.",
+            },
+            parsed_payload={
+                "seniority": "senior",
+                "skills": ["nlp", "retrieval", "machine learning"],
+            },
+        )
+
+        self.assertEqual(result["band"], "zero")
+        self.assertEqual(result["score"], 0.0)
+        self.assertEqual(result["signals"]["excluded_reason"], "excluded_seniority")
+
+    def test_put_into_sql_persists_fit_scores(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "jobs.db")
+            db = JobDatabase(db_path=db_path)
+            frame = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:fit-1",
+                        "title": "Data Scientist, LLM Applications",
+                        "company": "ACME",
+                        "location": "Berlin, Germany",
+                        "source": "LinkedIn",
+                        "url": "https://www.linkedin.com/jobs/view/fit-1/",
+                        "salary": "Not specified",
+                        "description": "Own LLM and generative AI use cases.",
+                    }
+                ]
+            )
+
+            db.put_into_sql(frame, observed_at="2026-04-05T09:00:00")
+            fit = db.get_job_fit("linkedin:fit-1")
+
+            self.assertIsNotNone(fit)
+            assert fit is not None
+            self.assertGreaterEqual(fit["score"], 70.0)
+            self.assertIn(fit["band"], {"high", "medium"})
+
+
+class _FakeStructuredLLM:
+    api_key = "test-key"
+
+    def __init__(self, payload: str):
+        self.payload = payload
+
+    def generate_structured(self, prompt, response_model, *, system=None, temperature=0.0, max_tokens=2048):
+        return self.payload
+
+
+class TestDescriptionParserFallbacks(unittest.TestCase):
+    """Tests for parser fallback normalization when the LLM returns raw JSON."""
+
+    def test_job_description_structure_accepts_missing_salary_and_string_benefits(self) -> None:
+        result = JobDescriptionStructure.model_validate(
+            {
+                "seniority": "senior",
+                "summary": "Work across BI and product teams.",
+                "extra benefits": "training academy, childcare support, diversity focus, team culture",
+            }
+        )
+
+        payload = result.model_dump(by_alias=True)
+        self.assertIsNone(payload["salary_eur_min"])
+        self.assertIsNone(payload["salary_eur_max"])
+        self.assertEqual(
+            payload["extra benefits"],
+            ["training academy", "childcare support", "diversity focus", "team culture"],
+        )
+
+    def test_call_llm_normalizes_raw_json_string_result(self) -> None:
+        parser = object.__new__(DescriptionTools)
+        parser.prompt = ""
+        parser.llm = _FakeStructuredLLM(
+            (
+                '{"seniority":"senior","summary":"International role in Berlin.",'
+                '"extra benefits":"[remote flexibility, parental leave, accessibility accommodations]"}'
+            )
+        )
+
+        result = parser._call_llm(
+            "Own LLM and analytics workflows.",
+            job_id="linkedin:test-1",
+            title="Senior Data Scientist",
+            company="ACME",
+        )
+
+        self.assertIsNotNone(result)
+        payload = json.loads(result)
+        self.assertEqual(
+            payload["extra benefits"],
+            ["remote flexibility", "parental leave", "accessibility accommodations"],
+        )
+        self.assertEqual(payload["salary_eur_range"], {"min": None, "max": None})
+
+
+class _FakeLLMMessage:
+    def __init__(self, content=None, refusal=None):
+        self.content = content
+        self.refusal = refusal
+
+
+class _FakeLLMChoice:
+    def __init__(self, message):
+        self.message = message
+
+
+class _FakeLLMResponse:
+    def __init__(self, message):
+        self.choices = [_FakeLLMChoice(message)]
+
+
+class TestLLMConnectionHelpers(unittest.TestCase):
+    """Tests for low-level LLM response normalization helpers."""
+
+    def test_extract_message_content_supports_content_blocks(self) -> None:
+        llm = object.__new__(LLMConnection)
+        response = _FakeLLMResponse(
+            _FakeLLMMessage(
+                content=[
+                    {"type": "output_text", "text": '{"summary":"hello"}'},
+                    {"type": "ignored", "text": "should not be used"},
+                ]
+            )
+        )
+
+        content = llm._extract_message_content(response)
+        self.assertEqual(content, '{"summary":"hello"}')
 
 
 if __name__ == "__main__":  # pragma: no cover - module level execution guard

@@ -22,7 +22,12 @@ from ..config.settings import Config, DEFAULT_TIME_RANGE
 from ..utils.database import JobDatabase
 from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url, remove_historical_duplicates
 from ..utils.terminal_utils import _sleep_with_feedback, _print_progress, _progress_bar, _sleep_quiet
-from ..utils.filtering import normalize_text, should_filter_by_keywords, should_filter_by_company
+from ..utils.filtering import (
+    normalize_text,
+    should_filter_by_company,
+    should_filter_by_keywords,
+    should_filter_study_title,
+)
 
 TIME_RANGE_TO_SECONDS = {
     "day": 24 * 60 * 60,
@@ -100,13 +105,25 @@ class ScraperSource:
         self.stats.consecutive_failures += 1
         self.stats.last_status = status_code
         self.stats.last_error = message
+        cooldown_seconds = self._failure_backoff_seconds(status_code)
+        challenge_hint = ""
+        if (
+            self.display_name.lower() == "indeed"
+            and status_code == 403
+            and message
+            and any(token in message.lower() for token in ("security check", "captcha", "challenge"))
+        ):
+            cooldown_seconds = max(cooldown_seconds, 30 * 60)
+            challenge_hint = " Security challenge detected; session cookies may be stale or insufficient."
         if status_code in (403, 429, 999):
             logger.warning(
-                "{} blocked (status={}); entering source cooldown.",
+                "{} blocked (status={}); entering source cooldown for {:.0f}s.{}",
                 self.display_name,
                 status_code,
+                cooldown_seconds,
+                challenge_hint,
             )
-        self.stats.blocked_until_ts = time.time() + self._failure_backoff_seconds(status_code)
+        self.stats.blocked_until_ts = time.time() + cooldown_seconds
 
     def mark_network_failure(self, exc: Exception) -> None:
         self.stats.consecutive_failures += 1
@@ -116,7 +133,7 @@ class ScraperSource:
 
     def request(self, url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
         if self.is_in_cooldown:
-            logger.warning(
+            logger.info(
                 "{} is currently in cooldown ({:.1f}s left); skipping request.",
                 self.display_name,
                 self.cooldown_remaining,
@@ -904,6 +921,10 @@ class JobScraper:
         unwanted = self.config.get_unwanted_keywords_list()
         return should_filter_by_keywords(title, unwanted)
 
+    def _should_filter_study_title(self, title: str) -> bool:
+        """Detect internship/thesis/student-style titles that should be hard filtered."""
+        return should_filter_study_title(title)
+
     def _should_filter_by_company(self, company: str) -> bool:
         """Centralized company filtering logic."""
         try:
@@ -1079,7 +1100,7 @@ class JobScraper:
             time.sleep(max(0.3, self.config.request_delay))
             self._update_progress(idx + 1, len(candidates), prefix="Description fetch: ")
 
-        logger.info("Fetched descriptions for %d/%d scraped jobs", fetched, len(candidates))
+        logger.info("Fetched descriptions for {}/{} scraped jobs", fetched, len(candidates))
         return fetched
 
     def _parse_scraped_jobs(self, jobs_df: pd.DataFrame) -> int:
@@ -1109,16 +1130,17 @@ class JobScraper:
         )
         return parsed
 
-    def _collect_fresh_jobs(
+    def _collect_observed_jobs(
         self,
         page_jobs: List[Dict],
         source: str,
         existing_keys: set,
-    ) -> Tuple[List[Dict], int, int]:
+    ) -> Tuple[List[Dict], List[Dict], int, int]:
         seen_keys: set = set()
         skipped_unwanted = 0
-        skipped_existing = 0
-        new_jobs: List[Dict] = []
+        existing_matches = 0
+        observed_jobs: List[Dict] = []
+        fresh_jobs: List[Dict] = []
 
         for j in page_jobs:
             if self.purge_keywords(j.get('title', '')) or self.purge_companies(j.get('company', '')):
@@ -1132,13 +1154,17 @@ class JobScraper:
             )
             if not key:
                 continue
-            if key in existing_keys or key in seen_keys:
-                skipped_existing += 1
+            if key in seen_keys:
                 continue
             seen_keys.add(key)
-            new_jobs.append(j)
+            job_payload = dict(j)
+            observed_jobs.append(job_payload)
+            if key in existing_keys:
+                existing_matches += 1
+            else:
+                fresh_jobs.append(job_payload)
 
-        return new_jobs, skipped_unwanted, skipped_existing
+        return observed_jobs, fresh_jobs, skipped_unwanted, existing_matches
 
     def scrape_linkedin(self, keywords: str, location: str) -> List[Dict]:
         """Scrape job postings from LinkedIn public listings with pagination and optional descriptions.
@@ -1187,7 +1213,7 @@ class JobScraper:
         existing_keys = self._get_existing_normalized_keys()
 
         try:
-            jobs, skipped_unwanted, skipped_existing = self._collect_fresh_jobs(
+            jobs, fresh_jobs, skipped_unwanted, existing_matches = self._collect_observed_jobs(
                 page_jobs=page_jobs,
                 source='LinkedIn',
                 existing_keys=existing_keys,
@@ -1199,12 +1225,12 @@ class JobScraper:
                     prefix=f"LinkedIn {keywords} @ {location}",
                     current=1,
                     total=1,
-                    suffix=f"New:{len(jobs)} Unwanted:{skipped_unwanted} Existing:{skipped_existing}"
+                    suffix=f"Observed:{len(jobs)} Unwanted:{skipped_unwanted} Existing:{existing_matches}"
                 )
 
             for j in jobs:
                 j['description'] = ''
-            self._enrich_jobs_with_descriptions(jobs)
+            self._enrich_jobs_with_descriptions(fresh_jobs)
         except Exception as e:
             logger.error(f"Error scraping LinkedIn: {e}")
 
@@ -1253,7 +1279,7 @@ class JobScraper:
         existing_keys = self._get_existing_normalized_keys()
 
         try:
-            jobs, skipped_unwanted, skipped_existing = self._collect_fresh_jobs(
+            jobs, fresh_jobs, skipped_unwanted, existing_matches = self._collect_observed_jobs(
                 page_jobs=page_jobs,
                 source='Indeed',
                 existing_keys=existing_keys,
@@ -1264,12 +1290,12 @@ class JobScraper:
                     prefix=f"Indeed {keywords} @ {location}",
                     current=1,
                     total=1,
-                    suffix=f"New:{len(jobs)} Unwanted:{skipped_unwanted} Existing:{skipped_existing}"
+                    suffix=f"Observed:{len(jobs)} Unwanted:{skipped_unwanted} Existing:{existing_matches}"
                 )
 
             for j in jobs:
                 j['description'] = ''
-            self._enrich_jobs_with_descriptions(jobs)
+            self._enrich_jobs_with_descriptions(fresh_jobs)
         except Exception as e:
             logger.error(f"Error scraping Indeed: {e}")
 
@@ -1305,7 +1331,7 @@ class JobScraper:
                     if self.max_total_jobs and len(all_jobs) >= self.max_total_jobs:
                         stop_collecting = True
                         logger.debug(
-                            "Reached configured MAX_TOTAL_JOBS limit (%d); stopping further scraping",
+                            "Reached configured MAX_TOTAL_JOBS limit ({}); stopping further scraping",
                             self.max_total_jobs,
                         )
                         break
@@ -1327,7 +1353,7 @@ class JobScraper:
                     if self.max_total_jobs and len(all_jobs) >= self.max_total_jobs:
                         stop_collecting = True
                         logger.debug(
-                            "Reached configured MAX_TOTAL_JOBS limit (%d); stopping further scraping",
+                            "Reached configured MAX_TOTAL_JOBS limit ({}); stopping further scraping",
                             self.max_total_jobs,
                         )
                         break
@@ -1344,9 +1370,6 @@ class JobScraper:
             # Build job_ids vectorized and drop duplicates
             df['job_id'] = build_job_ids(df)
             df = df.drop_duplicates(subset=['job_id'], keep='first')
-            # Remove jobs that were found in previous runs
-            df = self.remove_historical_duplicates(df)
-            
         else:
             logger.warning("No jobs found")
             
@@ -1371,16 +1394,24 @@ class JobScraper:
 
         updates: List[Dict[str, str]] = []
         failures: List[str] = []
+        failure_counts_by_source: Dict[str, int] = {}
         total = len(masked)
+        checked = 0
+        consecutive_failures = 0
+        max_consecutive_failures = 8
         self._update_progress(0, total, prefix="Refetch titles: ")
 
         for idx, row in masked.iterrows():
             job_id = str(row.get('job_id'))
             url = str(row.get('url') or '').strip()
             source = str(row.get('source') or '').strip()
+            source_key = source or "unknown"
+            checked = idx + 1
 
             if not url:
                 failures.append(job_id)
+                failure_counts_by_source[source_key] = failure_counts_by_source.get(source_key, 0) + 1
+                consecutive_failures += 1
                 self._update_progress(idx + 1, total, prefix="Refetch titles: ")
                 continue
 
@@ -1405,20 +1436,34 @@ class JobScraper:
                     'location': location or '',
                     'normalized_key': normalized_key,
                 })
+                consecutive_failures = 0
             else:
                 failures.append(job_id)
+                failure_counts_by_source[source_key] = failure_counts_by_source.get(source_key, 0) + 1
+                consecutive_failures += 1
 
             time.sleep(max(0.5, self.config.request_delay))
             self._update_progress(idx + 1, total, prefix="Refetch titles: ")
 
+            if consecutive_failures >= max_consecutive_failures:
+                logger.warning(
+                    "Stopping title backfill early after {} consecutive failures (checked {} of {}).",
+                    consecutive_failures,
+                    checked,
+                    total,
+                )
+                break
+
         updated = self.db.update_titles_and_companies(updates) if updates else 0
         logger.info(
-            "Title/company backfill complete: checked %d, updated %d, failed %d",
-            total, updated, len(failures)
+            "Title/company backfill complete: checked {}, updated {}, failed {}",
+            checked, updated, len(failures)
         )
+        if failure_counts_by_source:
+            logger.info("Title/company backfill failures by source: {}", failure_counts_by_source)
         if failures and len(failures) <= 5:
-            logger.debug("Backfill failures for job_ids: %s", failures)
-        return {"checked": total, "updated": updated, "failed": len(failures)}
+            logger.debug("Backfill failures for job_ids: {}", failures)
+        return {"checked": checked, "updated": updated, "failed": len(failures)}
 
     def execute_job_search(self) -> bool:
         """Execute job search and persist results"""
@@ -1465,16 +1510,27 @@ class JobScraper:
                 return False
 
             # Store jobs in SQLite database (fast deduplication)
-            new_jobs_count = self.db.put_into_sql(jobs_df)
+            run_observed_at = pd.Timestamp.now().isoformat()
+            scrape_run_id = self.db.start_scrape_run(
+                mode="run-once",
+                keywords=keywords,
+                locations=locations,
+                observed_at=run_observed_at,
+            )
+            new_jobs_count = self.db.put_into_sql(
+                jobs_df,
+                scrape_run_id=scrape_run_id,
+                observed_at=run_observed_at,
+            )
             if new_jobs_count:
                 parsed_count = self._parse_scraped_jobs(jobs_df)
                 if parsed_count:
-                    logger.info("Parsed %d freshly scraped descriptions in this run", parsed_count)
+                    logger.info("Parsed {} freshly scraped descriptions in this run", parsed_count)
 
             if self.min_new_jobs_to_continue and new_jobs_count < self.min_new_jobs_to_continue:
                 self.last_run_threshold_hit = True
                 logger.info(
-                    "Found %d new jobs, below MIN_NEW_JOBS_TO_CONTINUE=%d; skipping further processing",
+                    "Found {} new jobs, below MIN_NEW_JOBS_TO_CONTINUE={}; skipping further processing",
                     new_jobs_count,
                     self.min_new_jobs_to_continue,
                 )
@@ -1484,12 +1540,13 @@ class JobScraper:
             csv_filename = None
             if not self.config.dry_run:
                 csv_filename = self.save_jobs_to_csv(jobs_df)
-                logger.info("Saved snapshot of scraped jobs to %s", csv_filename)
+                logger.info("Saved snapshot of scraped jobs to {}", csv_filename)
             else:
                 logger.info("DRY_RUN is enabled; skipping CSV save")
 
             logger.info(
-                "Scraping completed: %d new jobs stored%s",
+                "Scraping completed: {} observed jobs, {} new jobs stored{}",
+                len(jobs_df),
                 new_jobs_count,
                 f" (CSV saved to {csv_filename})" if csv_filename else ""
             )
@@ -1529,8 +1586,6 @@ class JobScraper:
         logger.info(f"Filtering {original_count} newly scraped jobs...")
         
         try:
-            import re as _re
-            
             # 1) Remove jobs matching unwanted keywords in TITLE with centralized logic
             unwanted_kw = self.config.get_unwanted_keywords_list()
             if unwanted_kw and 'title' in jobs_df.columns:
@@ -1543,23 +1598,14 @@ class JobScraper:
                 mask_keep = ~jobs_df['company'].apply(self._should_filter_by_company)
                 jobs_df = jobs_df[mask_keep]
             
-            # 3) Remove jobs with obvious part-time/internship indicators in title
+            # 3) Remove study-track roles such as internships, working-student, thesis, or trainee positions
             if 'title' in jobs_df.columns:
-                employment_indicators = [
-                    'part-time', 'part time', 'teilzeit',  # part-time variations
-                    'intern', 'internship', 'praktik',     # internship variations
-                    'contract', 'contractor', 'freiberufl', # contract variations
-                    'werkstudent', 'working student',       # student positions
-                    'trainee', 'ausbildung'                # trainee/apprenticeship
-                ]
-                # Use word boundary for more precise matching with non-capturing group
-                employment_pattern = r'\b(?:' + '|'.join(_re.escape(term) for term in employment_indicators) + r')\b'
-                mask_keep = ~jobs_df['title'].astype(str).str.contains(employment_pattern, case=False, na=False, regex=True)
                 before_employment_filter = len(jobs_df)
+                mask_keep = ~jobs_df['title'].apply(self._should_filter_study_title)
                 jobs_df = jobs_df[mask_keep]
                 employment_filtered = before_employment_filter - len(jobs_df)
                 if employment_filtered > 0:
-                    logger.info(f"Filtered out {employment_filtered} jobs with unwanted employment indicators in title")
+                    logger.info(f"Filtered out {employment_filtered} study-track jobs based on title")
             
             filtered_count = len(jobs_df)
             removed_count = original_count - filtered_count
@@ -1590,7 +1636,6 @@ class JobScraper:
             logger.info(f"Found {original_count} jobs in database")
 
             # 1) Remove jobs matching unwanted keywords in TITLE only with centralized logic
-            import re as _re
             unwanted_kw = self.config.get_unwanted_keywords_list()
             if unwanted_kw and 'title' in all_jobs_df.columns:
                 mask_title_unwanted = all_jobs_df['title'].apply(self._should_filter_by_keywords)
@@ -1606,12 +1651,12 @@ class JobScraper:
             else:
                 unwanted_by_company = all_jobs_df.iloc[0:0]
 
-            # 1.5) Remove jobs with part-time employment type from parsed descriptions
+            # 1.5) Remove internship/student-study roles identified from parsed descriptions
             import json
-            part_time_job_ids = set()
+            study_role_job_ids = set()
             try:
                 with self.db._get_connection() as conn:
-                    part_time_df = pd.read_sql_query("""
+                    parsed_jobs_df = pd.read_sql_query("""
                         SELECT DISTINCT j.job_id, j.title, j.company, p.payload_json
                         FROM jobs j
                         INNER JOIN parsed_descriptions p ON j.job_id = p.job_id
@@ -1622,31 +1667,31 @@ class JobScraper:
                         ) latest ON p.job_id = latest.job_id AND p.version = latest.max_version
                     """, conn)
                 
-                part_time_examples = []
-                for _, row in part_time_df.iterrows():
+                study_role_examples = []
+                for _, row in parsed_jobs_df.iterrows():
                     try:
                         payload = json.loads(row['payload_json'])
                         employment_type = payload.get('employment_type', '').lower()
                         
-                        # Concise combined check for part-time/contract/internship employment types
-                        tokens = ('part-time', 'contract', 'internship')
-                        if any(t in employment_type for t in tokens):
-                            part_time_job_ids.add(row['job_id'])
-                            if len(part_time_examples) < 3:
-                                part_time_examples.append((row['title'], row['company']))
+                        if 'internship' in employment_type or self._should_filter_study_title(str(row.get('title', ''))):
+                            study_role_job_ids.add(row['job_id'])
+                            if len(study_role_examples) < 3:
+                                study_role_examples.append((row['title'], row['company']))
 
                     except (json.JSONDecodeError, KeyError):
                         continue
                 
-                if part_time_job_ids:
-                    logger.info(f"Found {len(part_time_job_ids)} unwanted employment type jobs to remove based on parsed descriptions (part-time/contract/internship)")
-                    if part_time_examples:
-                        logger.info("Examples of unwanted employment type jobs:")
-                        for title, company in part_time_examples:
+                if study_role_job_ids:
+                    logger.info(
+                        f"Found {len(study_role_job_ids)} internship/study-role jobs to remove based on parsed descriptions"
+                    )
+                    if study_role_examples:
+                        logger.info("Examples of internship/study-role jobs:")
+                        for title, company in study_role_examples:
                             logger.info(f"  - {title} at {company}")
                             
             except Exception as e:
-                logger.warning(f"Could not check part-time jobs from parsed descriptions: {e}")
+                logger.warning(f"Could not check internship/study-role jobs from parsed descriptions: {e}")
 
             # Combine unwanted ids
             unwanted_ids = set()
@@ -1654,8 +1699,8 @@ class JobScraper:
                 unwanted_ids.update(unwanted_by_title['job_id'].tolist())
             if not unwanted_by_company.empty:
                 unwanted_ids.update(unwanted_by_company['job_id'].tolist())
-            if part_time_job_ids:
-                unwanted_ids.update(part_time_job_ids)
+            if study_role_job_ids:
+                unwanted_ids.update(study_role_job_ids)
 
             # 2) Remove duplicates: keep most recent per normalized (title, company, source)
             #    Note: We intentionally ignore location so entries with the same title+company
@@ -1694,7 +1739,7 @@ class JobScraper:
                 return True
 
             logger.info(
-                f"Will remove {len(to_delete_ids)} jobs (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, employment types: {len(part_time_job_ids)}], duplicates: {len(duplicate_ids)})"
+                f"Will remove {len(to_delete_ids)} jobs (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}], duplicates: {len(duplicate_ids)})"
             )
 
             # Delete selected jobs
@@ -1704,8 +1749,10 @@ class JobScraper:
                     cursor.executemany("DELETE FROM jobs WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
                     conn.commit()
                     
-                    # Also clean up orphaned parsed descriptions for deleted jobs
+                    # Also clean up related records for deleted jobs
                     if to_delete_ids:
+                        cursor.executemany("DELETE FROM job_fit_scores WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
+                        cursor.executemany("DELETE FROM job_observations WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
                         cursor.executemany("DELETE FROM parsed_descriptions WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
                         conn.commit()
                 except Exception as e:
@@ -1717,7 +1764,7 @@ class JobScraper:
                 final_count = cursor.fetchone()[0]
 
             logger.info(
-                f"Purge complete: {len(to_delete_ids)} jobs removed (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, employment types: {len(part_time_job_ids)}], duplicates: {len(duplicate_ids)}). Remaining: {final_count}"
+                f"Purge complete: {len(to_delete_ids)} jobs removed (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}], duplicates: {len(duplicate_ids)}). Remaining: {final_count}"
             )
 
             if len(to_delete_ids) > 0:

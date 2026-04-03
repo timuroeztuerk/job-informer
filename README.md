@@ -72,7 +72,17 @@ Frontend will be served by Vite on `http://localhost:5173` in local mode.
 - `SMTP_SERVER` (default: `smtp.gmail.com`)
 - `SMTP_PORT` (default: `587`)
 - `OPENAI_MODEL` (default: `gpt-5-mini`)
+- `AI_PURGE_MIN_CONFIDENCE` (`0.0`–`1.0`, default: `0.75`) — minimum confidence required before purging a job from AI decisions
+- `AI_PURGE_MAX_RATIO` (`0.0`–`1.0`, default: `0.35`) — hard cap of AI purges as a fraction of candidates examined in one run
+- `AI_PURGE_MAX_JOBS` (integer, default: `0`) — hard cap of AI purges per run (`0` means unlimited)
+- `LLM_TIMEOUT_SECONDS` (integer/float, default: `45`) — per-request timeout for LLM calls
+- `LLM_MAX_RETRIES` (integer, default: `3`) — retry count for transient LLM errors
+- `LLM_RETRY_BASE_DELAY` (float, default: `0.75`) — base delay for retry backoff (seconds)
+- `LLM_RETRY_MAX_DELAY` (float, default: `8.0`) — cap for retry backoff (seconds)
+- `LLM_RETRY_JITTER` (float, default: `0.2`) — jitter multiplier for retry delays
 - `DESC_PARSER_MODEL` (defaults to `OPENAI_MODEL`)
+- `DESC_PARSER_MIN_CHARS` (integer, default: `80`) — skip descriptions shorter than this after normalization
+- `DESC_PARSER_MAX_CHARS` (integer, default: `12000`) — truncate normalized descriptions for LLM
 - `ENABLE_DESCRIPTION_PARSER` (`true`/`false`)
 - `ENABLE_LINKEDIN` (`true`/`false`, default: `true`)
 - `ENABLE_INDEED` (`true`/`false`, default: `false`)

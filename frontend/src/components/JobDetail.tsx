@@ -1,18 +1,51 @@
-import React, { useEffect, useState } from "react";
-import { deleteJob, fetchJob } from "../api";
-import type { Job, ParsedPayload } from "../types";
+import React, { useEffect, useMemo, useState } from "react";
+import { deleteJob, fetchJob, updateJobAnnotation } from "../api";
+import type { Job, JobAnnotation, JobAnnotationPriority, JobAnnotationStatus, ParsedPayload } from "../types";
 
 interface JobDetailProps {
   job: Job | null;
   onDeleted: () => void;
+  onAnnotationSaved: () => void;
 }
 
-const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted }) => {
+const defaultAnnotation: JobAnnotation = {
+  status: "unreviewed",
+  priority: "medium",
+  notes: "",
+  why_interesting: "",
+  skill_gaps: [],
+  follow_up_date: null,
+  resume_version: "",
+  created_at: null,
+  updated_at: null,
+};
+
+const annotationStatuses: JobAnnotationStatus[] = [
+  "unreviewed",
+  "interesting",
+  "applied",
+  "interviewing",
+  "offer",
+  "rejected",
+  "archived",
+];
+const annotationPriorities: JobAnnotationPriority[] = ["high", "medium", "low"];
+
+const normalizeAnnotation = (annotation?: JobAnnotation | null): JobAnnotation => ({
+  ...defaultAnnotation,
+  ...(annotation || {}),
+  skill_gaps: annotation?.skill_gaps || [],
+});
+
+const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted, onAnnotationSaved }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [details, setDetails] = useState<Job | null>(null);
   const [parsed, setParsed] = useState<ParsedPayload | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [savingAnnotation, setSavingAnnotation] = useState(false);
+  const [annotation, setAnnotation] = useState<JobAnnotation>(defaultAnnotation);
+  const [skillGapInput, setSkillGapInput] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -21,6 +54,8 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted }) => {
       if (!job) {
         setDetails(null);
         setParsed(null);
+        setAnnotation(defaultAnnotation);
+        setSkillGapInput("");
         return;
       }
       setLoading(true);
@@ -30,6 +65,9 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted }) => {
         if (cancelled) return;
         setDetails(fullJob);
         setParsed((fullJob.parsed_description?.payload as ParsedPayload) || null);
+        const nextAnnotation = normalizeAnnotation(fullJob.annotation);
+        setAnnotation(nextAnnotation);
+        setSkillGapInput(nextAnnotation.skill_gaps.join(", "));
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load job.");
@@ -47,9 +85,19 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted }) => {
     };
   }, [job?.job_id]);
 
-  const formatDate = (value?: string) => {
+  const formatDate = (value?: string | null) => {
     if (!value) return "n/a";
     return new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(value));
+  };
+
+  const formatDateTime = (value?: string | null) => {
+    if (!value) return "Not saved yet";
+    return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  };
+
+  const formatLabel = (value?: string | null) => {
+    if (!value) return "unspecified";
+    return value.replace(/_/g, " ");
   };
 
   const salaryText = (range?: { min?: number | null; max?: number | null }) => {
@@ -67,6 +115,8 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted }) => {
     return benefits;
   };
 
+  const annotationUpdatedAt = useMemo(() => formatDateTime(annotation.updated_at), [annotation.updated_at]);
+
   const confirmDelete = async () => {
     if (!details || deleting) return;
     const ok = window.confirm("Delete this job? This cannot be undone.");
@@ -76,11 +126,40 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted }) => {
       await deleteJob(details.job_id);
       setDetails(null);
       setParsed(null);
+      setAnnotation(defaultAnnotation);
+      setSkillGapInput("");
       onDeleted();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete job.");
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const saveAnnotation = async () => {
+    if (!details || savingAnnotation) return;
+    setSavingAnnotation(true);
+    setError(null);
+    try {
+      const saved = await updateJobAnnotation(details.job_id, {
+        ...annotation,
+        notes: annotation.notes.trim(),
+        why_interesting: annotation.why_interesting.trim(),
+        skill_gaps: skillGapInput
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+        follow_up_date: annotation.follow_up_date || null,
+        resume_version: annotation.resume_version.trim(),
+      });
+      setAnnotation(normalizeAnnotation(saved));
+      setSkillGapInput((saved.skill_gaps || []).join(", "));
+      setDetails((current) => (current ? { ...current, annotation: saved } : current));
+      onAnnotationSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save annotation.");
+    } finally {
+      setSavingAnnotation(false);
     }
   };
 
@@ -117,6 +196,137 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted }) => {
             <>
               <p className="muted">Scraped {formatDate(details.scraped_at)}</p>
 
+              <details className="annotation-card">
+                <summary className="annotation-header annotation-toggle">
+                  <div>
+                    <p className="summary-title">Personal notes</p>
+                    <p className="muted small">Track your own pipeline, fit, and follow-up plan for this job.</p>
+                  </div>
+                  <div className="annotation-summary-meta">
+                    <span className="muted tiny">Last saved: {annotationUpdatedAt}</span>
+                    <span className="muted tiny">
+                      {formatLabel(annotation.status)} · {formatLabel(annotation.priority)}
+                    </span>
+                  </div>
+                </summary>
+
+                <div className="annotation-grid">
+                  <label>
+                    <span>Status</span>
+                    <select
+                      value={annotation.status}
+                      onChange={(e) =>
+                        setAnnotation((current) => ({
+                          ...current,
+                          status: e.target.value as JobAnnotationStatus,
+                        }))
+                      }
+                    >
+                      {annotationStatuses.map((status) => (
+                        <option key={status} value={status}>
+                          {formatLabel(status)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Priority</span>
+                    <select
+                      value={annotation.priority}
+                      onChange={(e) =>
+                        setAnnotation((current) => ({
+                          ...current,
+                          priority: e.target.value as JobAnnotationPriority,
+                        }))
+                      }
+                    >
+                      {annotationPriorities.map((priority) => (
+                        <option key={priority} value={priority}>
+                          {formatLabel(priority)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Follow up</span>
+                    <input
+                      type="date"
+                      value={annotation.follow_up_date || ""}
+                      onChange={(e) =>
+                        setAnnotation((current) => ({
+                          ...current,
+                          follow_up_date: e.target.value || null,
+                        }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>Resume version</span>
+                    <input
+                      type="text"
+                      placeholder="e.g. ai-general-v2"
+                      value={annotation.resume_version}
+                      onChange={(e) =>
+                        setAnnotation((current) => ({
+                          ...current,
+                          resume_version: e.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+
+                <label className="annotation-field">
+                  <span>Why interesting</span>
+                  <textarea
+                    rows={3}
+                    placeholder="Why this role is worth your attention."
+                    value={annotation.why_interesting}
+                    onChange={(e) =>
+                      setAnnotation((current) => ({
+                        ...current,
+                        why_interesting: e.target.value,
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="annotation-field">
+                  <span>Skill gaps</span>
+                  <input
+                    type="text"
+                    placeholder="rag, deployment, experimentation"
+                    value={skillGapInput}
+                    onChange={(e) => setSkillGapInput(e.target.value)}
+                  />
+                  <span className="muted tiny">Comma-separated. Use this to surface repeated gaps across jobs.</span>
+                </label>
+
+                <label className="annotation-field">
+                  <span>Notes</span>
+                  <textarea
+                    rows={5}
+                    placeholder="Application angle, interview prep ideas, companies to revisit, etc."
+                    value={annotation.notes}
+                    onChange={(e) =>
+                      setAnnotation((current) => ({
+                        ...current,
+                        notes: e.target.value,
+                      }))
+                    }
+                  />
+                </label>
+
+                <div className="annotation-actions">
+                  <button className="primary" type="button" onClick={saveAnnotation} disabled={savingAnnotation}>
+                    {savingAnnotation ? "Saving…" : "Save notes"}
+                  </button>
+                  <span className="muted small">
+                    Status: {formatLabel(annotation.status)} · Priority: {formatLabel(annotation.priority)}
+                  </span>
+                </div>
+              </details>
+
               {parsed && (
                 <div className="parsed">
                   <div className="pill-row">
@@ -151,7 +361,9 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted }) => {
                             {lang}
                           </span>
                         ))}
-                        {(!parsed.programming_languages || !parsed.programming_languages.length) && <span className="muted small">n/a</span>}
+                        {(!parsed.programming_languages || !parsed.programming_languages.length) && (
+                          <span className="muted small">n/a</span>
+                        )}
                       </div>
                     </div>
                     <div>

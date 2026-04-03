@@ -12,13 +12,14 @@ import hashlib
 import json
 import sqlite3
 import sys
+import re
 from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
@@ -39,23 +40,218 @@ class ParsedDescription:
 
 class JobDescriptionStructure(BaseModel):
     """Pydantic model for structured job description parsing"""
-    seniority: str
-    employment_type: str
-    remote: str
-    languages: List[str]
-    programming_languages: List[str]
-    tools: List[str]
-    skills: List[str]
-    degree_field: str
-    degree_type: str
-    years_experience_min: Optional[int]
-    location: List[str]
-    salary_eur_min: Optional[int]
-    salary_eur_max: Optional[int] 
-    extra_benefits: List[str] = Field(alias="extra benefits")
-    summary: str
-    
-    model_config = {"populate_by_name": True}
+    seniority: str = "unspecified"
+    employment_type: str = "unspecified"
+    remote: str = "unspecified"
+    languages: List[str] = Field(default_factory=list)
+    programming_languages: List[str] = Field(default_factory=list)
+    tools: List[str] = Field(default_factory=list)
+    skills: List[str] = Field(default_factory=list)
+    degree_field: str = "unspecified"
+    degree_type: str = "unspecified"
+    years_experience_min: Optional[int] = None
+    location: List[str] = Field(default_factory=list)
+    salary_eur_min: Optional[int] = None
+    salary_eur_max: Optional[int] = None
+    salary_eur_range: Optional[dict[str, Optional[int]]] = None
+    extra_benefits: List[str] = Field(default_factory=list, alias="extra benefits")
+    summary: str = "unspecified"
+
+    model_config = {
+        "populate_by_name": True,
+        "extra": "ignore",
+    }
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_input_payload(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+
+        data = dict(value)
+
+        if "extra_benefits" not in data and "extra benefits" in data:
+            data["extra_benefits"] = data.get("extra benefits")
+        elif "extra benefits" not in data and "extra_benefits" in data:
+            data["extra benefits"] = data.get("extra_benefits")
+
+        data.setdefault("salary_eur_min", None)
+        data.setdefault("salary_eur_max", None)
+        data.setdefault("salary_eur_range", None)
+
+        salary_range = data.get("salary_eur_range")
+        if salary_range is None:
+            range_min = data.get("salary_eur_min")
+            range_max = data.get("salary_eur_max")
+            if range_min is not None or range_max is not None:
+                data["salary_eur_range"] = {
+                    "min": range_min,
+                    "max": range_max,
+                }
+
+        return data
+
+    @field_validator(
+        "languages",
+        "programming_languages",
+        "tools",
+        "skills",
+        "location",
+        "extra_benefits",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_string_list(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, tuple):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return []
+            lowered = normalized.lower()
+            if lowered in {"", "unspecified", "n/a", "na", "none", "null", "not specified"}:
+                return []
+            if normalized.startswith("[") and normalized.endswith("]"):
+                try:
+                    parsed = json.loads(normalized)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+            split_values = []
+            for chunk in re.split(r"\s*,\s*|\s*;\s*", normalized):
+                chunk = chunk.strip().strip("[]{}()\"'")
+                if chunk:
+                    split_values.append(chunk)
+            return split_values
+        return [str(value).strip()] if str(value).strip() else []
+
+    @staticmethod
+    def _parse_salary_number(value):
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if not text or text in {"unspecified", "n/a", "na", "none", "null", "not specified", "negotiable"}:
+                return None
+
+            match = re.search(r"([\d]+(?:[.,]\d+)?)(\s*[km])?", text)
+            if not match:
+                return None
+
+            number_text = match.group(1)
+            suffix = (match.group(2) or "").strip()
+            try:
+                digits = re.sub(r"\D", "", number_text)
+                if not digits:
+                    return None
+                number = float(digits)
+            except (TypeError, ValueError):
+                return None
+
+            if suffix == "k":
+                number *= 1000
+            elif suffix == "m":
+                number *= 1_000_000
+            return int(round(number))
+        return None
+
+    @field_validator("salary_eur_min", "salary_eur_max", mode="before")
+    @classmethod
+    def _coerce_salary(cls, value):
+        return cls._parse_salary_number(value)
+
+    @field_validator("salary_eur_range", mode="before")
+    @classmethod
+    def _coerce_salary_range(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            parts = re.findall(r"(\d+(?:[.,]\d+)?\s*[km]?)", stripped, flags=re.IGNORECASE)
+            if not parts:
+                return None
+            parsed = [cls._parse_salary_number(part) for part in parts]
+            parsed = [p for p in parsed if p is not None]
+            if not parsed:
+                return None
+            return {"min": parsed[0], "max": parsed[min(1, len(parsed) - 1)]}
+        if isinstance(value, (list, tuple)):
+            values = [cls._parse_salary_number(item) for item in value]
+            values = [v for v in values if v is not None]
+            if not values:
+                return None
+            return {"min": values[0], "max": values[min(1, len(values) - 1)]}
+        if isinstance(value, dict):
+            return {
+                "min": cls._parse_salary_number(value.get("min")),
+                "max": cls._parse_salary_number(value.get("max")),
+            }
+        return None
+
+    @field_validator("years_experience_min", mode="before")
+    @classmethod
+    def _coerce_years_experience_min(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if not text or text in {"unspecified", "n/a", "na", "none", "null", "not specified"}:
+                return None
+            numbers = re.findall(r"\d+", text)
+            if not numbers:
+                return None
+            try:
+                return int(numbers[0])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @classmethod
+    def normalize_output_payload(cls, payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        data = dict(payload)
+        salary_min = data.pop("salary_eur_min", None)
+        salary_max = data.pop("salary_eur_max", None)
+
+        salary_range = data.get("salary_eur_range")
+        if not isinstance(salary_range, dict):
+            salary_range = {"min": None, "max": None}
+
+        range_min = salary_range.get("min")
+        range_max = salary_range.get("max")
+        if isinstance(range_min, str):
+            range_min = cls._coerce_salary_like(range_min)
+        if isinstance(range_max, str):
+            range_max = cls._coerce_salary_like(range_max)
+        if range_min is None and salary_min is not None:
+            range_min = salary_min
+        if range_max is None and salary_max is not None:
+            range_max = salary_max
+
+        data["salary_eur_range"] = {
+            "min": cls._coerce_salary_like(range_min),
+            "max": cls._coerce_salary_like(range_max),
+        }
+        return data
+
+    @staticmethod
+    def _coerce_salary_like(value: Any) -> Optional[int]:
+        parsed = JobDescriptionStructure._parse_salary_number(value)
+        return parsed
 
 class DescriptionTools:
     """LLM-backed parser with caching based on (job_id, desc_hash, version).
@@ -68,12 +264,24 @@ class DescriptionTools:
         self.config: Config = config
         self.db: JobDatabase = db or JobDatabase()
         self._ensure_table()
+        self.desc_min_chars = max(0, int(getattr(self.config, 'desc_parser_min_chars', 80)))
+        self.desc_max_chars = max(0, int(getattr(self.config, 'desc_parser_max_chars', 12000)))
+        if self.desc_max_chars < self.desc_min_chars:
+            self.desc_max_chars = self.desc_min_chars
         # Unified LLM connection, default to OpenAI model configured
         parser_model = getattr(self.config, 'desc_parser_model', None) or getattr(
             self.config, 'openai_model', 'gpt-5-mini'
         )
         parser_api_key = getattr(self.config, 'openai_api_key', '').strip() or None
-        self.llm = LLMConnection(api_key=parser_api_key, model=parser_model)
+        self.llm = LLMConnection(
+            api_key=parser_api_key,
+            model=parser_model,
+            timeout_seconds=float(getattr(self.config, 'llm_timeout_seconds', 45)),
+            max_retries=int(getattr(self.config, 'llm_max_retries', 3)),
+            retry_base_delay=float(getattr(self.config, 'llm_retry_base_delay', 0.75)),
+            retry_max_delay=float(getattr(self.config, 'llm_retry_max_delay', 8)),
+            retry_jitter=float(getattr(self.config, 'llm_retry_jitter', 0.2)),
+        )
         self.prompt: str = getattr(self.config, 'desc_parser_prompt', '')
         # Track how many characters the last progress update used so we can
         # properly clear the line on the next update.
@@ -101,6 +309,46 @@ class DescriptionTools:
     @staticmethod
     def _hash_description(text: str) -> str:
         return hashlib.sha256((text or '').encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _normalize_description_text(text: str) -> str:
+        """Normalize noisy scraped descriptions for stable hashing and cleaner LLM inputs."""
+        if not text:
+            return ""
+
+        normalized = str(text).replace("\r", "\n")
+        normalized = re.sub(r"\u00a0", " ", normalized)  # non-breaking spaces
+        normalized = re.sub(r"https?://\S+|www\.\S+", "", normalized)
+        normalized = re.sub(r"(?im)^https?://\S+\s*$", "", normalized)
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = normalized.replace("  ", " ")
+        return normalized.strip()
+
+    def _is_quality_description(self, text: str) -> bool:
+        if not text:
+            return False
+        if len(text) < self.desc_min_chars:
+            return False
+
+        # Drop very short/empty lexical signals
+        words = [w for w in re.split(r"\W+", text.lower()) if w]
+        if len(words) < max(3, int(self.desc_min_chars / 6) if self.desc_min_chars else 3):
+            return False
+
+        # Remove extremely repetitive content such as "apply now" placeholders only
+        meaningful = re.sub(r"(apply now|you are applying|click here|submit now|job id|location:)", "", text, flags=re.IGNORECASE)
+        if len(meaningful.strip()) < max(3, int(self.desc_min_chars * 0.75)):
+            return False
+
+        return True
+
+    def _prepare_description_for_llm(self, text: str) -> str:
+        normalized = self._normalize_description_text(text)
+        if not normalized:
+            return ""
+        if self.desc_max_chars and len(normalized) > self.desc_max_chars:
+            return normalized[: self.desc_max_chars].strip()
+        return normalized
 
     def _update_progress(self, batch_num: int, total_batches: int, job_current: int, job_total: int,
                           status: str = "") -> None:
@@ -177,7 +425,14 @@ class DescriptionTools:
             )
             conn.commit()
 
-    def _call_llm(self, description_text: str, job_id: str = "unknown") -> Optional[str]:
+    def _call_llm(
+        self,
+        description_text: str,
+        job_id: str = "unknown",
+        *,
+        title: str = "Unknown Title",
+        company: str = "Unknown Company",
+    ) -> Optional[str]:
         """Call unified LLM using structured generation; return raw JSON text or None."""
         if not description_text.strip():
             logger.warning(f"Job {job_id}: Empty description, skipping LLM call")
@@ -185,13 +440,23 @@ class DescriptionTools:
         if not getattr(self.llm, 'api_key', ''):
             logger.error("OPENAI_API_KEY missing; cannot parse descriptions")
             return None
+
+        prompt = (
+            f"{self.prompt}\n\n"
+            f"JOB_TITLE: {str(title).strip()}\n"
+            f"COMPANY: {str(company).strip()}\n\n"
+            f"DESCRIPTION:\n{description_text.strip()}\n\n"
+            "Use ONLY the provided job title, company, and description text for extraction. "
+            "Return valid JSON only. "
+            "If fields are unclear, use 'unspecified' or null, not invented values."
+        )
         
-        prompt = f"{self.prompt}\n\nDESCRIPTION:\n{description_text.strip()}\n\nRespond with JSON only."
-        
-        # Add system message to clarify schema, especially for salary fields
+        # Add system message to clarify schema, especially for salary and benefits fields
         system_msg = ("Extract job information into the specified structure. "
-                     "For salary_eur_min/salary_eur_max: use separate fields for min and max salary in EUR. "
-                     "Use null if salary information is not available.")
+                     "For salary, prefer salary_eur_min and salary_eur_max when available, both in EUR. "
+                     "If only a range is available, set salary_eur_range with min/max and leave missing fields null. "
+                     "If salary information is not available, use null. "
+                     "For extra benefits, return a list of strings, never a single comma-separated string.")
         
         try:
             # Use structured generation with the Pydantic model
@@ -203,9 +468,18 @@ class DescriptionTools:
             
             # Handle both parsed object and JSON string responses
             if isinstance(result, str):
-                # If it's already a JSON string, validate it
+                # If it's already a JSON string, validate it and normalize the payload shape.
                 try:
                     parsed_json = json.loads(result)
+                    if isinstance(parsed_json, dict):
+                        try:
+                            validated = JobDescriptionStructure.model_validate(parsed_json)
+                            normalized = JobDescriptionStructure.normalize_output_payload(
+                                validated.model_dump(by_alias=True)
+                            )
+                        except Exception:
+                            normalized = JobDescriptionStructure.normalize_output_payload(parsed_json)
+                        return json.dumps(normalized)
                     return result
                 except json.JSONDecodeError as e:
                     logger.error(f"Job {job_id}: Invalid JSON returned from structured LLM call: {e}")
@@ -214,13 +488,7 @@ class DescriptionTools:
                 # If it's a parsed Pydantic object, convert to the expected JSON format
                 # Convert flattened salary fields back to nested structure
                 data = result.model_dump(by_alias=True)
-                
-                # Convert flat salary fields to nested structure
-                if "salary_eur_min" in data or "salary_eur_max" in data:
-                    data["salary_eur_range"] = {
-                        "min": data.pop("salary_eur_min", None),
-                        "max": data.pop("salary_eur_max", None)
-                    }
+                data = JobDescriptionStructure.normalize_output_payload(data)
                 
                 json_result = json.dumps(data)
                 return json_result
@@ -254,7 +522,8 @@ class DescriptionTools:
         # Prepare jobs for processing: skip missing and cached first, then parallelize LLM calls
         jobs_to_process: List[Dict[str, Any]] = []
         for _, row in jobs_df.iterrows():
-            desc = str(row.get('description') or '').strip()
+            original_desc = str(row.get('description') or '')
+            desc = self._normalize_description_text(original_desc)
             job_id = str(row.get('job_id') or '')
             title = str(row.get('title', 'Unknown Title'))
             company = str(row.get('company', 'Unknown Company'))
@@ -264,6 +533,25 @@ class DescriptionTools:
                 completed_items += 1
                 self._update_progress(batch_num, total_batches, completed_items, total_items,
                                       status="Skipped — missing description or job_id")
+                continue
+
+            if not self._is_quality_description(desc):
+                logger.debug(f"Job {job_id}: Skipping low-quality description")
+                completed_items += 1
+                self._update_progress(
+                    batch_num,
+                    total_batches,
+                    completed_items,
+                    total_items,
+                    status="Skipped — low-quality description",
+                )
+                continue
+
+            desc = self._prepare_description_for_llm(desc)
+            if not desc:
+                logger.warning(f"Job {job_id}: Skipping after normalization")
+                completed_items += 1
+                self._update_progress(batch_num, total_batches, completed_items, total_items, status="Skipped — cleaned to empty")
                 continue
 
             h = self._hash_description(desc)
@@ -307,7 +595,12 @@ class DescriptionTools:
             # Parallelize LLM calls, but serialize DB writes to avoid SQLite locks
             def worker(item: Dict[str, Any]) -> Dict[str, Any]:
                 try:
-                    payload = self._call_llm(item['description'], item['job_id'])
+                    payload = self._call_llm(
+                        item['description'],
+                        item['job_id'],
+                        title=item['title'],
+                        company=item['company'],
+                    )
                     return {**item, 'payload': payload}
                 except Exception as e:
                     logger.error(f"Job {item['job_id']}: Worker error: {e}")
@@ -390,9 +683,16 @@ class DescriptionTools:
             if column not in working.columns:
                 working[column] = ""
         working["job_id"] = working["job_id"].astype(str).str.strip()
-        working["description"] = working["description"].astype(str).str.strip()
+        working["description"] = working["description"].astype(str).apply(self._prepare_description_for_llm)
+        working["title"] = working["title"].astype(str).str.strip()
+        working["company"] = working["company"].astype(str).str.strip()
         working = working[["job_id", "title", "company", "description"]]
         working = working[(working["job_id"] != "") & (working["description"] != "")]
+
+        # Filter out low-quality descriptions before DB/caching work
+        working["is_quality"] = working["description"].apply(self._is_quality_description)
+        working = working[working["is_quality"]]
+        working = working.drop(columns=["is_quality"])
 
         if working.empty:
             logger.info(f"Description parser ({context_label}) — no parseable descriptions in provided data")
@@ -453,6 +753,13 @@ class DescriptionTools:
             f"Description parser ({context_label}) summary — parsed {total_new} / "
             f"{len(unparsed_df)} jobs (version={version}, batches={batches_processed}/{total_batches})"
         )
+        if total_new > 0:
+            try:
+                self.db.recompute_fit_scores(
+                    job_ids=unparsed_df["job_id"].astype(str).drop_duplicates().tolist()
+                )
+            except Exception as e:
+                logger.warning(f"Could not recompute fit scores after parsing: {e}")
         return total_new
 
     def run_incremental(self, batch_size: int, max_batches: int) -> int:
