@@ -5,6 +5,7 @@ import os
 import glob
 import time
 import random
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 import sys
 import requests
@@ -13,7 +14,7 @@ from bs4.element import Tag
 import pandas as pd
 from loguru import logger
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
@@ -29,6 +30,774 @@ TIME_RANGE_TO_SECONDS = {
     "month": 30 * 24 * 60 * 60,
 }
 
+TIME_RANGE_TO_DAYS = {
+    "day": 1,
+    "week": 7,
+    "month": 30,
+}
+
+
+@dataclass
+class ScraperSourceStats:
+    consecutive_failures: int = 0
+    blocked_until_ts: float = 0.0
+    last_status: Optional[int] = None
+    last_error: Optional[str] = None
+
+
+class ScraperSource:
+    """Source abstraction for one scraper backend."""
+
+    name = "base"
+    display_name = "Base Source"
+    base_backoff_seconds = 4.0
+    max_backoff_seconds = 240.0
+
+    def __init__(self, session: requests.Session, config: Config):
+        self.session = session
+        self.config = config
+        self.stats = ScraperSourceStats()
+        self.request_timeout = int(getattr(config, "request_timeout", 20))
+        self.max_retries = max(1, int(getattr(config, "max_retries", 2)))
+
+    @property
+    def is_in_cooldown(self) -> bool:
+        return time.time() < self.stats.blocked_until_ts
+
+    @property
+    def cooldown_remaining(self) -> float:
+        remaining = self.stats.blocked_until_ts - time.time()
+        return max(0.0, remaining)
+
+    def _build_request_headers(self) -> Dict[str, str]:
+        return {
+            "User-Agent": self.config.user_agent,
+            "Accept-Language": random.choice(
+                ["en-US,en;q=0.9", "en-GB,en;q=0.8", "de-DE,de;q=0.8,en;q=0.7"]
+            ),
+        }
+
+    def mark_success(self) -> None:
+        self.stats.consecutive_failures = 0
+        self.stats.last_status = 200
+        self.stats.last_error = None
+
+    def _failure_backoff_seconds(self, status_code: Optional[int] = None) -> float:
+        status_boost = 1.0
+        if status_code in (403, 429, 999):
+            status_boost = 2.8
+        elif status_code and 500 <= status_code < 600:
+            status_boost = 1.8
+        exponent = min(self.stats.consecutive_failures, 5)
+        base = self.base_backoff_seconds * (2 ** exponent) * status_boost
+        jitter = random.uniform(0.75, 1.5)
+        return min(self.max_backoff_seconds, base) * jitter
+
+    def _retry_sleep_seconds(self, attempt: int) -> float:
+        return min(8.0, 0.6 * (2 ** attempt)) + random.uniform(0, 1.0)
+
+    def mark_http_failure(self, status_code: Optional[int] = None, message: Optional[str] = None) -> None:
+        self.stats.consecutive_failures += 1
+        self.stats.last_status = status_code
+        self.stats.last_error = message
+        if status_code in (403, 429, 999):
+            logger.warning(
+                "{} blocked (status={}); entering source cooldown.",
+                self.display_name,
+                status_code,
+            )
+        self.stats.blocked_until_ts = time.time() + self._failure_backoff_seconds(status_code)
+
+    def mark_network_failure(self, exc: Exception) -> None:
+        self.stats.consecutive_failures += 1
+        self.stats.last_status = None
+        self.stats.last_error = str(exc)
+        self.stats.blocked_until_ts = time.time() + self._failure_backoff_seconds(None)
+
+    def request(self, url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
+        if self.is_in_cooldown:
+            logger.warning(
+                "{} is currently in cooldown ({:.1f}s left); skipping request.",
+                self.display_name,
+                self.cooldown_remaining,
+            )
+            return None
+
+        if timeout is None:
+            timeout = self.request_timeout
+
+        last_exception: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                if attempt > 0:
+                    time.sleep(self._retry_sleep_seconds(attempt - 1))
+
+                response = self.session.get(url, headers=self._build_request_headers(), timeout=timeout)
+                if response.status_code == 200:
+                    self.mark_success()
+                    return response
+
+                if response.status_code in (429, 403, 999):
+                    self.mark_http_failure(response.status_code, response.text[:200])
+                    return None
+
+                if response.status_code >= 500:
+                    if attempt < self.max_retries:
+                        self.mark_http_failure(response.status_code, f"HTTP {response.status_code}")
+                        continue
+                    self.mark_http_failure(response.status_code, f"HTTP {response.status_code}")
+                    return None
+
+                logger.warning(
+                    "HTTP {} from {} (non-retryable).",
+                    response.status_code,
+                    self.display_name,
+                )
+                self.stats.last_status = response.status_code
+                return None
+            except requests.RequestException as exc:
+                self.mark_network_failure(exc)
+                last_exception = exc
+                if attempt >= self.max_retries:
+                    logger.debug("{} request failed after retries: {}", self.display_name, last_exception)
+                    return None
+
+        return None
+
+    def _pick_first_text(self, node: Tag, selectors: List[str], default: str = "") -> str:
+        for selector in selectors:
+            element = node.select_one(selector)
+            if isinstance(element, Tag):
+                text = self._clean_text(element.get_text()) if isinstance(element, Tag) else ""
+                if text:
+                    return text
+        return default
+
+    def _pick_first_attribute(self, node: Tag, selectors: List[str], attribute: str, default: str = "") -> str:
+        for selector in selectors:
+            element = node.select_one(selector)
+            if isinstance(element, Tag):
+                value = element.get(attribute)
+                if value:
+                    return str(value).strip()
+        return default
+
+    def _clean_text(self, text: Optional[str]) -> str:
+        if not text:
+            return ""
+        return " ".join(str(text).split())
+
+    def _looks_masked_value(self, text: str) -> bool:
+        if text is None:
+            return True
+        value = str(text).strip()
+        if not value:
+            return True
+        star_count = value.count("*")
+        return star_count >= 4 and (star_count / max(len(value), 1)) >= 0.4
+
+    def scrape_jobs(
+        self,
+        keywords: str,
+        location: str,
+        time_filter_seconds: int,
+        max_pages: Optional[int] = None,
+        max_jobs: Optional[int] = None,
+    ) -> List[Dict]:
+        raise NotImplementedError
+
+    def extract_job_description(self, job_url: str) -> str:
+        raise NotImplementedError
+
+    def extract_job_metadata(self, job_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        raise NotImplementedError
+
+
+class LinkedInSource(ScraperSource):
+    name = "linkedin"
+    display_name = "LinkedIn"
+    DEFAULT_MAX_PAGES = 4
+    RESULTS_PER_PAGE = 25
+
+    SEARCH_URL_TEMPLATE = (
+        "https://www.linkedin.com/jobs/search/?"
+        "keywords={keywords}"
+        "&location={location}"
+        "&f_TPR=r{time_filter_seconds}"
+        "&f_JT=F&start={start}"
+        "&origin=JOB_SEARCH_PAGE_JOB_FILTER&trk=public_jobs_jobs-search-bar_search-submit"
+    )
+
+    CARD_CONTAINER_SELECTORS = [
+        "div.job-search-card",
+        "div.base-card",
+        "div.jobs-search__results-list > li",
+    ]
+    CARD_TITLE_SELECTORS = [
+        "h3.base-search-card__title",
+        "h3.base-search-card__title a",
+        "h3.base-card__title",
+        "h3.result-card__title",
+        "h3.job-card-list__title",
+        "h3",
+    ]
+    CARD_COMPANY_SELECTORS = [
+        "h4.base-search-card__subtitle a",
+        "h4.base-search-card__subtitle",
+        "a.topcard__flavor--name",
+        "span.topcard__flavor a",
+        "h4",
+    ]
+    CARD_LOCATION_SELECTORS = [
+        "span.job-search-card__location",
+        "span.topcard__flavor--bullet",
+        "span",
+    ]
+    CARD_LINK_SELECTORS = [
+        "a.base-card__full-link",
+        "a.job-card-container__link",
+        "a.result-card__full-card-link",
+        "a",
+    ]
+    CARD_TIME_SELECTORS = [
+        "time",
+        "time.job-search-card__listdate",
+    ]
+    METADATA_TITLE_SELECTORS = [
+        "h1.top-card-layout__title",
+        "h1.topcard__title",
+        "h1.sub-nav-cta__header",
+        "h1",
+    ]
+    METADATA_COMPANY_SELECTORS = [
+        "a.topcard__org-name-link",
+        "span.topcard__flavor a",
+        "span.top-card-layout__entity-info a",
+        "span.topcard__flavor",
+    ]
+    METADATA_LOCATION_SELECTORS = [
+        "span.topcard__flavor--bullet",
+        "span.top-card-layout__first-subline span",
+        "span.topcard__flavor",
+    ]
+
+    def _normalize_and_validate_job(self, job: Dict[str, str]) -> Optional[Dict[str, str]]:
+        title = self._clean_text(job.get("title", ""))
+        company = self._clean_text(job.get("company", ""))
+        source = self._clean_text(job.get("source", ""))
+        url = self._normalize_url(job.get("url", ""))
+        if not title or not source:
+            return None
+        if not company:
+            return None
+
+        record = {
+            "title": title,
+            "company": company,
+            "location": self._clean_text(job.get("location", "")),
+            "source": source,
+            "url": url,
+            "salary": self._clean_text(job.get("salary", "Not specified")) or "Not specified",
+            "scraped_at": pd.Timestamp.now(),
+        }
+        if job.get("posted_at"):
+            record["posted_at"] = self._clean_text(job.get("posted_at"))
+        return record
+
+    def _build_search_url(self, keywords: str, location: str, time_filter_seconds: int, start: int = 0) -> str:
+        return self.SEARCH_URL_TEMPLATE.format(
+            keywords=quote_plus(keywords),
+            location=quote_plus(location),
+            time_filter_seconds=time_filter_seconds,
+            start=start,
+        )
+
+    def _extract_cards(self, soup: BeautifulSoup) -> List[Tag]:
+        for selector in self.CARD_CONTAINER_SELECTORS:
+            cards = soup.select(selector)
+            if cards:
+                return cards
+        return []
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        if not url:
+            return ""
+        value = str(url).strip()
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
+        return urljoin("https://www.linkedin.com", value)
+
+    @staticmethod
+    def _extract_from_jsonld(html: Optional[str]) -> Dict[str, str]:
+        if not html:
+            return {}
+        payload: Dict[str, str] = {}
+        try:
+            import json
+
+            data = json.loads(html)
+            if not isinstance(data, dict):
+                return {}
+            payload["title"] = str(data.get("title", "")).strip()
+            payload["description"] = str(data.get("description", "")).strip()
+            hiring_org = data.get("hiringOrganization")
+            if isinstance(hiring_org, dict):
+                payload["company"] = str(hiring_org.get("name", "")).strip()
+            if isinstance(data.get("jobLocation"), dict):
+                payload["location"] = str(
+                    data["jobLocation"]
+                    .get("address", {})
+                    .get("addressLocality", "")
+                ).strip()
+        except Exception:
+            return {}
+        return payload
+
+    def scrape_jobs(
+        self,
+        keywords: str,
+        location: str,
+        time_filter_seconds: int,
+        max_pages: Optional[int] = None,
+        max_jobs: Optional[int] = None,
+    ) -> List[Dict]:
+        jobs: List[Dict] = []
+        max_pages = max(1, int(max_pages)) if max_pages else self.DEFAULT_MAX_PAGES
+        max_jobs = max_jobs if (max_jobs and max_jobs > 0) else None
+
+        seen_urls: set = set()
+        start = 0
+        for page_no in range(max_pages):
+            if max_jobs is not None and len(jobs) >= max_jobs:
+                break
+
+            search_url = self._build_search_url(keywords, location, time_filter_seconds, start=start)
+            resp = self.request(search_url)
+            if not resp:
+                break
+
+            try:
+                soup = BeautifulSoup(resp.content, "lxml")
+                cards = self._extract_cards(soup)
+            except Exception as exc:
+                logger.debug("LinkedIn list page parse error: {}", exc)
+                break
+
+            if not cards:
+                break
+
+            page_count = 0
+            for card in cards:
+                try:
+                    if not isinstance(card, Tag):
+                        continue
+                    title = self._pick_first_text(card, self.CARD_TITLE_SELECTORS)
+                    company = self._pick_first_text(card, self.CARD_COMPANY_SELECTORS)
+                    loc = self._pick_first_text(card, self.CARD_LOCATION_SELECTORS, default=location)
+                    link = self._pick_first_attribute(card, self.CARD_LINK_SELECTORS, "href")
+                    posted_at = self._pick_first_attribute(card, self.CARD_TIME_SELECTORS, "datetime")
+
+                    normalized_link = self._normalize_url(link)
+                    if normalized_link and normalized_link in seen_urls:
+                        continue
+                    if normalized_link:
+                        seen_urls.add(normalized_link)
+
+                    normalized = self._normalize_and_validate_job(
+                        {
+                            "title": title,
+                            "company": company,
+                            "location": loc,
+                            "source": self.display_name,
+                            "url": normalized_link,
+                            "salary": "Not specified",
+                            "posted_at": posted_at,
+                        }
+                    )
+                    if normalized:
+                        normalized["description"] = ""
+                        jobs.append(normalized)
+                        page_count += 1
+                        if max_jobs is not None and len(jobs) >= max_jobs:
+                            break
+                except Exception as exc:
+                    logger.debug("LinkedIn card parse error: {}", exc)
+                    continue
+
+            if page_count == 0:
+                break
+
+            if len(cards) < self.RESULTS_PER_PAGE:
+                break
+
+            start += self.RESULTS_PER_PAGE
+            if page_no < max_pages - 1:
+                time.sleep(max(0.5, self.config.request_delay))
+
+        return jobs
+
+    def extract_job_description(self, job_url: str) -> str:
+        response = self.request(job_url, timeout=25)
+        if not response:
+            return ""
+        try:
+            page = BeautifulSoup(response.content, "lxml")
+            desc = page.select_one("div.show-more-less-html__markup")
+            if desc:
+                return desc.get_text(separator=" ", strip=True)
+            desc = page.select_one("div.description__text")
+            if desc:
+                return desc.get_text(separator=" ", strip=True)
+            ld = page.find("script", type="application/ld+json")
+            if ld and getattr(ld, "string", None):
+                payload = self._extract_from_jsonld(ld.string)
+                if payload.get("description"):
+                    return payload.get("description", "")
+        except Exception as exc:
+            logger.debug(f"LinkedIn description parse error: {exc}")
+        return ""
+
+    def extract_job_metadata(self, job_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        response = self.request(job_url, timeout=25)
+        if not response:
+            return None, None, None
+        try:
+            page = BeautifulSoup(response.content, "lxml")
+            title = self._pick_first_text(page, self.METADATA_TITLE_SELECTORS)
+            company = self._pick_first_text(page, self.METADATA_COMPANY_SELECTORS)
+            location = self._pick_first_text(page, self.METADATA_LOCATION_SELECTORS)
+
+            if not title or not company:
+                og = page.find("meta", property="og:title")
+                og_content = og.get("content") if isinstance(og, Tag) else ""
+                if og_content:
+                    parts = str(og_content).split(" - ", 1)
+                    if len(parts) == 2:
+                        title = title or parts[0].strip()
+                        company = company or parts[1].split("|", 1)[0].strip()
+
+            if not title or not company:
+                ld = page.find("script", type="application/ld+json")
+                if ld and getattr(ld, "string", None):
+                    parsed = self._extract_from_jsonld(ld.string)
+                    title = title or parsed.get("title")
+                    company = company or parsed.get("company")
+                    location = location or parsed.get("location")
+
+            if self._looks_masked_value(title):
+                title = None
+            if self._looks_masked_value(company):
+                company = None
+            if self._looks_masked_value(location):
+                location = None
+
+            return title, company, location
+        except Exception as exc:
+            logger.debug(f"LinkedIn title/company parse error: {exc}")
+            return None, None, None
+
+
+class IndeedSource(ScraperSource):
+    name = "indeed"
+    display_name = "Indeed"
+    DEFAULT_MAX_PAGES = 8
+    RESULTS_PER_PAGE = 15
+
+    SEARCH_URL_TEMPLATE = (
+        "https://de.indeed.com/jobs?"
+        "q={keywords}"
+        "&l={location}"
+        "&fromage={time_filter_days}"
+        "&sort=date"
+        "&start={start}"
+    )
+
+    CARD_CONTAINER_SELECTORS = [
+        "a.tapItem",
+        "div.job_seen_beacon",
+        "div.result",
+        "li",
+    ]
+    CARD_TITLE_SELECTORS = [
+        "h2.jobTitle a",
+        "h2.jobTitle",
+        "h2 a",
+        "a.jobtitle",
+        "h2",
+    ]
+    CARD_COMPANY_SELECTORS = [
+        "span.companyName",
+        "span.companyName a",
+        "span.companyName span",
+        "div.company_info a",
+        "a.company",
+        "span[data-testid='company-name']",
+    ]
+    CARD_LOCATION_SELECTORS = [
+        "div.companyLocation",
+        "div.companyLocation + div",
+        "div.companyLocationAndSummary > div",
+        "span.location",
+    ]
+    CARD_LINK_SELECTORS = [
+        "a[href*='/viewjob']",
+        "a.tapItem",
+        "a.resultWithShelfItem a",
+        "a",
+    ]
+    CARD_SALARY_SELECTORS = [
+        "div.salary-snippet-container",
+        "span.salary-snippet",
+        "div.attribute_snippet",
+        "div.salary",
+    ]
+    CARD_TIME_SELECTORS = [
+        "span.date",
+        "span.result-footer",
+        "span[data-testid='job-age']",
+    ]
+    METADATA_TITLE_SELECTORS = [
+        "h1.jobsearch-JobInfoHeader-title",
+        "h1",
+        "h1.jobsearch-ViewJobButtons-title",
+        "h2.jobsearch-JobInfoHeader-title",
+    ]
+    METADATA_COMPANY_SELECTORS = [
+        "a.icl-u-lg-mr--sm",
+        "div.jobsearch-InlineCompanyRating-companyHeader > a",
+        "div[data-testid='inlineHeader-companyName']",
+        "div.jobsearch-CompanyInfoWithoutHeaderImage > div > div > a",
+        "span.CompanyInfoWithoutHeaderImage-companyName",
+    ]
+    METADATA_LOCATION_SELECTORS = [
+        "div.jobsearch-InlineCompanyRating-withoutCapsule div",
+        "div.jobsearch-CompanyInfoWithoutHeaderImage div:first-child",
+        "div.jobsearch-JobInfoHeader-subtitle",
+        "div[data-testid='jobsearch-JobInfoHeader-companyLocation']",
+        "div.jobsearch-CompanyInfoContainer div:nth-of-type(2)",
+    ]
+
+    @staticmethod
+    def _build_search_url(
+        keywords: str,
+        location: str,
+        time_filter_days: int,
+        start: int = 0,
+    ) -> str:
+        return IndeedSource.SEARCH_URL_TEMPLATE.format(
+            keywords=quote_plus(keywords),
+            location=quote_plus(location),
+            time_filter_days=max(1, int(time_filter_days)),
+            start=max(0, int(start)),
+        )
+
+    @staticmethod
+    def _extract_indeed_job_id(job_url: str) -> Optional[str]:
+        try:
+            parsed = urlparse(job_url)
+            params = parse_qs(parsed.query)
+            job_ids = params.get("jk")
+            if job_ids and job_ids[0]:
+                return str(job_ids[0]).strip()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        if not url:
+            return ""
+        value = str(url).strip()
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
+        return urljoin("https://de.indeed.com", value)
+
+    def _build_search_url_for_request(
+        self,
+        keywords: str,
+        location: str,
+        time_filter_days: int,
+        start: int = 0,
+    ) -> str:
+        return self._build_search_url(keywords, location, time_filter_days, start)
+
+    def _extract_cards(self, soup: BeautifulSoup) -> List[Tag]:
+        for selector in self.CARD_CONTAINER_SELECTORS:
+            cards = soup.select(selector)
+            if cards:
+                return cards
+        return []
+
+    def scrape_jobs(
+        self,
+        keywords: str,
+        location: str,
+        time_filter_days: int,
+        max_pages: Optional[int] = None,
+        max_jobs: Optional[int] = None,
+    ) -> List[Dict]:
+        jobs: List[Dict] = []
+        max_pages = max(1, int(max_pages)) if max_pages else self.DEFAULT_MAX_PAGES
+        max_jobs = max_jobs if (max_jobs and max_jobs > 0) else None
+
+        seen_urls: set = set()
+        start = 0
+        for page_no in range(max_pages):
+            if max_jobs is not None and len(jobs) >= max_jobs:
+                break
+
+            search_url = self._build_search_url_for_request(keywords, location, time_filter_days, start=start)
+            resp = self.request(search_url)
+            if not resp:
+                break
+
+            try:
+                soup = BeautifulSoup(resp.content, "lxml")
+                cards = self._extract_cards(soup)
+            except Exception as exc:
+                logger.debug("Indeed list page parse error: {}", exc)
+                break
+
+            if not cards:
+                break
+
+            page_count = 0
+            for card in cards:
+                try:
+                    if not isinstance(card, Tag):
+                        continue
+
+                    # Skip container-level nodes that are actually navigation wrappers
+                    if card.name != "a" and card.name != "div" and card.name != "li":
+                        continue
+
+                    title = self._pick_first_text(card, self.CARD_TITLE_SELECTORS)
+                    company = self._pick_first_text(card, self.CARD_COMPANY_SELECTORS)
+                    loc = self._pick_first_text(card, self.CARD_LOCATION_SELECTORS, default=location)
+                    link = self._pick_first_attribute(card, self.CARD_LINK_SELECTORS, "href")
+                    salary = self._pick_first_text(card, self.CARD_SALARY_SELECTORS, default="Not specified")
+                    posted_at = self._pick_first_text(card, self.CARD_TIME_SELECTORS)
+
+                    normalized_link = self._normalize_url(link)
+                    if normalized_link and normalized_link in seen_urls:
+                        continue
+                    if normalized_link:
+                        seen_urls.add(normalized_link)
+
+                    normalized = self._normalize_and_validate_job(
+                        {
+                            "title": title,
+                            "company": company,
+                            "location": loc,
+                            "source": self.display_name,
+                            "url": normalized_link,
+                            "salary": salary,
+                            "posted_at": posted_at,
+                        }
+                    )
+                    if not normalized:
+                        continue
+
+                    normalized["salary"] = salary or normalized.get("salary", "Not specified")
+                    jobs.append(normalized)
+                    page_count += 1
+
+                    if max_jobs is not None and len(jobs) >= max_jobs:
+                        break
+                except Exception as exc:
+                    logger.debug("Indeed card parse error: {}", exc)
+                    continue
+
+            if page_count == 0:
+                break
+
+            start += self.RESULTS_PER_PAGE
+            if page_no < max_pages - 1:
+                time.sleep(max(0.5, self.config.request_delay))
+
+        return jobs
+
+    def _normalize_and_validate_job(self, job: Dict[str, str]) -> Optional[Dict[str, str]]:
+        title = self._clean_text(job.get("title", ""))
+        company = self._clean_text(job.get("company", ""))
+        source = self._clean_text(job.get("source", ""))
+        url = self._normalize_url(job.get("url", ""))
+        if not title or not source:
+            return None
+        if not company:
+            return None
+        return {
+            "title": title,
+            "company": company,
+            "location": self._clean_text(job.get("location", "")),
+            "source": source,
+            "url": url,
+            "salary": self._clean_text(job.get("salary", "Not specified")) or "Not specified",
+            "scraped_at": pd.Timestamp.now(),
+            "posted_at": self._clean_text(job.get("posted_at", "")),
+        }
+
+    def extract_job_description(self, job_url: str) -> str:
+        response = self.request(job_url, timeout=25)
+        if not response:
+            return ""
+        try:
+            page = BeautifulSoup(response.content, "lxml")
+            desc = page.select_one("div#jobDescriptionText")
+            if desc:
+                return desc.get_text(separator=" ", strip=True)
+            desc = page.select_one("div.jobsearch-JobComponent-description")
+            if desc:
+                return desc.get_text(separator=" ", strip=True)
+            ld = page.find("script", type="application/ld+json")
+            if ld and getattr(ld, "string", None):
+                payload = self._extract_from_jsonld(ld.string)
+                if payload.get("description"):
+                    return payload.get("description", "")
+        except Exception as exc:
+            logger.debug(f"Indeed description parse error: {exc}")
+        return ""
+
+    def extract_job_metadata(self, job_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        response = self.request(job_url, timeout=25)
+        if not response:
+            return None, None, None
+        try:
+            page = BeautifulSoup(response.content, "lxml")
+            title = self._pick_first_text(page, self.METADATA_TITLE_SELECTORS)
+            company = self._pick_first_text(page, self.METADATA_COMPANY_SELECTORS)
+            location = self._pick_first_text(page, self.METADATA_LOCATION_SELECTORS)
+
+            if not title or not company:
+                og = page.find("meta", property="og:title")
+                og_content = og.get("content") if isinstance(og, Tag) else ""
+                if og_content:
+                    parts = str(og_content).split(" at ", 1)
+                    if len(parts) == 2:
+                        title = title or parts[0].strip()
+                        company = company or parts[1].strip()
+
+            if not title or not company:
+                ld = page.find("script", type="application/ld+json")
+                if ld and getattr(ld, "string", None):
+                    parsed = self._extract_from_jsonld(ld.string)
+                    title = title or parsed.get("title")
+                    company = company or parsed.get("company")
+                    location = location or parsed.get("location")
+
+            if self._looks_masked_value(title):
+                title = None
+            if self._looks_masked_value(company):
+                company = None
+            if self._looks_masked_value(location):
+                location = None
+
+            return title, company, location
+        except Exception as exc:
+            logger.debug(f"Indeed title/company parse error: {exc}")
+            return None, None, None
+
 
 class JobScraper:
     """Base class for job scraping functionality"""
@@ -42,6 +811,17 @@ class JobScraper:
     def _update_progress(self, completed: int, total: int, prefix: str = "") -> None:
         """Render a simple single-line progress bar in the terminal."""
         try:
+            if not sys.stdout.isatty():
+                label = prefix.rstrip()
+                if label:
+                    label = f"{label} "
+                if total <= 0:
+                    logger.info(f"{label}{completed}/{total}")
+                    return
+                step = max(1, total // 10)
+                if completed == 0 or completed >= total or completed % step == 0:
+                    logger.info(f"{label}{completed}/{total}")
+                return
             width = 30
             if total <= 0:
                 bar = '-' * width
@@ -77,12 +857,27 @@ class JobScraper:
         self.last_run_threshold_hit = False
         # Initialize database for fast deduplication
         self.db = JobDatabase()
+        self._apply_indeed_session_cookies()
+        self._sources = self._build_sources()
+        self._linkedin_source = self._sources.get("linkedin")
+        self._indeed_source = self._sources.get("indeed")
         # Defaults
         self.request_timeout = getattr(self.config, 'request_timeout', 20)
         self._wait_tick_seconds = 1.0
         self._last_progress_line = ""
         self.max_total_jobs = max(0, int(getattr(self.config, 'max_total_jobs', 0)))
         self.min_new_jobs_to_continue = max(0, int(getattr(self.config, 'min_new_jobs_to_continue', 1)))
+
+    def _build_sources(self) -> Dict[str, ScraperSource]:
+        sources: Dict[str, ScraperSource] = {}
+        if getattr(self.config, 'enable_linkedin', True):
+            sources["linkedin"] = LinkedInSource(self.session, self.config)
+        if getattr(self.config, 'enable_indeed', False):
+            sources["indeed"] = IndeedSource(self.session, self.config)
+        return sources
+
+    def _get_source(self, source_name: str = "linkedin") -> Optional[ScraperSource]:
+        return self._sources.get(source_name.lower())
 
     def _clean_text_field(self, text: str) -> str:
         """Normalize whitespace and strip text fields."""
@@ -151,33 +946,43 @@ class JobScraper:
 
     def _http_get_with_retries(self, url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
         """Lightweight GET with retries and basic LinkedIn-aware handling."""
-        if timeout is None:
-            timeout = self.request_timeout
-        last_exc: Optional[Exception] = None
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                headers = {
-                    'User-Agent': self.config.user_agent,
-                    'Accept-Language': random.choice(['en-US,en;q=0.9', 'en-GB,en;q=0.8', 'de-DE,de;q=0.8,en;q=0.7'])
-                }
-                resp = self.session.get(url, headers=headers, timeout=timeout)
-                if resp.status_code == 200:
-                    return resp
-                if resp.status_code == 429:
-                    logger.info("HTTP 429 rate limit encountered while fetching description; backing off")
-                    time.sleep(5 + random.uniform(0, 3))
-                    return None
-                if resp.status_code in (403, 999):
-                    logger.warning(f"Blocked with HTTP {resp.status_code} for {url}")
-                    return None
-                logger.debug(f"HTTP {resp.status_code} on attempt {attempt+1} for {url}")
-            except requests.RequestException as e:
-                last_exc = e
-                logger.debug(f"HTTP error on attempt {attempt+1} for {url}: {e}")
-            time.sleep(min(5, 1.2 * (attempt + 1)))
-        if last_exc:
-            logger.debug(f"Giving up fetching {url}: {last_exc}")
-        return None
+        source = self._get_source("linkedin")
+        if not source:
+            return None
+        return source.request(url, timeout=timeout)
+
+    def _apply_indeed_session_cookies(self) -> None:
+        raw_cookie = str(getattr(self.config, 'indeed_session_cookies', '') or '').strip()
+        if not raw_cookie:
+            return
+        applied = 0
+        for token in raw_cookie.split(";"):
+            if "=" not in token:
+                continue
+            name, value = token.split("=", 1)
+            name = name.strip()
+            if not name:
+                continue
+            self.session.cookies.set(name=name.strip(), value=value.strip(), domain=".indeed.com", path="/")
+            applied += 1
+        if applied:
+            logger.info("Applied {} Indeed cookie value(s) from INDEED_SESSION_COOKIES", applied)
+
+    @staticmethod
+    def _time_range_to_days(normalized_time_range: str) -> int:
+        return TIME_RANGE_TO_DAYS.get((normalized_time_range or DEFAULT_TIME_RANGE).strip().lower(), TIME_RANGE_TO_DAYS[DEFAULT_TIME_RANGE])
+
+    def _get_indeed_time_filter(self) -> Tuple[int, str]:
+        configured = getattr(self.config, 'search_time_range', DEFAULT_TIME_RANGE)
+        normalized = (configured or DEFAULT_TIME_RANGE).strip().lower()
+        if normalized not in TIME_RANGE_TO_SECONDS:
+            logger.warning(
+                "Unsupported time range '{}' provided; defaulting to '{}'",
+                configured,
+                DEFAULT_TIME_RANGE,
+            )
+            normalized = DEFAULT_TIME_RANGE
+        return self._time_range_to_days(normalized), normalized
 
     def _get_linkedin_time_filter(self) -> Tuple[int, str]:
         """Resolve the configured time range to LinkedIn's `f_TPR` seconds filter."""
@@ -196,110 +1001,144 @@ class JobScraper:
 
     def _extract_linkedin_description(self, job_url: str) -> str:
         """Extract description from a LinkedIn job page. Used by backfill mode only."""
-        if not job_url:
-            return ''
-        resp = self._http_get_with_retries(job_url, timeout=25)
-        if not resp:
-            return ''
-        try:
-            page = BeautifulSoup(resp.content, 'lxml')
-            # 1) Newer layout
-            desc = page.select_one('div.show-more-less-html__markup')
-            if desc:
-                return desc.get_text(separator=' ', strip=True)
-            # 2) Legacy
-            desc = page.select_one('div.description__text')
-            if desc:
-                return desc.get_text(separator=' ', strip=True)
-            # 3) JSON-LD fallback
-            ld = page.find('script', type='application/ld+json')
-            ld_str = getattr(ld, 'string', None) if ld else None
-            if ld_str:
-                import json
-                try:
-                    data = json.loads(ld_str)
-                    if isinstance(data, dict) and 'description' in data:
-                        return BeautifulSoup(data['description'], 'html.parser').get_text(separator=' ', strip=True)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug(f"LinkedIn description parse error: {e}")
-        return ''
+        if not self._linkedin_source:
+            return ""
+        return self._linkedin_source.extract_job_description(job_url)
+
+    def _extract_indeed_description(self, job_url: str) -> str:
+        """Extract description from an Indeed job page. Used by backfill mode only."""
+        if not self._indeed_source:
+            return ""
+        return self._indeed_source.extract_job_description(job_url)
 
     def _extract_linkedin_job_meta(self, job_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Fetch a LinkedIn job page and return cleaned (title, company, location)."""
-        resp = self._http_get_with_retries(job_url, timeout=25)
-        if not resp:
+        if not self._linkedin_source:
             return None, None, None
-        try:
-            page = BeautifulSoup(resp.content, 'lxml')
+        return self._linkedin_source.extract_job_metadata(job_url)
 
-            title_el = (
-                page.select_one('h1.top-card-layout__title')
-                or page.select_one('h1.topcard__title')
-                or page.select_one('h1.sub-nav-cta__header')
-            )
-            company_el = (
-                page.select_one('a.topcard__org-name-link')
-                or page.select_one('span.topcard__flavor a')
-                or page.select_one('span.top-card-layout__entity-info a')
-                or page.select_one('span.topcard__flavor')
-            )
-            location_el = (
-                page.select_one('span.topcard__flavor--bullet')
-                or page.select_one('span.top-card-layout__first-subline span')
-                or page.select_one('span.topcard__flavor')
-            )
-
-            title = self._clean_text_field(title_el.get_text()) if isinstance(title_el, Tag) else ''
-            company = self._clean_text_field(company_el.get_text()) if isinstance(company_el, Tag) else ''
-            location = self._clean_text_field(location_el.get_text()) if isinstance(location_el, Tag) else ''
-
-            # Fallback: parse og:title ("Job Title - Company Name | LinkedIn")
-            if not title or not company:
-                og = page.find('meta', property='og:title')
-                og_content = og.get('content') if og else ''
-                if og_content:
-                    parts = og_content.split(' - ', 1)
-                    if len(parts) == 2:
-                        title = title or self._clean_text_field(parts[0])
-                        company_part = parts[1].split('|', 1)[0]
-                        company = company or self._clean_text_field(company_part)
-
-            # Fallback: JSON-LD block
-            if not title or not company:
-                ld = page.find('script', type='application/ld+json')
-                ld_str = getattr(ld, 'string', None) if ld else None
-                if ld_str:
-                    import json
-                    try:
-                        data = json.loads(ld_str)
-                        if isinstance(data, dict):
-                            title = title or self._clean_text_field(data.get('title', ''))
-                            hiring_org = data.get('hiringOrganization', {}) or {}
-                            if isinstance(hiring_org, dict):
-                                company = company or self._clean_text_field(hiring_org.get('name', ''))
-                            location = location or self._clean_text_field(data.get('jobLocation', {}).get('address', {}).get('addressLocality', ''))
-                    except Exception:
-                        pass
-
-            if self._looks_masked_value(title):
-                title = None
-            if self._looks_masked_value(company):
-                company = None
-            if self._looks_masked_value(location):
-                location = None
-
-            return title, company, location
-        except Exception as e:
-            logger.debug(f"LinkedIn title/company parse error: {e}")
+    def _extract_indeed_job_meta(self, job_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Fetch an Indeed job page and return cleaned (title, company, location)."""
+        if not self._indeed_source:
             return None, None, None
+        return self._indeed_source.extract_job_metadata(job_url)
+
+    def _extract_job_description_from_url(self, source: str, job_url: str) -> str:
+        source_name = (source or "").strip().lower()
+        if source_name == "linkedin":
+            return self._extract_linkedin_description(job_url)
+        if source_name == "indeed":
+            return self._extract_indeed_description(job_url)
+        return ""
 
     def _fetch_job_metadata_from_url(self, url: str, source: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Dispatch to source-specific metadata extraction."""
         if (source or '').strip().lower() == 'linkedin':
             return self._extract_linkedin_job_meta(url)
+        if (source or '').strip().lower() == 'indeed':
+            return self._extract_indeed_job_meta(url)
         return None, None, None
+
+    def _enrich_jobs_with_descriptions(self, jobs: List[Dict]) -> int:
+        """Fetch full descriptions for a list of fresh jobs, bounded by config."""
+        if not jobs:
+            return 0
+        if not bool(getattr(self.config, 'scrape_descriptions_on_search', False)):
+            return 0
+
+        limit = int(getattr(self.config, 'scrape_descriptions_limit', 0))
+        if limit < 0:
+            limit = 0
+        # Preserve old behavior when limit is 0: enrich all candidates
+        candidates = jobs if not limit else jobs[:limit]
+        if not candidates:
+            return 0
+
+        fetched = 0
+        self._update_progress(0, len(candidates), prefix="Description fetch: ")
+        for idx, job in enumerate(candidates):
+            job_url = str(job.get('url') or '').strip()
+            job_id = str(job.get('job_id') or '')
+            if not job_url:
+                logger.debug("Skipping description fetch for job_id {}: missing URL", job_id)
+                self._update_progress(idx + 1, len(candidates), prefix="Description fetch: ")
+                continue
+
+            try:
+                source = str(job.get('source') or 'LinkedIn').strip()
+                description = self._extract_job_description_from_url(source, job_url)
+                if description:
+                    job['description'] = self._clean_text_field(description)
+                    fetched += 1
+                else:
+                    job['description'] = ''
+            except Exception as e:
+                logger.debug("Failed to fetch description for job {}: {}", job_id, e)
+                job['description'] = ''
+
+            time.sleep(max(0.3, self.config.request_delay))
+            self._update_progress(idx + 1, len(candidates), prefix="Description fetch: ")
+
+        logger.info("Fetched descriptions for %d/%d scraped jobs", fetched, len(candidates))
+        return fetched
+
+    def _parse_scraped_jobs(self, jobs_df: pd.DataFrame) -> int:
+        """Parse scraped job descriptions immediately in the current run."""
+        if jobs_df.empty:
+            return 0
+        if not bool(getattr(self.config, 'enable_description_parser', False)):
+            return 0
+        if not bool(getattr(self.config, 'scrape_descriptions_on_search', False)):
+            return 0
+        if not getattr(self.config, 'openai_api_key', '').strip():
+            logger.info("Scrape-time description parsing skipped: OPENAI_API_KEY is not set")
+            return 0
+
+        parse_candidates = jobs_df.loc[jobs_df['description'].astype(str).str.strip() != ""].copy()
+        if parse_candidates.empty:
+            return 0
+
+        from .parser import DescriptionTools
+
+        parser = DescriptionTools(config=self.config, db=self.db)
+        parsed = parser.parse_jobs_dataframe(
+            parse_candidates,
+            batch_size=int(getattr(self.config, 'desc_parser_batch_size', 25)),
+            max_batches=int(getattr(self.config, 'desc_parser_max_batches', 4)),
+            context_label="scraped jobs",
+        )
+        return parsed
+
+    def _collect_fresh_jobs(
+        self,
+        page_jobs: List[Dict],
+        source: str,
+        existing_keys: set,
+    ) -> Tuple[List[Dict], int, int]:
+        seen_keys: set = set()
+        skipped_unwanted = 0
+        skipped_existing = 0
+        new_jobs: List[Dict] = []
+
+        for j in page_jobs:
+            if self.purge_keywords(j.get('title', '')) or self.purge_companies(j.get('company', '')):
+                skipped_unwanted += 1
+                continue
+            key = self._build_normalized_key_from_fields(
+                j.get('source', source),
+                j.get('title', ''),
+                j.get('company', ''),
+                j.get('url', '')
+            )
+            if not key:
+                continue
+            if key in existing_keys or key in seen_keys:
+                skipped_existing += 1
+                continue
+            seen_keys.add(key)
+            new_jobs.append(j)
+
+        return new_jobs, skipped_unwanted, skipped_existing
 
     def scrape_linkedin(self, keywords: str, location: str) -> List[Dict]:
         """Scrape job postings from LinkedIn public listings with pagination and optional descriptions.
@@ -307,128 +1146,52 @@ class JobScraper:
         - Paginates using the `start` parameter (25 results per page typical)
         - Optionally fetches job descriptions from detail pages (bounded concurrency)
         """
-        time_filter_seconds, normalized_time_range = self._get_linkedin_time_filter()
+        if not self._linkedin_source:
+            logger.debug("LinkedIn source is disabled in this run")
+            return []
 
-        def build_search_url(start: int) -> str:
-            return (
-                "https://www.linkedin.com/jobs/search/?"
-                f"keywords={quote_plus(keywords)}"
-                f"&location={quote_plus(location)}"
-                f"&f_TPR=r{time_filter_seconds}&f_JT=F&start={start}&origin=JOB_SEARCH_PAGE_JOB_FILTER&trk=public_jobs_jobs-search-bar_search-submit"
+        time_filter_seconds, normalized_time_range = self._get_linkedin_time_filter()
+        if normalized_time_range != getattr(self.config, "search_time_range", "day"):
+            logger.info(
+                "Normalized LinkedIn time range '{}' for keyword '{}' / location '{}'.",
+                normalized_time_range,
+                keywords,
+                location,
+            )
+        if not self.config.quiet_progress:
+            logger.debug(
+                "Fetching LinkedIn jobs for '{}' in '{}' with f_TPR={}.",
+                keywords,
+                normalized_time_range,
+                time_filter_seconds,
             )
 
-        def parse_cards(soup: BeautifulSoup) -> List[Dict]:
-            cards = soup.find_all('div', class_='job-search-card')
-            results: List[Dict] = []
-            for card in cards:
-                try:
-                    if not isinstance(card, Tag):
-                        continue
-                    # Prefer stable selectors used by LinkedIn job cards (CSS-only to avoid class_ typing issues)
-                    title_el = card.select_one('h3.base-search-card__title')
-                    company_link_el = card.select_one('h4.base-search-card__subtitle a')
-                    company_el = company_link_el or card.select_one('h4.base-search-card__subtitle')
-                    location_el = card.select_one('span.job-search-card__location')
-                    link_el = card.select_one('a.base-card__full-link') or card.select_one('a')
-                    time_el = card.select_one('time')
-
-                    job_url = link_el.get('href', '') if isinstance(link_el, Tag) else ''
-                    job = {
-                        'title': (title_el.get_text().strip() if isinstance(title_el, Tag) else ''),
-                        'company': (company_el.get_text().strip() if isinstance(company_el, Tag) else ''),
-                        'location': (location_el.get_text().strip() if isinstance(location_el, Tag) else location),
-                        'source': 'LinkedIn',
-                        'url': job_url,
-                        'salary': 'Not specified',
-                        'scraped_at': pd.Timestamp.now(),
-                    }
-                    # Posted date if available
-                    if isinstance(time_el, Tag):
-                        posted = time_el.get('datetime')
-                        if posted:
-                            job['posted_at'] = posted
-                    results.append(job)
-                except Exception as e:
-                    logger.debug(f"LinkedIn card parse error: {e}")
-                    continue
-            return results
-
-        hit_rate_limit = False
-        rate_limit_logged = False
-
-        def fetch_with_retries(url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
-            if timeout is None:
-                timeout = self.request_timeout
-            last_exc = None
-            for attempt in range(self.config.max_retries + 1):
-                try:
-                    # Vary Accept-Language and small jitter in headers to reduce blocks
-                    headers = {
-                        'User-Agent': self.config.user_agent,
-                        'Accept-Language': random.choice(['en-US,en;q=0.9', 'en-GB,en;q=0.8', 'de-DE,de;q=0.8,en;q=0.7'])
-                    }
-                    resp = self.session.get(url, headers=headers, timeout=timeout)
-                    if resp.status_code == 200:
-                        return resp
-                    if resp.status_code == 429:
-                        nonlocal hit_rate_limit, rate_limit_logged
-                        hit_rate_limit = True
-                        if not rate_limit_logged:
-                            logger.info(f"LinkedIn rate limited with HTTP 429; backing off and aborting {url}")
-                            rate_limit_logged = True
-                        else:
-                            logger.debug(f"LinkedIn 429 on {url}; skipping.")
-                        # Gentle backoff to reduce pressure
-                        self._sleep_with_feedback(10 + random.uniform(0, 5), label="LinkedIn 429 backoff")
-                        return None
-                    # LinkedIn-specific anti-bot responses: stop early to avoid hammering
-                    if resp.status_code in (403, 999):
-                        logger.error(f"LinkedIn blocked the request with HTTP {resp.status_code}; aborting further retries for {url}")
-                        return None
-                    logger.warning(f"LinkedIn HTTP {resp.status_code} on attempt {attempt+1} for {url}")
-                except requests.RequestException as e:
-                    last_exc = e
-                    logger.warning(f"LinkedIn request error on attempt {attempt+1}: {e}")
-                self._sleep_with_feedback(min(5, 1.2 * (attempt + 1)), label="LinkedIn search retry backoff")
-            if last_exc:
-                logger.error(f"LinkedIn request failed after retries: {last_exc}")
-            return None
+        page_limit = None
+        if self.max_total_jobs > 0:
+            page_limit = self.max_total_jobs
+        source_page_limit = getattr(self.config, "linkedin_max_search_pages", None)
+        if source_page_limit is None and self.max_total_jobs > 0:
+            source_page_limit = (
+                (self.max_total_jobs + self._linkedin_source.RESULTS_PER_PAGE - 1)
+                // self._linkedin_source.RESULTS_PER_PAGE
+            )
+        page_jobs = self._linkedin_source.scrape_jobs(
+            keywords,
+            location,
+            time_filter_seconds,
+            max_pages=source_page_limit or self._linkedin_source.DEFAULT_MAX_PAGES,
+            max_jobs=page_limit,
+        )
 
         jobs: List[Dict] = []
-        seen_keys: set = set()
         existing_keys = self._get_existing_normalized_keys()
-        skipped_existing = 0
-        skipped_unwanted = 0
 
         try:
-            start = 0
-            url = build_search_url(start)
-            resp = fetch_with_retries(url)
-            if not resp:
-                page_jobs: List[Dict] = []
-            else:
-                soup = BeautifulSoup(resp.content, 'lxml')
-                page_jobs = parse_cards(soup)
-
-            # Pre-filter and de-dup within the same run; also skip known DB jobs
-            new_jobs: List[Dict] = []
-            for j in page_jobs:
-            # Skip unwanted titles early
-                if self.purge_keywords(j.get('title', '')) or self.purge_companies(j.get('company', '')):
-                    skipped_unwanted += 1
-                    continue
-                key = self._build_normalized_key_from_fields(
-                    j.get('source', 'LinkedIn'), j.get('title', ''), j.get('company', ''), j.get('url', '')
-                )
-                if not key:
-                    continue
-                if key in existing_keys or key in seen_keys:
-                    skipped_existing += 1
-                    continue
-                seen_keys.add(key)
-                new_jobs.append(j)
-
-            jobs.extend(new_jobs)
+            jobs, skipped_unwanted, skipped_existing = self._collect_fresh_jobs(
+                page_jobs=page_jobs,
+                source='LinkedIn',
+                existing_keys=existing_keys,
+            )
 
             # Progress for a single page
             if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
@@ -439,11 +1202,76 @@ class JobScraper:
                     suffix=f"New:{len(jobs)} Unwanted:{skipped_unwanted} Existing:{skipped_existing}"
                 )
 
-            # Default: do not fetch descriptions during scraping; set empty description field
             for j in jobs:
                 j['description'] = ''
+            self._enrich_jobs_with_descriptions(jobs)
         except Exception as e:
             logger.error(f"Error scraping LinkedIn: {e}")
+
+        return jobs
+
+    def scrape_indeed(self, keywords: str, location: str) -> List[Dict]:
+        """Scrape job postings from Indeed with pagination and optional descriptions."""
+        if not self._indeed_source:
+            logger.debug("Indeed source is disabled in this run")
+            return []
+
+        indeed_filter_days, normalized_time_range = self._get_indeed_time_filter()
+        if normalized_time_range != getattr(self.config, "search_time_range", "day"):
+            logger.info(
+                "Normalized Indeed time range '{}' for keyword '{}' / location '{}'.",
+                normalized_time_range,
+                keywords,
+                location,
+            )
+        if not self.config.quiet_progress:
+            logger.debug(
+                "Fetching Indeed jobs for '{}' in '{}' with fromage={}.",
+                keywords,
+                normalized_time_range,
+                indeed_filter_days,
+            )
+
+        page_limit = None
+        if self.max_total_jobs > 0:
+            page_limit = self.max_total_jobs
+        source_page_limit = getattr(self.config, "indeed_max_search_pages", None)
+        if source_page_limit is None and self.max_total_jobs > 0:
+            source_page_limit = (
+                (self.max_total_jobs + self._indeed_source.RESULTS_PER_PAGE - 1)
+                // self._indeed_source.RESULTS_PER_PAGE
+            )
+        page_jobs = self._indeed_source.scrape_jobs(
+            keywords,
+            location,
+            indeed_filter_days,
+            max_pages=source_page_limit or self._indeed_source.DEFAULT_MAX_PAGES,
+            max_jobs=page_limit,
+        )
+
+        jobs: List[Dict] = []
+        existing_keys = self._get_existing_normalized_keys()
+
+        try:
+            jobs, skipped_unwanted, skipped_existing = self._collect_fresh_jobs(
+                page_jobs=page_jobs,
+                source='Indeed',
+                existing_keys=existing_keys,
+            )
+
+            if not getattr(self.config, 'quiet_progress', True) or sys.stdout.isatty():
+                self._print_progress(
+                    prefix=f"Indeed {keywords} @ {location}",
+                    current=1,
+                    total=1,
+                    suffix=f"New:{len(jobs)} Unwanted:{skipped_unwanted} Existing:{skipped_existing}"
+                )
+
+            for j in jobs:
+                j['description'] = ''
+            self._enrich_jobs_with_descriptions(jobs)
+        except Exception as e:
+            logger.error(f"Error scraping Indeed: {e}")
 
         return jobs
 
@@ -474,6 +1302,28 @@ class JobScraper:
                             linkedin_jobs = linkedin_jobs[:remaining_slots]
                             stop_collecting = True
                     all_jobs.extend(linkedin_jobs)
+                    if self.max_total_jobs and len(all_jobs) >= self.max_total_jobs:
+                        stop_collecting = True
+                        logger.debug(
+                            "Reached configured MAX_TOTAL_JOBS limit (%d); stopping further scraping",
+                            self.max_total_jobs,
+                        )
+                        break
+
+                if self.config.enable_indeed:
+                    indeed_jobs = self.scrape_indeed(keyword, location)
+                    if limit_per_source is not None and limit_per_source > 0:
+                        indeed_jobs = indeed_jobs[:limit_per_source]
+
+                    if self.max_total_jobs:
+                        remaining_slots = self.max_total_jobs - len(all_jobs)
+                        if remaining_slots <= 0:
+                            stop_collecting = True
+                            break
+                        if len(indeed_jobs) > remaining_slots:
+                            indeed_jobs = indeed_jobs[:remaining_slots]
+                            stop_collecting = True
+                    all_jobs.extend(indeed_jobs)
                     if self.max_total_jobs and len(all_jobs) >= self.max_total_jobs:
                         stop_collecting = True
                         logger.debug(
@@ -592,8 +1442,13 @@ class JobScraper:
                 logger.info("Automatic database cleanup disabled, skipping")
 
             # Parse keywords and locations from config
-            keywords = [k.strip() for k in self.config.search_keywords.split(',')]
-            locations = [l.strip() for l in self.config.search_locations.split(',')]
+            keywords = [k.strip() for k in self.config.search_keywords.split(',') if k.strip()]
+            locations = [l.strip() for l in self.config.search_locations.split(',') if l.strip()]
+
+            if not keywords:
+                raise ValueError("No valid search keywords configured. Set SEARCH_KEYWORDS in .env or pass --keywords.")
+            if not locations:
+                raise ValueError("No valid search locations configured. Set SEARCH_LOCATIONS in .env or pass --locations.")
             jobs_df = self.scrape(keywords, locations)
 
             if jobs_df.empty:
@@ -611,6 +1466,10 @@ class JobScraper:
 
             # Store jobs in SQLite database (fast deduplication)
             new_jobs_count = self.db.put_into_sql(jobs_df)
+            if new_jobs_count:
+                parsed_count = self._parse_scraped_jobs(jobs_df)
+                if parsed_count:
+                    logger.info("Parsed %d freshly scraped descriptions in this run", parsed_count)
 
             if self.min_new_jobs_to_continue and new_jobs_count < self.min_new_jobs_to_continue:
                 self.last_run_threshold_hit = True
@@ -657,6 +1516,7 @@ class JobScraper:
             'request_delay': self.config.request_delay,
             'max_retries': self.config.max_retries,
             'enable_linkedin': self.config.enable_linkedin,
+            'enable_indeed': self.config.enable_indeed,
             'dry_run': self.config.dry_run
         }
 

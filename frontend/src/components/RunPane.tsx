@@ -52,6 +52,7 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
   const [loadingMode, setLoadingMode] = useState<CliMode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pollHandle = useRef<number | null>(null);
+  const logTailRef = useRef<HTMLPreElement | null>(null);
   const runIdRef = useRef("");
 
   const currentRunId = useMemo(() => status?.run_id || "", [status]);
@@ -86,6 +87,7 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
     const runId = runIdRef.current;
     if (!runId) return;
     try {
+      setError(null);
       const nextStatus = await getRunStatus(runId);
       setStatus(nextStatus);
       if (nextStatus.status !== "running") {
@@ -99,7 +101,7 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
 
   const startPolling = () => {
     stopPolling();
-    pollHandle.current = window.setInterval(refreshStatus, 1500);
+    pollHandle.current = window.setInterval(refreshStatus, 1000);
   };
 
   const startCliRun = async (mode: CliMode) => {
@@ -110,13 +112,34 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
       const nextStatus = await startRun({ mode });
       runIdRef.current = nextStatus.run_id;
       setStatus(nextStatus);
-      startPolling();
+      if (nextStatus.status === "running") {
+        startPolling();
+        await refreshStatus();
+      } else {
+        await refreshStatus();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start run.");
     } finally {
       setLoading(false);
       setLoadingMode(null);
     }
+  };
+
+  useEffect(() => {
+    if (!status) return;
+    if (logTailRef.current) {
+      logTailRef.current.scrollTop = logTailRef.current.scrollHeight;
+    }
+  }, [status?.log_tail]);
+
+  const visibleLogTail = (currentStatus: RunStatus | null): string => {
+    if (!currentStatus || !currentStatus.log_tail) {
+      return currentStatus?.status === "running"
+        ? "Waiting for output..."
+        : "Run completed without log output.";
+    }
+    return currentStatus.log_tail;
   };
 
   useEffect(() => {
@@ -173,7 +196,7 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
       {error && <div className="error">{error}</div>}
 
       {status && (
-        <div className="status">
+          <div className="status">
           <div className="status-row">
             <div>
               <p className="label">Run ID</p>
@@ -185,7 +208,7 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
             <span className={`pill ${status.status}`}>{status.status}</span>
           </div>
           <p className="label">Log tail</p>
-          <pre>{status.log_tail || "Waiting for output..."}</pre>
+          <pre ref={logTailRef}>{visibleLogTail(status)}</pre>
         </div>
       )}
     </section>

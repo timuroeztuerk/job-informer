@@ -11,12 +11,17 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+import re
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import AsyncGenerator, Iterator, Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from starlette.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Ensure local src imports work when running `uvicorn api:app`
@@ -28,11 +33,83 @@ from src.utils.db_summary import build_db_summary  # noqa: E402
 
 
 DEFAULT_DB = ROOT / "data" / "jobs.db"
-DB_PATH = os.getenv("JOBS_DB_PATH", str(DEFAULT_DB))
-API_TOKEN = os.getenv("API_TOKEN", "")
-MAX_LOG_BYTES = 8000  # Avoid sending huge logs to the frontend
+ANSI_ESCAPE_RE = re.compile(r"(?:\x1B[@-Z\\-_]|\x1B\[[0-?]*[ -/]*[@-~])")
 
-app = FastAPI(title="Job Informer API", version="0.1.0")
+
+def _as_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _resolve_db_path(env_name: str, fallback: Path) -> str:
+    candidates: list[Path] = []
+    env_path = os.getenv(env_name)
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.extend([fallback, ROOT / "data" / "jobs.db", Path.cwd() / "backend" / "data" / "jobs.db"])
+    last_error: Exception | None = None
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            return str(resolved)
+        except OSError as exc:
+            last_error = exc
+
+    raise RuntimeError(f"Unable to initialize DB directory for {env_name}: {last_error}") from last_error
+
+
+DB_PATH = _resolve_db_path("JOBS_DB_PATH", DEFAULT_DB)
+RUN_STORE_DB_PATH = _resolve_db_path("RUN_STORE_DB_PATH", Path(DB_PATH))
+API_TOKEN = os.getenv("API_TOKEN", "")
+MAX_LOG_BYTES = _as_int_env("MAX_LOG_BYTES", 30000)  # Avoid sending huge logs to the frontend
+
+FRONTEND_DIST_DIR = ROOT / "frontend" / "dist"
+FRONTEND_INDEX = FRONTEND_DIST_DIR / "index.html"
+
+
+@dataclass(frozen=True)
+class AppSettings:
+    db_path: str
+    run_store_db_path: str
+    api_token: str
+    max_log_bytes: int
+    frontend_dist_dir: Path
+
+
+APP_SETTINGS = AppSettings(
+    db_path=DB_PATH,
+    run_store_db_path=RUN_STORE_DB_PATH,
+    api_token=API_TOKEN,
+    max_log_bytes=MAX_LOG_BYTES,
+    frontend_dist_dir=FRONTEND_DIST_DIR,
+)
+
+
+@contextmanager
+def open_jobs_db() -> Iterator[sqlite3.Connection]:
+    with sqlite3.connect(APP_SETTINGS.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        yield conn
+
+
+@asynccontextmanager
+async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    global job_db, run_store
+    job_db = JobDatabase(APP_SETTINGS.db_path)
+    run_store = RunStore(APP_SETTINGS.run_store_db_path)
+    try:
+        yield
+    finally:
+        RUNS.clear()
+        job_db = None
+        run_store = None
+
+
+app = FastAPI(title="Job Informer API", version="0.1.0", lifespan=app_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,12 +118,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-job_db = JobDatabase(DB_PATH)
+if FRONTEND_DIST_DIR.exists():
+    assets_dir = FRONTEND_DIST_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="frontend-assets")
+
+
+@app.get("/health")
+def health_check() -> dict:
+    return {
+        "status": "ok",
+        "db_path": APP_SETTINGS.db_path,
+    }
+
+job_db: Optional[JobDatabase] = None
+run_store: Optional["RunStore"] = None
+
+
+def _require_job_db() -> JobDatabase:
+    if job_db is None:
+        raise HTTPException(status_code=503, detail="Job database is not initialized yet.")
+    return job_db
+
+
+def _require_run_store() -> "RunStore":
+    if run_store is None:
+        raise HTTPException(status_code=503, detail="Run store is not initialized yet.")
+    return run_store
 
 
 def require_token(x_api_token: str | None = Header(default=None)):
     """Optional bearer: if API_TOKEN is set, enforce it via header."""
-    if API_TOKEN and x_api_token != API_TOKEN:
+    if APP_SETTINGS.api_token and x_api_token != APP_SETTINGS.api_token:
         raise HTTPException(status_code=401, detail="Invalid or missing API token.")
     return True
 
@@ -54,40 +157,27 @@ def require_token(x_api_token: str | None = Header(default=None)):
 CLI_MODES: dict[str, list[str]] = {
     "run-once": ["--run-once"],
     "purge": ["--purge"],
-    # Legacy alias routes to combined purge pipeline
-    "ai-purge": ["--purge"],
     "reset-ai-purge": ["--reset-ai-purge"],
     "parse-descriptions": ["--parse-descriptions"],
-    # Legacy alias routes to combined fetch + parse workflow
-    "get-descriptions": ["--parse-descriptions"],
     "db-summary": ["--db-summary"],
     "test": ["--test"],
     "refetch-titles": ["--refetch-titles"],
 }
 
 DEFAULT_MODE = "run-once"
-CANONICAL_MODES = {
-    "ai-purge": "purge",
-    "get-descriptions": "parse-descriptions",
-}
+CANONICAL_MODES: dict[str, str] = {}
 
 
 def _canonical_mode(mode: str) -> str:
     return CANONICAL_MODES.get(mode, mode)
-CANONICAL_MODES = {
-    "ai-purge": "purge",
-    "get-descriptions": "parse-descriptions",
-}
 
 
 class RunRequest(BaseModel):
     mode: Literal[
         "run-once",
         "purge",
-        "ai-purge",
         "reset-ai-purge",
         "parse-descriptions",
-        "get-descriptions",
         "db-summary",
         "test",
         "refetch-titles",
@@ -129,8 +219,11 @@ class RunStore:
         self.db_path = db_path
         self._ensure_table()
 
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_path, timeout=30)
+
     def _ensure_table(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS api_runs (
@@ -162,7 +255,7 @@ class RunStore:
         locations: Optional[str],
         time_range: Optional[str],
     ) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO api_runs (
@@ -191,7 +284,7 @@ class RunStore:
         return_code: Optional[int],
         finished_at: Optional[datetime],
     ) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE api_runs
@@ -203,7 +296,7 @@ class RunStore:
             conn.commit()
 
     def get(self, run_id: str) -> Optional[dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT * FROM api_runs WHERE run_id = ?", (run_id,)).fetchone()
         if not row:
@@ -211,15 +304,13 @@ class RunStore:
         return {k: row[k] for k in row.keys()}
 
     def list_recent(self, limit: int = 20) -> list[dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM api_runs ORDER BY datetime(started_at) DESC LIMIT ?", (limit,)
             ).fetchall()
         return [{k: row[k] for k in row.keys()} for row in rows]
 
-
-run_store = RunStore(DB_PATH)
 
 
 class RunRecord:
@@ -244,7 +335,8 @@ class RunRecord:
         self.keywords = keywords
         self.locations = locations
         self.time_range = time_range
-        run_store.save_start(run_id, log_path, mode, keywords, locations, time_range)
+        self._run_store = _require_run_store()
+        self._run_store.save_start(run_id, log_path, mode, keywords, locations, time_range)
 
     def status(self) -> RunStatus:
         code = self.process.poll()
@@ -254,9 +346,9 @@ class RunRecord:
             finished = self.finished_at or datetime.utcnow()
             self.finished_at = finished
             status = "succeeded" if code == 0 else "failed"
-            run_store.update_status(self.run_id, status, code, finished)
+            self._run_store.update_status(self.run_id, status, code, finished)
         else:
-            run_store.update_status(self.run_id, status, None, None)
+            self._run_store.update_status(self.run_id, status, None, None)
         return RunStatus(
             run_id=self.run_id,
             mode=self.mode,
@@ -290,7 +382,7 @@ def start_run(payload: RunRequest, _: bool = Depends(require_token)) -> RunStatu
         raise HTTPException(status_code=400, detail=f"Unsupported mode: {requested_mode}")
 
     mode = _canonical_mode(requested_mode)
-    cmd = [sys.executable, str(ROOT / "main.py"), *CLI_MODES[requested_mode]]
+    cmd = [sys.executable, "-u", str(ROOT / "main.py"), *CLI_MODES[requested_mode]]
     if payload.keywords:
         cmd += ["--keywords", payload.keywords]
     if payload.locations:
@@ -298,12 +390,17 @@ def start_run(payload: RunRequest, _: bool = Depends(require_token)) -> RunStatu
     if payload.time_range:
         cmd += ["--time", payload.time_range]
 
+    run_env = os.environ.copy()
+    run_env["PYTHONUNBUFFERED"] = "1"
+
     log_file = log_path.open("w")
     process = subprocess.Popen(
         cmd,
         stdout=log_file,
         stderr=subprocess.STDOUT,
+        env=run_env,
     )
+    log_file.close()
     RUNS[run_id] = RunRecord(
         run_id,
         process,
@@ -323,7 +420,7 @@ def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
     if record:
         return record.status()
 
-    stored = run_store.get(run_id)
+    stored = _require_run_store().get(run_id)
     if not stored:
         raise HTTPException(status_code=404, detail="Run not found.")
 
@@ -349,7 +446,7 @@ def list_runs(limit: int = Query(20, ge=1, le=100), _: bool = Depends(require_to
     # Refresh statuses for in-memory tracked runs
     for record in list(RUNS.values()):
         record.status()
-    records = run_store.list_recent(limit=limit)
+    records = _require_run_store().list_recent(limit=limit)
     summaries: list[RunSummary] = []
     for record in records:
         summaries.append(
@@ -383,7 +480,7 @@ def list_jobs(
 ) -> dict:
     """Return a simple paginated job list with optional filters."""
     clauses = ["1=1"]
-    params: list = []
+    params: list[str] = []
 
     if search:
         like = f"%{search}%"
@@ -415,8 +512,7 @@ def list_jobs(
 
     where_clause = " AND ".join(clauses)
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with open_jobs_db() as conn:
             query = f"""
                 SELECT job_id, title, company, location, source, url, salary, scraped_at
                 FROM jobs
@@ -442,8 +538,7 @@ def list_jobs(
 def get_job(job_id: str, _: bool = Depends(require_token)) -> dict:
     """Return a single job by id."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with open_jobs_db() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             parsed = _latest_parsed_description(conn, job_id)
     except Exception as exc:
@@ -461,7 +556,7 @@ def get_job(job_id: str, _: bool = Depends(require_token)) -> dict:
 def delete_job(job_id: str, _: bool = Depends(require_token)) -> Response:
     """Delete a job and its parsed descriptions."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with open_jobs_db() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM parsed_descriptions WHERE job_id = ?", (job_id,))
             cursor.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
@@ -479,8 +574,8 @@ def delete_job(job_id: str, _: bool = Depends(require_token)) -> Response:
 def job_stats(_: bool = Depends(require_token)) -> dict:
     """Lightweight wrapper around JobDatabase summary for dashboards."""
     try:
-        summary = job_db.get_job_summary()
-        with sqlite3.connect(DB_PATH) as conn:
+        summary = _require_job_db().get_job_summary()
+        with open_jobs_db() as conn:
             sources = [r[0] for r in conn.execute("SELECT DISTINCT source FROM jobs ORDER BY source").fetchall()]
             companies = [
                 r[0]
@@ -499,7 +594,7 @@ def job_stats(_: bool = Depends(require_token)) -> dict:
 def db_summary(_: bool = Depends(require_token)) -> dict:
     """Expose the richer database summary that mirrors the CLI db-summary output."""
     try:
-        return build_db_summary(job_db)
+        return build_db_summary(_require_job_db())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to build database summary: {exc}") from exc
 
@@ -510,11 +605,31 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 
 def _read_log_tail(path: Path) -> str:
     if not path.exists():
-        return ""
+        fallback = Path(__file__).resolve().parent / "logs" / path.name
+        if fallback.exists():
+            path = fallback
+        else:
+            fallback = Path("/app/logs") / path.name
+            if fallback.exists():
+                path = fallback
+            else:
+                return ""
     data = path.read_bytes()
-    if len(data) <= MAX_LOG_BYTES:
-        return data.decode(errors="replace")
-    return data[-MAX_LOG_BYTES:].decode(errors="replace")
+    if len(data) <= APP_SETTINGS.max_log_bytes:
+        text = data.decode(errors="replace")
+    else:
+        text = data[-APP_SETTINGS.max_log_bytes :].decode(errors="replace")
+    return _clean_log_text(text)
+
+
+def _clean_log_text(text: str) -> str:
+    if not text:
+        return text
+    cleaned = ANSI_ESCAPE_RE.sub("", text)
+    if "\r" not in cleaned:
+        return cleaned
+    # Preserve progress updates that use '\r' as inline redraw.
+    return cleaned.replace("\r", "\n")
 
 
 def _latest_parsed_description(conn: sqlite3.Connection, job_id: str) -> dict | None:
@@ -545,6 +660,25 @@ def _latest_parsed_description(conn: sqlite3.Connection, job_id: str) -> dict | 
         }
     except Exception:
         return None
+
+
+if FRONTEND_INDEX.exists():
+    @app.get("/", include_in_schema=False)
+    async def serve_frontend_root() -> FileResponse:
+        return FileResponse(str(FRONTEND_INDEX))
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend_spa(full_path: str):
+        if full_path.startswith("assets/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        if full_path.startswith("_") or full_path.endswith(".ico") or full_path == "favicon.ico":
+            candidate = FRONTEND_DIST_DIR / full_path
+            if candidate.exists() and candidate.is_file():
+                return FileResponse(str(candidate))
+        candidate = FRONTEND_DIST_DIR / full_path
+        if candidate.exists() and candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(FRONTEND_INDEX))
 
 
 if __name__ == "__main__":

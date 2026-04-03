@@ -60,9 +60,15 @@ class Config:
     desc_parser_version: int
     desc_parser_dry_run: bool
     desc_parser_concurrency: int
+    scrape_descriptions_on_search: bool
+    scrape_descriptions_limit: int
 
     # Feature Toggles
     enable_linkedin: bool
+    enable_indeed: bool
+    linkedin_max_search_pages: int
+    indeed_max_search_pages: int
+    indeed_session_cookies: str
     dry_run: bool
     auto_purge_before_scraping: bool
     
@@ -115,6 +121,9 @@ class Config:
             max_total_jobs=int(os.getenv('MAX_TOTAL_JOBS', '0')),
             min_new_jobs_to_continue=int(os.getenv('MIN_NEW_JOBS_TO_CONTINUE', '1')),
             quiet_progress=_get_bool('QUIET_PROGRESS', 'true'),
+            linkedin_max_search_pages=int(os.getenv('LINKEDIN_MAX_SEARCH_PAGES', '0')),
+            indeed_max_search_pages=int(os.getenv('INDEED_MAX_SEARCH_PAGES', '0')),
+            indeed_session_cookies=os.getenv('INDEED_SESSION_COOKIES', ''),
             
             # Logging Configuration
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
@@ -154,9 +163,12 @@ class Config:
             desc_parser_version=int(os.getenv('DESC_PARSER_VERSION', '1')),
             desc_parser_dry_run=_get_bool('DESC_PARSER_DRY_RUN', 'false'),
             desc_parser_concurrency=int(os.getenv('DESC_PARSER_CONCURRENCY', '25')),
+            scrape_descriptions_on_search=_get_bool('SCRAPE_DESCRIPTIONS', 'true'),
+            scrape_descriptions_limit=int(os.getenv('SCRAPE_DESCRIPTIONS_LIMIT', '20')),
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
+            enable_indeed=_get_bool('ENABLE_INDEED', 'false'),
             dry_run=_get_bool('DRY_RUN', 'false'),
             auto_purge_before_scraping=_get_bool('AUTO_PURGE_BEFORE_SCRAPING', 'true')
         )
@@ -167,7 +179,8 @@ class Config:
 
         # Modes that require email configuration
         email_required_modes = {
-            'run-once', 'test', 'summary', 'inform'
+            'test',
+            'inform',
         }
         # Modes that require LLM access
         ai_required_modes = {'test', 'parse-descriptions', 'purge'}
@@ -259,6 +272,11 @@ class Config:
             'desc_parser_version': self.desc_parser_version,
             'desc_parser_dry_run': self.desc_parser_dry_run,
             'desc_parser_concurrency': self.desc_parser_concurrency,
+            'scrape_descriptions_on_search': self.scrape_descriptions_on_search,
+            'scrape_descriptions_limit': self.scrape_descriptions_limit,
             'enable_linkedin': self.enable_linkedin,
+            'enable_indeed': self.enable_indeed,
+            'linkedin_max_search_pages': self.linkedin_max_search_pages,
+            'indeed_max_search_pages': self.indeed_max_search_pages,
             'dry_run': self.dry_run
         }

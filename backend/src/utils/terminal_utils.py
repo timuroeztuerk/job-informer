@@ -13,6 +13,9 @@ def _sleep_quiet(self, seconds: float, prefix: str = "pause") -> None:
         total = 0.0
     if total <= 0:
         return
+    if not sys.stdout.isatty():
+        time.sleep(total)
+        return
     # minimal spinner
     spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     tick = 0.1
@@ -65,6 +68,13 @@ def _progress_bar(self, current: int, total: int, width: int = 24) -> str:
 
 def _print_progress(self, prefix: str, current: int, total: int, suffix: str = "") -> None:
     try:
+        if not sys.stdout.isatty():
+            label = prefix.rstrip()
+            if label:
+                label = f"{label} "
+            msg = f"{label}{current}/{total} {suffix}".strip()
+            logger.info(msg)
+            return
         bar = self._progress_bar(current, total)
         line = f"\r{prefix} [{bar}] {current}/{total} {suffix}".rstrip()
         sys.stdout.write(line)

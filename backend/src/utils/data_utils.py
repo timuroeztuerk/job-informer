@@ -282,7 +282,15 @@ def normalize_job_url(url: str, source: str) -> str:
             # Generic fallback: scheme://host/path without query/fragment
             return f"{netloc}{path}".rstrip('/')
 
-        # Note: Indeed support removed
+        # Indeed: prefer viewjob `jk` parameter
+        if 'indeed.' in netloc:
+            job_ids = query.get('jk')
+            if job_ids:
+                return f"indeed:{job_ids[0]}"
+            job_urls = parse_qs(parsed.fragment or '').get("jk")
+            if job_urls:
+                return f"indeed:{job_urls[0]}"
+            return f"{netloc}{path}".rstrip('/')
 
         # Generic: host + path without query/fragment
         return f"{netloc}{path}".rstrip('/')

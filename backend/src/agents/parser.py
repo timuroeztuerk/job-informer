@@ -130,7 +130,16 @@ class DescriptionTools:
                 max_status_length = 60
                 if len(status_clean) > max_status_length:
                     status_clean = status_clean[:max_status_length - 3] + "..."
-                line += f" — {status_clean}"
+                line += f" - {status_clean}"
+
+            if not sys.stdout.isatty():
+                if job_total > 0:
+                    step = max(1, int(job_total) // 10)
+                    if job_position == 0 or job_position >= job_total or job_position % step == 0:
+                        logger.info(line)
+                else:
+                    logger.info(line)
+                return
 
             padding = max(self._progress_line_length - len(line), 0)
             sys.stdout.write("\r" + line + " " * padding)
@@ -345,17 +354,112 @@ class DescriptionTools:
         logger.info(f"Batch processing complete: {new_count} new descriptions parsed and stored")
         return new_count
 
+    def parse_jobs_dataframe(
+        self,
+        jobs_df: pd.DataFrame,
+        *,
+        batch_size: Optional[int] = None,
+        max_batches: Optional[int] = None,
+        context_label: str = "jobs",
+    ) -> int:
+        """Parse descriptions for a pre-fetched DataFrame.
+
+        This is used by scrape-time enrichment paths to avoid re-querying the DB
+        before parsing.
+        """
+        if jobs_df.empty:
+            return 0
+
+        version = int(getattr(self.config, 'desc_parser_version', 1))
+        if batch_size is None:
+            batch_size = int(getattr(self.config, 'desc_parser_batch_size', 25))
+        else:
+            batch_size = int(batch_size)
+        if max_batches is None:
+            max_batches = int(getattr(self.config, 'desc_parser_max_batches', 4))
+        else:
+            max_batches = int(max_batches)
+
+        if batch_size <= 0 or max_batches <= 0:
+            logger.warning("Description parser settings invalid (batch_size/max_batches <= 0); skipping")
+            return 0
+
+        # Normalize and sanitize input
+        working = jobs_df.copy()
+        for column in ("job_id", "title", "company", "description"):
+            if column not in working.columns:
+                working[column] = ""
+        working["job_id"] = working["job_id"].astype(str).str.strip()
+        working["description"] = working["description"].astype(str).str.strip()
+        working = working[["job_id", "title", "company", "description"]]
+        working = working[(working["job_id"] != "") & (working["description"] != "")]
+
+        if working.empty:
+            logger.info(f"Description parser ({context_label}) — no parseable descriptions in provided data")
+            return 0
+
+        working = working.copy()
+        working["desc_hash"] = working["description"].astype(str).apply(self._hash_description)
+
+        with sqlite3.connect(self.db.db_path) as conn:
+            existing_df = pd.read_sql_query(
+                "SELECT job_id, desc_hash FROM parsed_descriptions WHERE version = ?",
+                conn,
+                params=[version],
+            )
+
+        existing_set = set()
+        if not existing_df.empty:
+            existing_set = set(zip(existing_df["job_id"].astype(str), existing_df["desc_hash"].astype(str)))
+
+        to_parse_mask = [
+            (str(row["job_id"]), str(row["desc_hash"])) not in existing_set
+            for _, row in working.iterrows()
+        ]
+        unparsed_df = working[to_parse_mask].copy()
+
+        if unparsed_df.empty:
+            logger.info(f"Description parser ({context_label}) — all provided jobs already parsed at version {version}")
+            return 0
+
+        max_to_process = min(len(unparsed_df), max_batches * batch_size)
+        if max_to_process <= 0:
+            return 0
+
+        unparsed_df = unparsed_df.head(max_to_process)
+        total_batches = (len(unparsed_df) + batch_size - 1) // batch_size
+        if total_batches <= 0:
+            return 0
+
+        logger.info(
+            f"Description parser ({context_label}): parsing {len(unparsed_df)} jobs "
+            f"(max {max_to_process} from provided set, requested batches: {max_batches} x {batch_size})"
+        )
+
+        total_new = 0
+        batches_processed = 0
+        for batch_start in range(0, max_to_process, batch_size):
+            batch_end = min(batch_start + batch_size, max_to_process)
+            batch_df = unparsed_df.iloc[batch_start:batch_end]
+            if batch_df.empty:
+                continue
+            batch_number = batches_processed + 1
+            # remove desc_hash as parse_batch computes it and expects payload columns only
+            processed = self.parse_batch(batch_df.drop(columns=["desc_hash"]), batch_number, total_batches)
+            total_new += processed
+            batches_processed += 1
+
+        logger.info(
+            f"Description parser ({context_label}) summary — parsed {total_new} / "
+            f"{len(unparsed_df)} jobs (version={version}, batches={batches_processed}/{total_batches})"
+        )
+        return total_new
+
     def run_incremental(self, batch_size: int, max_batches: int) -> int:
         """Find jobs with descriptions and without cached parse.
         Processes at most max_batches batches of batch_size each.
         """
-        total_new = 0
-        version = int(getattr(self.config, 'desc_parser_version', 1))
-        batches_processed = 0
-        
         with sqlite3.connect(self.db.db_path) as conn:
-            # Get all jobs with descriptions that haven't been parsed at this version
-            # We'll compute the hash in Python since it's more reliable
             all_jobs_df = pd.read_sql_query(
                 """
                 SELECT job_id, description, title, company
@@ -363,72 +467,16 @@ class DescriptionTools:
                 WHERE description IS NOT NULL AND TRIM(description) <> ''
                 ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
                 """,
-                conn
-            )
-            
-            if all_jobs_df.empty:
-                logger.info("Description parser summary — no jobs with descriptions found")
-                return 0
-            
-            # Add description hash column
-            all_jobs_df['desc_hash'] = all_jobs_df['description'].astype(str).apply(self._hash_description)
-            
-            # Get existing parsed records for this version
-            existing_df = pd.read_sql_query(
-                "SELECT job_id, desc_hash FROM parsed_descriptions WHERE version = ?",
                 conn,
-                params=[version]
             )
-            
-            # Create a set of (job_id, desc_hash) tuples for O(1) lookup
-            existing_set = set()
-            if not existing_df.empty:
-                existing_set = set(zip(existing_df['job_id'].astype(str), existing_df['desc_hash'].astype(str)))
-            
-            # Filter out already parsed jobs
-            mask = [
-                (str(row['job_id']), str(row['desc_hash'])) not in existing_set 
-                for _, row in all_jobs_df.iterrows()
-            ]
-            unparsed_df = all_jobs_df[mask].copy()
-            
-            if unparsed_df.empty:
-                logger.info("Description parser summary — all descriptions already parsed at this version")
-                return 0
-            
-            total_unparsed = len(unparsed_df)
-            max_to_process = min(total_unparsed, max_batches * batch_size)
-            total_planned_batches = min(max_batches, (max_to_process + batch_size - 1) // batch_size)
-            
-            logger.info(f"Description parser: found {total_unparsed} unparsed descriptions, will process up to {max_to_process} (max {total_planned_batches} batches of {batch_size})")
-            
-            # Process in batches, respecting max_batches limit
-            for batch_start in range(0, max_to_process, batch_size):
-                if batches_processed >= max_batches:
-                    logger.info(f"Reached maximum batch limit ({max_batches}), stopping")
-                    break
-                    
-                batch_end = min(batch_start + batch_size, max_to_process)
-                batch_df = unparsed_df.iloc[batch_start:batch_end].copy()
-                
-                # Remove desc_hash column before processing (parse_batch doesn't expect it)
-                batch_for_processing = batch_df.drop(columns=['desc_hash'])
-                
-                # Process this batch with batch number information
-                batch_number = batches_processed + 1
-                processed = self.parse_batch(batch_for_processing, batch_number, total_planned_batches)
-                total_new += processed
-                batches_processed += 1
-                
-                logger.info(f"Description parser: processed batch {batches_processed}/{total_planned_batches}, parsed {processed}/{len(batch_df)} items")
 
-        if total_new > 0:
-            logger.info(
-                f"Description parser summary — total_jobs:{len(all_jobs_df)} already_parsed:{len(all_jobs_df) - len(unparsed_df)} stored_new:{total_new} version:{version} batches_processed:{batches_processed}"
-            )
-        else:
-            logger.info("Description parser summary — no new descriptions parsed")
-        return total_new
+        return self.parse_jobs_dataframe(
+            all_jobs_df,
+            batch_size=batch_size,
+            max_batches=max_batches,
+            context_label="db-backfill",
+        )
+
 
     def run_description_parser(self) -> bool:
         """Run the incremental description parser with caching, controlled via config knobs."""
@@ -481,19 +529,20 @@ class DescriptionTools:
                     url = str(row.get('url') or '')
                     source = str(row.get('source') or '')
                     job_id = str(row.get('job_id'))
-                    
+
                     if not url:
                         failed_job_ids.append(job_id)  # No URL to fetch from
                         completed_in_batch += 1
                         scraper._update_progress(completed_in_batch, total_in_batch, prefix=f"Backfill batch {batches_processed+1}: ")
                         continue
 
-                    desc = scraper._extract_linkedin_description(url)
+                    source = str(row.get('source') or '').strip()
+                    desc = scraper._extract_job_description_from_url(source, url)
                     if desc and desc.strip():
                         updates.append({'job_id': job_id, 'description': desc})
                     else:
                         failed_job_ids.append(job_id)  # Failed to fetch or empty description
-                        
+
                     # gentle pacing between requests
                     time.sleep(max(0.5, scraper.config.request_delay))
                     completed_in_batch += 1

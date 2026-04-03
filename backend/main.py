@@ -52,22 +52,10 @@ def main():
     group.add_argument('--db-summary', dest='db_summary', action='store_true', help='Show database summary')
     group.add_argument('--purge', action='store_true', help='Purge unwanted jobs (rules + AI)')
     group.add_argument(
-        '--ai-purge',
-        dest='ai_purge',
-        action='store_true',
-        help='[Deprecated] Alias for --purge (runs rules + AI purge)'
-    )
-    group.add_argument(
         '--parse-descriptions',
         dest='parse_descriptions',
         action='store_true',
         help='Fetch missing job descriptions and parse them with AI'
-    )
-    group.add_argument(
-        '--get-descriptions',
-        dest='get_descriptions',
-        action='store_true',
-        help='[Deprecated] Alias for --parse-descriptions (fetch + parse descriptions)'
     )
     group.add_argument('--reset-ai-purge', dest='reset_ai_purge', action='store_true', help='Reset AI purge analysis flags')
     group.add_argument(
@@ -75,6 +63,12 @@ def main():
         dest='refetch_titles',
         action='store_true',
         help='Refetch job titles/companies from stored URLs when they look masked'
+    )
+    group.add_argument(
+        '--probe-indeed',
+        dest='probe_indeed',
+        action='store_true',
+        help='Probe Indeed endpoint for configured keywords (default: Data in Deutschland)'
     )
     group.add_argument(
         '--inform',
@@ -106,22 +100,21 @@ def main():
 
     args = parser.parse_args()
 
-    used_deprecated_ai_flag = getattr(args, 'ai_purge', False)
-    used_deprecated_flag = getattr(args, 'get_descriptions', False)
-    # Unify deprecated flag with the new combined workflow
-    if used_deprecated_ai_flag:
-        args.purge = True
-    if used_deprecated_flag:
-        args.parse_descriptions = True
-
     # Start with default logging so early errors are visible
     setup_logging()
-    if used_deprecated_ai_flag:
-        logger.warning("--ai-purge is deprecated; use --purge for the combined purge pipeline")
-    if used_deprecated_flag:
-        logger.warning("--get-descriptions is deprecated; use --parse-descriptions for the combined workflow")
+
     # Default to run-once if no mode flag is set
-    if not any([args.run_once, args.test, args.db_summary, args.purge, args.ai_purge, args.parse_descriptions, args.reset_ai_purge, args.inform, args.refetch_titles]):
+    if not any([
+        args.run_once,
+        args.test,
+        args.db_summary,
+        args.purge,
+        args.parse_descriptions,
+        args.reset_ai_purge,
+        args.inform,
+        args.refetch_titles,
+        args.probe_indeed,
+    ]):
         args.run_once = True
     # Determine selected mode string for config validation and logging
     if args.run_once:
@@ -132,14 +125,14 @@ def main():
         mode_str = 'db-summary'
     elif args.purge:
         mode_str = 'purge'
-    elif args.ai_purge:
-        mode_str = 'purge'
     elif args.inform:
         mode_str = 'inform'
     elif args.refetch_titles:
         mode_str = 'refetch-titles'
     elif args.parse_descriptions:
         mode_str = 'parse-descriptions'
+    elif args.probe_indeed:
+        mode_str = 'probe-indeed'
     elif args.reset_ai_purge:
         mode_str = 'reset-ai-purge'
     else:
@@ -170,14 +163,14 @@ def main():
             show_database_summary(config)
         elif args.purge:
             run_purge_pipeline(config)
-        elif args.ai_purge:
-            run_purge_pipeline(config)
         elif args.inform:
             run_inform_mode(config, args.inform)
         elif args.refetch_titles:
             run_title_backfill(config)
         elif args.parse_descriptions:
             run_description_pipeline(config)
+        elif args.probe_indeed:
+            run_indeed_probe(config)
         elif args.reset_ai_purge:
             reset_ai_purge_flags(config)
         else:
@@ -446,6 +439,55 @@ def reset_ai_purge_flags(config: Config, *, reset_all: bool = True):
     except Exception as e:
         logger.error(f"Failed to reset AI purge flags: {e}")
         sys.exit(1)
+
+
+def run_indeed_probe(config: Config):
+    """Run an explicit Indeed-only probe to test endpoint accessibility."""
+    config.enable_indeed = True
+    config.enable_linkedin = False
+    config.scrape_descriptions_on_search = False
+    if not config.search_keywords.strip():
+        config.search_keywords = "Data"
+    if not config.search_locations.strip():
+        config.search_locations = "Deutschland"
+    if not config.indeed_max_search_pages:
+        config.indeed_max_search_pages = 1
+    if not config.max_total_jobs:
+        config.max_total_jobs = 20
+
+    scraper = JobScraper(config)
+    keywords = [k.strip() for k in config.search_keywords.split(',') if k.strip()]
+    locations = [l.strip() for l in config.search_locations.split(',') if l.strip()]
+
+    all_jobs = []
+    for keyword in keywords:
+        for location in locations:
+            jobs = scraper.scrape_indeed(keyword, location)
+            all_jobs.extend(jobs)
+            logger.info("Indeed probe result for '{}' @ '{}' -> {} jobs", keyword, location, len(jobs))
+            break
+        break
+
+    if not all_jobs:
+        source = getattr(scraper, "_indeed_source", None)
+        status = getattr(source, "stats", None) if source else None
+        logger.warning("Probe returned 0 jobs.")
+        if status:
+            logger.warning("Source status: {}", getattr(status, 'last_status', None))
+            logger.warning("Source error: {}", (getattr(status, 'last_error', '') or '').strip()[:240] or 'no details')
+            if "security check" in (getattr(status, 'last_error', '') or '').lower():
+                logger.warning("It looks like an Indeed security challenge page was returned. This usually needs INDEED_SESSION_COOKIES.")
+        return
+
+    for job in all_jobs[:10]:
+        logger.info(
+            "{} | {} | {} | {}",
+            job.get('title', ''),
+            job.get('company', ''),
+            job.get('location', ''),
+            job.get('url', ''),
+        )
+
 
 def run_description_pipeline(config: Config):
     """Fetch missing descriptions, then parse them with AI."""

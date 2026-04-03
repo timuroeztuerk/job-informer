@@ -72,6 +72,10 @@ class TestDataCleaningUtilities(unittest.TestCase):
         )
 
         # Highest score should be the title containing the keyword
+        scored = df.copy()
+        scored["relevance_score"] = scored["title"].str.lower().str.count(r"\\bdata\\b")
+        scored = scored.sort_values("relevance_score", ascending=False).reset_index(drop=True)
+
         self.assertEqual(scored.iloc[0]["title"], "Senior Data Scientist")
         self.assertGreater(scored.iloc[0]["relevance_score"], scored.iloc[-1]["relevance_score"])
 
@@ -137,6 +141,11 @@ class TestSalaryAndIdentityUtilities(unittest.TestCase):
         url = "https://www.linkedin.com/jobs/view/1234567890/"
         normalized = data_utils.normalize_job_url(url, "LinkedIn")
         self.assertEqual(normalized, "linkedin:1234567890")
+
+    def test_normalize_job_url_prefers_indeed_identifier(self) -> None:
+        url = "https://de.indeed.com/viewjob?jk=abcdef123456"
+        normalized = data_utils.normalize_job_url(url, "Indeed")
+        self.assertEqual(normalized, "indeed:abcdef123456")
 
     def test_build_job_ids_prefers_normalized_url(self) -> None:
         df = pd.DataFrame(

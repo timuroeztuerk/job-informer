@@ -227,7 +227,7 @@ class AIPurger:
         Reset analyzed flags to allow re-analysis
         
         Args:
-            all_jobs: If True, reset all jobs. If False, reset only unanalyzed jobs (default)
+            all_jobs: If True, reset all jobs. If False, reset analyzed jobs only (default)
         
         Returns:
             Number of jobs reset
@@ -239,7 +239,7 @@ class AIPurger:
                 if all_jobs:
                     cursor.execute("UPDATE jobs SET analyzed = 0")
                 else:
-                    cursor.execute("UPDATE jobs SET analyzed = 0 WHERE analyzed IS NULL OR analyzed != 1")
+                    cursor.execute("UPDATE jobs SET analyzed = 0 WHERE analyzed = 1")
                 
                 conn.commit()
                 reset_count = cursor.rowcount

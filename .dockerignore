@@ -1,0 +1,37 @@
+# Git and editor noise
+.git
+.gitignore
+.DS_Store
+.vscode
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py[cod]
+*$py.class
+
+# Python environments and local caches
+.venv/
+venv/
+env/
+agentic-changes/
+.pytest_cache/
+
+# Node artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Build outputs and local data
+build/
+dist/
+logs/
+backend/logs/
+backend/data/
+*.log
+
+# Sensitive/runtime files
+.env

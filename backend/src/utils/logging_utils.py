@@ -23,7 +23,7 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> No
     logger.remove()
     logger.add(
         sys.stdout,
-        colorize=True,
+        colorize=sys.stdout.isatty(),
         format="<level>{level.icon}</level> <cyan>{message}</cyan>",
         level="INFO",
     )
