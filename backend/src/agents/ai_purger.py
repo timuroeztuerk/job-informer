@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -539,7 +539,7 @@ class AIPurger:
         """
         summary = {
             "mode": "purge-test" if self.test_mode else "purge",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "jobs_analyzed": 0,
             "batches_processed": 0,
             "jobs_to_purge": 0,

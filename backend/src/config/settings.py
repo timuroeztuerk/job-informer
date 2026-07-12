@@ -4,7 +4,7 @@ Handles application settings and environment variables
 """
 
 import os
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from typing import Optional
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +15,7 @@ VALID_TIME_RANGES = {"day", "week", "month"}
 DEFAULT_TIME_RANGE = "day"
 BASE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_LOG_FILE = str(BASE_DIR / "logs" / "job_informer.log")
+DEFAULT_JOBS_DB_PATH = str(BASE_DIR / "data" / "jobs.db")
 DEFAULT_UNWANTED_KEYWORDS = (
     "intern,internship,praktikant,praktikum,werkstudent,working student,"
     "student assistant,student helper,studentenjob,thesis,masterarbeit,masterthesis,"
@@ -52,6 +53,9 @@ class Config:
     # Logging Configuration
     log_level: str
     log_file: str
+
+    # Data Configuration
+    jobs_db_path: str
     
     # AI Analysis Configuration
     openai_api_key: str
@@ -91,17 +95,43 @@ class Config:
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> 'Config':
         """Load configuration from environment variables"""
+        loaded_env_path: Path | None = None
+        explicit_jobs_db_path: str | None = None
         if env_file:
-            load_dotenv(env_file)
+            loaded_env_path = Path(env_file).expanduser().resolve()
+            explicit_values = dotenv_values(loaded_env_path)
+            if "JOBS_DB_PATH" in explicit_values:
+                explicit_jobs_db_path = str(explicit_values.get("JOBS_DB_PATH") or "").strip()
+            load_dotenv(loaded_env_path)
         else:
             default_env = BASE_DIR / ".env"
             fallback_env = BASE_DIR.parent / ".env"
             if default_env.exists():
+                loaded_env_path = default_env.resolve()
                 load_dotenv(default_env)
             elif fallback_env.exists():
+                loaded_env_path = fallback_env.resolve()
                 load_dotenv(fallback_env)
             else:
                 load_dotenv()  # Fallback to current directory
+
+        raw_jobs_db_path = (
+            explicit_jobs_db_path
+            if explicit_jobs_db_path is not None
+            else os.getenv('JOBS_DB_PATH', '').strip()
+        )
+        if raw_jobs_db_path:
+            configured_db_path = Path(raw_jobs_db_path).expanduser()
+            if not configured_db_path.is_absolute():
+                base_dir = loaded_env_path.parent if loaded_env_path else BASE_DIR.parent
+                configured_db_path = base_dir / configured_db_path
+            jobs_db_path = str(configured_db_path.resolve())
+        else:
+            jobs_db_path = str(Path(DEFAULT_JOBS_DB_PATH).resolve())
+
+        # Components construct JobDatabase independently; normalize the shared
+        # environment value once so every component selects the same file.
+        os.environ['JOBS_DB_PATH'] = jobs_db_path
         
         def _get_bool(name: str, default: str = 'false') -> bool:
             value = os.getenv(name, default)
@@ -156,6 +186,9 @@ class Config:
             # Logging Configuration
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             log_file=os.getenv('LOG_FILE', DEFAULT_LOG_FILE),
+
+            # Data Configuration
+            jobs_db_path=jobs_db_path,
             
             # AI Analysis Configuration
             openai_api_key=os.getenv('OPENAI_API_KEY', ''),

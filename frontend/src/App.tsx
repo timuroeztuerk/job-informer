@@ -56,6 +56,16 @@ const App: React.FC = () => {
     () => new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(now),
     [now]
   );
+  const freshness = stats?.collection_freshness;
+  const formatCollectionAge = (ageDays?: number | null) => {
+    if (ageDays === null || ageDays === undefined) return "unknown age";
+    if (ageDays < 1) return `${Math.max(1, Math.round(ageDays * 24))}h ago`;
+    return `${Math.floor(ageDays)}d ago`;
+  };
+  const formatTimestamp = (value?: string | null) =>
+    value
+      ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))
+      : null;
 
   const handleArchiveChanged = (clearSelection = true) => {
     if (clearSelection) {
@@ -124,6 +134,42 @@ const App: React.FC = () => {
           <p className="label">Stats</p>
           <p className="value">{statsError}</p>
         </div>
+      )}
+
+      {stats && viewMode === "dashboard" && (
+        <section
+          className={`collection-freshness app-freshness ${freshness?.status || "empty"}`}
+          role={freshness?.status === "stale" || freshness?.status === "empty" ? "alert" : "status"}
+        >
+          <div>
+            <p className="label">Collection freshness</p>
+            <h3>
+              {freshness?.last_collected_at
+                ? `Last observation ${formatCollectionAge(freshness.age_days)}`
+                : "No collected observations yet"}
+            </h3>
+            <p className="small">
+              {freshness?.status === "stale"
+                ? "Market data is stale. Run Collect now before relying on current trends."
+                : freshness?.status === "aging"
+                  ? "Collection is getting old; another run is due soon."
+                  : "Collection data is current."}
+            </p>
+          </div>
+          <div className="freshness-meta">
+            <span className={`freshness-state ${freshness?.status || "empty"}`}>{freshness?.status || "empty"}</span>
+            <span className="muted tiny">
+              {stats.collection_scheduler?.enabled
+                ? `Automatic collection every ${stats.collection_scheduler.interval_hours}h`
+                : "Automatic collection off"}
+            </span>
+            {stats.collection_scheduler?.last_successful_run_at && (
+              <span className="muted tiny">
+                Last successful run {formatTimestamp(stats.collection_scheduler.last_successful_run_at)}
+              </span>
+            )}
+          </div>
+        </section>
       )}
 
       <main className="layout" hidden={viewMode !== "dashboard"}>

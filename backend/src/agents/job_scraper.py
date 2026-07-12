@@ -21,6 +21,7 @@ from requests.adapters import HTTPAdapter
 from ..config.settings import Config, DEFAULT_TIME_RANGE
 from ..utils.database import JobDatabase
 from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url, remove_historical_duplicates
+from ..utils.time_utils import utc_now, utc_now_iso
 from ..utils.terminal_utils import _sleep_with_feedback, _print_progress, _progress_bar, _sleep_quiet
 from ..utils.filtering import (
     match_company_filter,
@@ -318,7 +319,7 @@ class LinkedInSource(ScraperSource):
             "source": source,
             "url": url,
             "salary": self._clean_text(job.get("salary", "Not specified")) or "Not specified",
-            "scraped_at": pd.Timestamp.now(),
+            "scraped_at": utc_now(),
         }
         if job.get("posted_at"):
             record["posted_at"] = self._clean_text(job.get("posted_at"))
@@ -754,7 +755,7 @@ class IndeedSource(ScraperSource):
             "source": source,
             "url": url,
             "salary": self._clean_text(job.get("salary", "Not specified")) or "Not specified",
-            "scraped_at": pd.Timestamp.now(),
+            "scraped_at": utc_now(),
             "posted_at": self._clean_text(job.get("posted_at", "")),
         }
 
@@ -1585,7 +1586,7 @@ class JobScraper:
                 active_jobs_df = active_jobs_df.head(self.max_total_jobs)
 
             # Store jobs in SQLite database (fast deduplication)
-            run_observed_at = pd.Timestamp.now().isoformat()
+            run_observed_at = utc_now_iso()
             scrape_run_id = self.db.start_scrape_run(
                 mode="run-once",
                 keywords=keywords,
@@ -1610,10 +1611,22 @@ class JobScraper:
                     int(archive_summary.get("decisions_recorded", 0) or 0),
                 )
 
+            self.db.finish_scrape_run(scrape_run_id, archived_jobs_count=archived_count)
+
+            descriptions_fetched_count = 0
+            parsed_jobs_count = 0
+
             if bool(getattr(self.config, 'scrape_descriptions_on_search', False)):
                 from .parser import DescriptionTools
 
                 desc = DescriptionTools(config=self.config, db=self.db)
+                with self.db._get_connection() as conn:
+                    descriptions_before = int(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM jobs WHERE description IS NOT NULL AND length(trim(description)) > 0"
+                        ).fetchone()[0]
+                    )
+                parsed_before = self.db.get_parsed_count()
                 fetch_batch_size = int(getattr(self.config, 'scrape_descriptions_limit', 20) or 20)
                 if fetch_batch_size <= 0:
                     fetch_batch_size = 50
@@ -1630,10 +1643,26 @@ class JobScraper:
                 if not backfill_success:
                     logger.warning("Description backlog fetch encountered issues during this scrape run")
 
+                with self.db._get_connection() as conn:
+                    descriptions_after = int(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM jobs WHERE description IS NOT NULL AND length(trim(description)) > 0"
+                        ).fetchone()[0]
+                    )
+                descriptions_fetched_count = max(0, descriptions_after - descriptions_before)
+
                 if bool(getattr(self.config, 'enable_description_parser', False)) and getattr(self.config, 'openai_api_key', '').strip():
                     parse_success = desc.run_description_parser()
                     if not parse_success:
                         logger.warning("Description parser encountered issues during this scrape run")
+                    parsed_jobs_count = max(0, self.db.get_parsed_count() - parsed_before)
+
+                self.db.finish_scrape_run(
+                    scrape_run_id,
+                    archived_jobs_count=archived_count,
+                    descriptions_fetched_count=descriptions_fetched_count,
+                    parsed_jobs_count=parsed_jobs_count,
+                )
 
             with self.db._get_connection() as conn:
                 active_new_jobs_count = int(
@@ -1842,62 +1871,20 @@ class JobScraper:
             if study_role_job_ids:
                 unwanted_ids.update(study_role_job_ids)
 
-            # 2) Archive duplicates: keep most recent per normalized (title, company, source)
-            #    Note: We intentionally ignore location so entries with the same title+company
-            #    but different locations are considered duplicates and archived.
-            norm_df = all_jobs_df.copy()
-            for col in ['title', 'company', 'location', 'source']:
-                if col in norm_df.columns:
-                    norm_df[f'{col}_norm'] = norm_df[col].astype(str).str.strip().str.lower()
-                else:
-                    norm_df[f'{col}_norm'] = ''
-            # Parse scraped_at for recency sort
-            if 'scraped_at' in norm_df.columns:
-                try:
-                    norm_df['scraped_at'] = pd.to_datetime(norm_df['scraped_at'], errors='coerce')
-                except Exception:
-                    pass
-            norm_df['_order'] = norm_df['scraped_at']
-            try:
-                norm_df['_order'] = norm_df['_order'].fillna(pd.Timestamp(0))
-            except Exception:
-                pass
-
-            norm_df_sorted = norm_df.sort_values(by=['_order'], ascending=False)
-            keep_rows = norm_df_sorted.drop_duplicates(
-                subset=['title_norm', 'company_norm', 'source_norm'], keep='first'
-            )
-            keep_idx = keep_rows.index
-            dup_mask = ~norm_df.index.isin(keep_idx)
-            duplicate_jobs = all_jobs_df[dup_mask]
-            duplicate_ids = set(duplicate_jobs['job_id'].tolist())
-            keeper_map = {
-                (row['title_norm'], row['company_norm'], row['source_norm']): str(row['job_id'])
-                for _, row in keep_rows.iterrows()
-            }
-            for _, row in norm_df[dup_mask].iterrows():
-                group_key = (row['title_norm'], row['company_norm'], row['source_norm'])
-                rule_decisions.append(
-                    {
-                        "job_id": str(row['job_id']),
-                        "decision_source": "rule",
-                        "decision_action": "archive",
-                        "filter_name": "duplicate_title_company_source",
-                        "matched_value": "|".join(group_key),
-                        "reason": "Archived as an older duplicate of the same title, company, and source",
-                        "details": {"kept_job_id": keeper_map.get(group_key)},
-                    }
-                )
-
-            # Union of all job_ids to archive
-            to_archive_ids = list(unwanted_ids.union(duplicate_ids))
+            # Canonical posting duplicates are consolidated during database
+            # upsert using normalized provider IDs/URLs. Similar titles and
+            # companies are not a safe archival signal: employers commonly
+            # publish separate requisitions or location variants under the
+            # same title. Cleanup therefore archives only explicit conservative
+            # filter decisions made above.
+            to_archive_ids = list(unwanted_ids)
 
             if not to_archive_ids:
-                logger.info("No unwanted or duplicate jobs found - database is clean")
+                logger.info("No unwanted jobs found - database is clean")
                 return True
 
             logger.info(
-                f"Will archive {len(to_archive_ids)} jobs (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}], duplicates: {len(duplicate_ids)})"
+                f"Will archive {len(to_archive_ids)} unwanted jobs [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}]"
             )
 
             archive_summary = self.db.archive_jobs_with_filter_decisions(
@@ -1910,7 +1897,7 @@ class JobScraper:
                 ).fetchone()[0]
 
             logger.info(
-                f"Cleanup complete: {int(archive_summary.get('archived', 0) or 0)} jobs archived (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}], duplicates: {len(duplicate_ids)}). Remaining active: {final_count}"
+                f"Cleanup complete: {int(archive_summary.get('archived', 0) or 0)} unwanted jobs archived [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}]. Remaining active: {final_count}"
             )
 
             if len(to_archive_ids) > 0:
@@ -1920,8 +1907,7 @@ class JobScraper:
                     frames.append(unwanted_by_title)
                 if 'unwanted_by_company' in locals() and not unwanted_by_company.empty:
                     frames.append(unwanted_by_company)
-                frames.append(duplicate_jobs)
-                sample_display = pd.concat(frames, ignore_index=True).head(3)
+                sample_display = pd.concat(frames, ignore_index=True).head(3) if frames else pd.DataFrame()
                 if not sample_display.empty:
                     logger.info("Examples of archived jobs:")
                     for _, job in sample_display.iterrows():

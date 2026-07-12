@@ -1,31 +1,44 @@
 # Job Informer
 
-Job Informer is a single-user job market intelligence tool.
+Job Informer is a personal job-market intelligence tool for collecting postings, tracking repeat sightings, and turning job descriptions into useful signals for one person's search.
 
-Its job is simple: collect roles, keep them inspectable, and make it easier to see what the market is asking for over the next few months. It is not an applicant tracking system, not a team product, and not meant to hide the data behind heavy workflow.
+It keeps the underlying data visible and reviewable. The goal is not to manage applications or serve a team, but to make it quick to understand which roles are appearing, what employers are asking for, and which opportunities deserve attention.
 
-## Core idea
+> **Status:** working prototype under active development.
 
-Each job is stored once as the canonical record. Repeat sightings are tracked separately, so the project can answer not just "what exists" but also "what keeps showing up" and "what stays open." Structured parsing turns raw descriptions into usable fields, personal annotations keep review lightweight, and profile-fit scoring ranks jobs against the current target without narrowing the search too early.
+## What it does
 
-## Backend model
+- Collects job postings into a canonical archive and deduplicates repeat results.
+- Records each observation, preserving when a role reappears and how long it remains visible.
+- Applies conservative filtering to remove student roles and clearly unrelated noise without hiding adjacent technical opportunities.
+- Parses descriptions into structured role, skill, and requirement data.
+- Scores jobs against a configurable fit profile to support ranking rather than hard exclusion.
+- Supports personal review with statuses, priorities, notes, skill gaps, and follow-up dates.
+- Exposes the archive, run history, and market summaries through a focused React dashboard.
 
-The backend revolves around a small SQLite system in `backend/data/jobs.db`.
+## Core workflow
 
-`jobs` holds the canonical posting. `job_observations` and `scrape_runs` capture repeat sightings and run history. `parsed_descriptions` stores structured AI extraction. `job_annotations` stores personal notes, status, priority, and follow-up context. `fit_profiles` and `job_fit_scores` keep ranking persistent instead of recomputing ad hoc in the UI.
+**Collect → filter → parse → score → review**
 
-## Workflow
+Collection builds the market record. Filtering removes only obvious noise. Parsing makes descriptions comparable, scoring orders the resulting opportunities, and review adds the personal context needed for follow-up. Each stage remains inspectable so an automated decision never becomes a black box.
 
-The product flow is: collect, filter, parse, score, review.
+## Data model
 
-Filtering is intentionally conservative. The default goal is to remove internships, thesis roles, working-student roles, and clearly irrelevant noise without throwing away adjacent technical roles. Scoring is broad by design: it helps rank the market, not prematurely collapse it.
+The backend uses a small SQLite database centered on a few durable concepts:
 
-## Product stance
+- `jobs` stores one canonical record per posting.
+- `scrape_runs` and `job_observations` preserve collection history and repeat sightings.
+- `parsed_descriptions` stores versioned structured extraction from job descriptions.
+- `job_annotations` holds personal review state and notes.
+- `fit_profiles` and `job_fit_scores` persist the ranking profile and its results.
+- `filter_decisions`, `llm_attempts`, and parse state tables keep automated processing auditable.
 
-This project is optimized for one operator. The backend and frontend should stay explicit, inspectable, and easy to change. The most important outputs are:
+The Python backend owns collection, processing, persistence, and the API. The TypeScript/React frontend provides the dashboard and intelligence views. Generated data stays in backend data and output directories; `frontend/src` remains the single source of truth for frontend code.
 
-- a clean job archive
-- repeat-observation history
-- structured skill and role signals
-- lightweight personal notes
-- a simple ranking layer that helps decide what to study next
+## Product principles
+
+- Optimize for one operator's clarity and speed.
+- Preserve history instead of overwriting repeat observations.
+- Prefer ranking and review over aggressive exclusion.
+- Keep automation explainable and data easy to inspect.
+- Favor a simple, maintainable prototype over speculative product complexity.

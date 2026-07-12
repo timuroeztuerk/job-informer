@@ -85,7 +85,7 @@ export interface ParsedDescription {
 export interface RunStatus {
   run_id: string;
   mode: CliMode;
-  status: "running" | "succeeded" | "failed";
+  status: "starting" | "running" | "succeeded" | "failed" | "interrupted";
   return_code?: number | null;
   log_tail?: string;
   started_at: string;
@@ -93,6 +93,17 @@ export interface RunStatus {
   keywords?: string | null;
   locations?: string | null;
   time_range?: string | null;
+  trigger?: "manual" | "scheduled";
+  pid?: number | null;
+  metrics?: RunMetrics | null;
+}
+
+export interface RunMetrics {
+  observed: number;
+  new: number;
+  archived: number;
+  descriptions_fetched: number;
+  parsed: number;
 }
 
 export interface RunRequest {
@@ -105,13 +116,16 @@ export interface RunRequest {
 export interface RunSummary {
   run_id: string;
   mode: CliMode;
-  status: "running" | "succeeded" | "failed";
+  status: "starting" | "running" | "succeeded" | "failed" | "interrupted";
   return_code?: number | null;
   started_at: string;
   finished_at?: string | null;
   keywords?: string | null;
   locations?: string | null;
   time_range?: string | null;
+  trigger?: "manual" | "scheduled";
+  pid?: number | null;
+  metrics?: RunMetrics | null;
 }
 
 export interface JobStats {
@@ -125,6 +139,12 @@ export interface JobStats {
   };
   sources_list?: string[];
   companies_list?: string[];
+  collection_freshness?: CollectionFreshness;
+  collection_scheduler?: {
+    enabled: boolean;
+    interval_hours: number;
+    last_successful_run_at: string | null;
+  };
 }
 
 export interface CountStat {
@@ -208,6 +228,7 @@ export interface CollectionFreshness {
   source: "job_observation" | "job_record" | null;
   age_days: number | null;
   status: "fresh" | "aging" | "stale" | "empty";
+  stale_after_days?: number;
 }
 
 export interface FitSummaryJob {
@@ -289,6 +310,12 @@ export interface DbSummary {
   collection_freshness?: CollectionFreshness;
   profile_fit_summary?: ProfileFitSummary;
   parser_telemetry?: ParserTelemetrySummary;
+  integrity?: {
+    sqlite_ok: boolean;
+    sqlite_messages: string[];
+    orphan_record_count: number;
+    orphan_record_counts: Record<string, number>;
+  };
   skill_gap_summary?: SkillGapSummary;
   parsed_descriptions_stats?: Record<string, number>;
   parsed_insights: ParsedInsights;

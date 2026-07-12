@@ -5,6 +5,7 @@ Minimal HTTP API so the Vue frontend can trigger scrapes and read jobs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -12,9 +13,9 @@ import subprocess
 import sys
 import uuid
 import re
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncGenerator, Iterator, Literal, Optional
 
@@ -29,9 +30,10 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from src.utils.database import JobDatabase  # noqa: E402
-from src.utils.db_summary import build_db_summary  # noqa: E402
+from src.utils.db_summary import build_db_summary, compute_collection_freshness  # noqa: E402
 from src.utils.profile_fit import DEFAULT_FIT_PROFILE_ID, default_fit_profile  # noqa: E402
 from src.utils.sqlite_connection import open_sqlite  # noqa: E402
+from src.utils.time_utils import as_utc_datetime, normalize_utc_iso, utc_now, utc_now_iso  # noqa: E402
 
 
 DEFAULT_DB = ROOT / "data" / "jobs.db"
@@ -41,6 +43,13 @@ ANSI_ESCAPE_RE = re.compile(r"(?:\x1B[@-Z\\-_]|\x1B\[[0-?]*[ -/]*[@-~])")
 def _as_int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _as_float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
     except ValueError:
         return default
 
@@ -68,6 +77,7 @@ DB_PATH = _resolve_db_path("JOBS_DB_PATH", DEFAULT_DB)
 RUN_STORE_DB_PATH = _resolve_db_path("RUN_STORE_DB_PATH", Path(DB_PATH))
 API_TOKEN = os.getenv("API_TOKEN", "")
 MAX_LOG_BYTES = _as_int_env("MAX_LOG_BYTES", 30000)  # Avoid sending huge logs to the frontend
+AUTO_COLLECTION_INTERVAL_HOURS = max(0.0, _as_float_env("AUTO_COLLECTION_INTERVAL_HOURS", 0.0))
 
 FRONTEND_DIST_DIR = ROOT / "frontend" / "dist"
 
@@ -79,6 +89,7 @@ class AppSettings:
     api_token: str
     max_log_bytes: int
     frontend_dist_dir: Path
+    auto_collection_interval_hours: float = 0.0
 
 
 APP_SETTINGS = AppSettings(
@@ -87,6 +98,7 @@ APP_SETTINGS = AppSettings(
     api_token=API_TOKEN,
     max_log_bytes=MAX_LOG_BYTES,
     frontend_dist_dir=FRONTEND_DIST_DIR,
+    auto_collection_interval_hours=AUTO_COLLECTION_INTERVAL_HOURS,
 )
 
 
@@ -98,13 +110,30 @@ def open_jobs_db() -> Iterator[sqlite3.Connection]:
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    global job_db, run_store
+    global job_db, run_store, scheduler_task
     job_db = JobDatabase(APP_SETTINGS.db_path)
     run_store = RunStore(APP_SETTINGS.run_store_db_path)
+    run_store.interrupt_unfinished()
+    scheduler_task = None
+    if APP_SETTINGS.auto_collection_interval_hours > 0:
+        scheduler_task = asyncio.create_task(_collection_scheduler())
     try:
         yield
     finally:
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await scheduler_task
+        for record in list(RUNS.values()):
+            if record.process.poll() is None:
+                record.process.terminate()
+                try:
+                    await asyncio.to_thread(record.process.wait, 5)
+                except subprocess.TimeoutExpired:
+                    record.process.kill()
+                run_store.update_status(record.run_id, "interrupted", None, utc_now())
         RUNS.clear()
+        scheduler_task = None
         job_db = None
         run_store = None
 
@@ -127,6 +156,7 @@ def health_check() -> dict:
 
 job_db: Optional[JobDatabase] = None
 run_store: Optional["RunStore"] = None
+scheduler_task: Optional[asyncio.Task] = None
 
 
 def _require_job_db() -> JobDatabase:
@@ -194,6 +224,9 @@ class RunStatus(BaseModel):
     keywords: Optional[str] = None
     locations: Optional[str] = None
     time_range: Optional[str] = None
+    trigger: str = "manual"
+    pid: Optional[int] = None
+    metrics: Optional[dict[str, int]] = None
 
 
 class RunSummary(BaseModel):
@@ -206,6 +239,9 @@ class RunSummary(BaseModel):
     keywords: Optional[str] = None
     locations: Optional[str] = None
     time_range: Optional[str] = None
+    trigger: str = "manual"
+    pid: Optional[int] = None
+    metrics: Optional[dict[str, int]] = None
 
 
 class JobAnnotationPayload(BaseModel):
@@ -267,7 +303,9 @@ class RunStore:
                     finished_at TEXT,
                     keywords TEXT,
                     locations TEXT,
-                    time_range TEXT
+                    time_range TEXT,
+                    trigger TEXT NOT NULL DEFAULT 'manual',
+                    pid INTEGER
                 )
                 """
             )
@@ -275,9 +313,13 @@ class RunStore:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(api_runs)")}
             if "mode" not in columns:
                 conn.execute("ALTER TABLE api_runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'run-once'")
+            if "trigger" not in columns:
+                conn.execute("ALTER TABLE api_runs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'manual'")
+            if "pid" not in columns:
+                conn.execute("ALTER TABLE api_runs ADD COLUMN pid INTEGER")
             conn.commit()
 
-    def save_start(
+    def claim_start(
         self,
         run_id: str,
         log_path: Path,
@@ -285,26 +327,53 @@ class RunStore:
         keywords: Optional[str],
         locations: Optional[str],
         time_range: Optional[str],
-    ) -> None:
+        trigger: str = "manual",
+        started_at: Optional[datetime] = None,
+    ) -> Optional[dict]:
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.row_factory = sqlite3.Row
+            active = conn.execute(
+                """
+                SELECT * FROM api_runs
+                WHERE status IN ('starting', 'running')
+                ORDER BY datetime(started_at) DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if active:
+                conn.rollback()
+                return {key: active[key] for key in active.keys()}
             conn.execute(
                 """
                 INSERT OR REPLACE INTO api_runs (
-                    run_id, mode, status, return_code, log_path, started_at, finished_at, keywords, locations, time_range
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    run_id, mode, status, return_code, log_path, started_at, finished_at,
+                    keywords, locations, time_range, trigger, pid
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
                     mode,
-                    "running",
+                    "starting",
                     None,
                     str(log_path),
-                    datetime.utcnow().isoformat(),
+                    normalize_utc_iso(started_at, naive_policy="utc") or utc_now_iso(),
                     None,
                     keywords,
                     locations,
                     time_range,
+                    trigger,
+                    None,
                 ),
+            )
+            conn.commit()
+        return None
+
+    def mark_running(self, run_id: str, pid: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE api_runs SET status = 'running', pid = ? WHERE run_id = ?",
+                (pid, run_id),
             )
             conn.commit()
 
@@ -316,14 +385,25 @@ class RunStore:
         finished_at: Optional[datetime],
     ) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE api_runs
-                SET status = ?, return_code = ?, finished_at = ?
-                WHERE run_id = ?
-                """,
-                (status, return_code, finished_at.isoformat() if finished_at else None, run_id),
-            )
+            if finished_at is None:
+                conn.execute(
+                    "UPDATE api_runs SET status = ?, return_code = ? WHERE run_id = ?",
+                    (status, return_code, run_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE api_runs
+                    SET status = ?, return_code = ?, finished_at = ?, pid = NULL
+                    WHERE run_id = ?
+                    """,
+                    (
+                        status,
+                        return_code,
+                        normalize_utc_iso(finished_at, naive_policy="utc"),
+                        run_id,
+                    ),
+                )
             conn.commit()
 
     def get(self, run_id: str) -> Optional[dict]:
@@ -342,6 +422,82 @@ class RunStore:
             ).fetchall()
         return [{k: row[k] for k in row.keys()} for row in rows]
 
+    def interrupt_unfinished(self) -> int:
+        """Mark runs from a previous API process as interrupted on startup."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE api_runs
+                SET status = 'interrupted', finished_at = ?, pid = NULL
+                WHERE status IN ('starting', 'running')
+                """,
+                (now,),
+            )
+            conn.commit()
+            return max(0, int(cursor.rowcount or 0))
+
+    def latest_successful_collection(self) -> Optional[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT * FROM api_runs
+                WHERE mode = 'run-once' AND status = 'succeeded'
+                ORDER BY datetime(finished_at) DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return {key: row[key] for key in row.keys()} if row else None
+
+    def latest_collection_attempt(self) -> Optional[dict]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT * FROM api_runs
+                WHERE mode = 'run-once'
+                ORDER BY datetime(started_at) DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return {key: row[key] for key in row.keys()} if row else None
+
+
+def _metrics_for_api_run(run_id: str) -> Optional[dict[str, int]]:
+    if not run_id:
+        return None
+    try:
+        with open_jobs_db() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(scrape_runs)")}
+            if "api_run_id" not in columns:
+                return None
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(observed_jobs_count), 0),
+                    COALESCE(SUM(new_jobs_count), 0),
+                    COALESCE(SUM(archived_jobs_count), 0),
+                    COALESCE(SUM(descriptions_fetched_count), 0),
+                    COALESCE(SUM(parsed_jobs_count), 0),
+                    COUNT(*)
+                FROM scrape_runs
+                WHERE api_run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        if not row or int(row[5] or 0) == 0:
+            return None
+        return {
+            "observed": int(row[0] or 0),
+            "new": int(row[1] or 0),
+            "archived": int(row[2] or 0),
+            "descriptions_fetched": int(row[3] or 0),
+            "parsed": int(row[4] or 0),
+        }
+    except sqlite3.Error:
+        return None
+
 
 
 class RunRecord:
@@ -356,25 +512,27 @@ class RunRecord:
         keywords: Optional[str],
         locations: Optional[str],
         time_range: Optional[str],
+        trigger: str = "manual",
+        started_at: Optional[datetime] = None,
     ):
         self.run_id = run_id
         self.process = process
         self.log_path = log_path
         self.mode = mode
-        self.started_at = datetime.utcnow()
+        self.started_at = as_utc_datetime(started_at, naive_policy="utc") or utc_now()
         self.finished_at: Optional[datetime] = None
         self.keywords = keywords
         self.locations = locations
         self.time_range = time_range
+        self.trigger = trigger
         self._run_store = _require_run_store()
-        self._run_store.save_start(run_id, log_path, mode, keywords, locations, time_range)
 
     def status(self) -> RunStatus:
         code = self.process.poll()
         status = "running"
         finished = None
         if code is not None:
-            finished = self.finished_at or datetime.utcnow()
+            finished = self.finished_at or utc_now()
             self.finished_at = finished
             status = "succeeded" if code == 0 else "failed"
             self._run_store.update_status(self.run_id, status, code, finished)
@@ -391,6 +549,9 @@ class RunRecord:
             keywords=self.keywords,
             locations=self.locations,
             time_range=self.time_range,
+            trigger=self.trigger,
+            pid=self.process.pid if code is None else None,
+            metrics=_metrics_for_api_run(self.run_id),
         )
 
 
@@ -404,6 +565,14 @@ def start_run(payload: RunRequest, _: bool = Depends(require_token)) -> RunStatu
     Start `python main.py --run-once` in the background.
     Optional overrides: keywords, locations, time_range.
     """
+    return _launch_run(payload, trigger="manual")
+
+
+def _launch_run(payload: RunRequest, *, trigger: str) -> RunStatus:
+    """Atomically claim and launch one backend command."""
+    for record in list(RUNS.values()):
+        record.status()
+
     run_id = uuid.uuid4().hex
     log_path = ROOT / "logs" / f"api_run_{run_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -413,6 +582,23 @@ def start_run(payload: RunRequest, _: bool = Depends(require_token)) -> RunStatu
         raise HTTPException(status_code=400, detail=f"Unsupported mode: {requested_mode}")
 
     mode = _canonical_mode(requested_mode)
+    started_at = utc_now()
+    active = _require_run_store().claim_start(
+        run_id,
+        log_path,
+        mode,
+        payload.keywords,
+        payload.locations,
+        payload.time_range,
+        trigger,
+        started_at,
+    )
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run {active['run_id']} is already {active['status']}; wait for it to finish.",
+        )
+
     cmd = [sys.executable, "-u", str(ROOT / "main.py"), *CLI_MODES[requested_mode]]
     if payload.keywords:
         cmd += ["--keywords", payload.keywords]
@@ -423,15 +609,21 @@ def start_run(payload: RunRequest, _: bool = Depends(require_token)) -> RunStatu
 
     run_env = os.environ.copy()
     run_env["PYTHONUNBUFFERED"] = "1"
+    run_env["JOB_INFORMER_API_RUN_ID"] = run_id
 
-    log_file = log_path.open("w")
-    process = subprocess.Popen(
-        cmd,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        env=run_env,
-    )
-    log_file.close()
+    try:
+        with log_path.open("w") as log_file:
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=run_env,
+            )
+    except Exception:
+        _require_run_store().update_status(run_id, "failed", None, utc_now())
+        raise
+
+    _require_run_store().mark_running(run_id, process.pid)
     RUNS[run_id] = RunRecord(
         run_id,
         process,
@@ -440,8 +632,38 @@ def start_run(payload: RunRequest, _: bool = Depends(require_token)) -> RunStatu
         keywords=payload.keywords,
         locations=payload.locations,
         time_range=payload.time_range,
+        trigger=trigger,
+        started_at=started_at,
     )
     return RUNS[run_id].status()
+
+
+async def _collection_scheduler() -> None:
+    """Launch the normal collection pipeline at an opt-in fixed interval."""
+    interval = timedelta(hours=APP_SETTINGS.auto_collection_interval_hours)
+    while True:
+        latest = _require_run_store().latest_collection_attempt()
+        reference_times: list[datetime] = []
+        if latest and latest.get("started_at"):
+            with suppress(ValueError):
+                timestamp = as_utc_datetime(latest["started_at"], naive_policy="utc")
+                if timestamp is not None:
+                    reference_times.append(timestamp)
+        freshness = compute_collection_freshness(_require_job_db())
+        if freshness.get("last_collected_at"):
+            with suppress(ValueError):
+                timestamp = as_utc_datetime(freshness["last_collected_at"])
+                if timestamp is not None:
+                    reference_times.append(timestamp)
+        last_activity = max(reference_times) if reference_times else None
+        due = last_activity is None or datetime.now(UTC) - last_activity >= interval
+        if due:
+            try:
+                _launch_run(RunRequest(mode="run-once"), trigger="scheduled")
+            except HTTPException as exc:
+                if exc.status_code != 409:
+                    raise
+        await asyncio.sleep(60)
 
 
 @app.get("/runs/{run_id}", response_model=RunStatus)
@@ -455,8 +677,8 @@ def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
     if not stored:
         raise HTTPException(status_code=404, detail="Run not found.")
 
-    finished = datetime.fromisoformat(stored["finished_at"]) if stored.get("finished_at") else None
-    started = datetime.fromisoformat(stored["started_at"]) if stored.get("started_at") else datetime.utcnow()
+    finished = as_utc_datetime(stored.get("finished_at"), naive_policy="utc")
+    started = as_utc_datetime(stored.get("started_at"), naive_policy="utc") or utc_now()
     return RunStatus(
         run_id=stored["run_id"],
         mode=_canonical_mode(stored.get("mode") or DEFAULT_MODE),
@@ -468,6 +690,9 @@ def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
         keywords=stored.get("keywords"),
         locations=stored.get("locations"),
         time_range=stored.get("time_range"),
+        trigger=stored.get("trigger") or "manual",
+        pid=stored.get("pid"),
+        metrics=_metrics_for_api_run(run_id),
     )
 
 
@@ -486,11 +711,14 @@ def list_runs(limit: int = Query(20, ge=1, le=100), _: bool = Depends(require_to
                 mode=_canonical_mode(record.get("mode") or DEFAULT_MODE),
                 status=record["status"],
                 return_code=record["return_code"],
-                started_at=datetime.fromisoformat(record["started_at"]),
-                finished_at=datetime.fromisoformat(record["finished_at"]) if record.get("finished_at") else None,
+                started_at=as_utc_datetime(record["started_at"], naive_policy="utc") or utc_now(),
+                finished_at=as_utc_datetime(record.get("finished_at"), naive_policy="utc"),
                 keywords=record.get("keywords"),
                 locations=record.get("locations"),
                 time_range=record.get("time_range"),
+                trigger=record.get("trigger") or "manual",
+                pid=record.get("pid"),
+                metrics=_metrics_for_api_run(record["run_id"]),
             )
         )
     return summaries
@@ -681,6 +909,7 @@ def update_job_annotation(
                 raise HTTPException(status_code=404, detail="Job not found")
 
             normalized_skill_gaps = _normalize_skill_gaps(payload.skill_gaps)
+            updated_at = utc_now_iso()
             conn.execute(
                 """
                 INSERT INTO job_annotations (
@@ -694,7 +923,7 @@ def update_job_annotation(
                     resume_version,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     status = excluded.status,
                     priority = excluded.priority,
@@ -703,7 +932,7 @@ def update_job_annotation(
                     skill_gaps = excluded.skill_gaps,
                     follow_up_date = excluded.follow_up_date,
                     resume_version = excluded.resume_version,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = excluded.updated_at
                 """,
                 (
                     job_id,
@@ -714,6 +943,8 @@ def update_job_annotation(
                     json.dumps(normalized_skill_gaps),
                     payload.follow_up_date or None,
                     payload.resume_version.strip(),
+                    updated_at,
+                    updated_at,
                 ),
             )
             conn.commit()
@@ -849,6 +1080,13 @@ def job_stats(_: bool = Depends(require_token)) -> dict:
             ]
         summary["sources_list"] = sources
         summary["companies_list"] = companies
+        summary["collection_freshness"] = compute_collection_freshness(_require_job_db())
+        latest_success = _require_run_store().latest_successful_collection()
+        summary["collection_scheduler"] = {
+            "enabled": APP_SETTINGS.auto_collection_interval_hours > 0,
+            "interval_hours": APP_SETTINGS.auto_collection_interval_hours,
+            "last_successful_run_at": latest_success.get("finished_at") if latest_success else None,
+        }
         return summary
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to build stats: {exc}") from exc

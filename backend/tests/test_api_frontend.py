@@ -1,3 +1,5 @@
+"""Tests for serving the bundled frontend safely."""
+
 from __future__ import annotations
 
 import unittest

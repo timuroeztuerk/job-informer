@@ -19,9 +19,9 @@ interface QuickAction {
 const quickActions: QuickAction[] = [
   {
     mode: "run-once",
-    title: "Scrape new jobs",
-    description: "Kick off the default job search using the configured keywords and locations.",
-    subhead: "Scraper",
+    title: "Collect now",
+    description: "Run the complete collection pipeline using the configured keywords and locations.",
+    subhead: "Primary",
   },
   {
     mode: "purge",
@@ -67,7 +67,7 @@ const RunPane: React.FC<RunPaneProps> = ({ className, onRunCompleted }) => {
   }, [onRunCompleted]);
 
   const currentRunId = useMemo(() => status?.run_id || "", [status]);
-  const isRunActive = useMemo(() => status?.status === "running", [status]);
+  const isRunActive = useMemo(() => status?.status === "running" || status?.status === "starting", [status]);
   const isActionDisabled = loading || isRunActive;
 
   const modeLabel = (mode: CliMode) => {
@@ -222,7 +222,7 @@ const RunPane: React.FC<RunPaneProps> = ({ className, onRunCompleted }) => {
     <section className={wrapperClassName}>
       <div className="header">
         <div>
-          <p className="label">Run scraper</p>
+          <p className="label">Collection and maintenance</p>
         </div>
         <div className="header-actions">
           <button className="ghost" type="button" onClick={refreshStatus} disabled={!currentRunId}>
@@ -275,6 +275,16 @@ const RunPane: React.FC<RunPaneProps> = ({ className, onRunCompleted }) => {
             </div>
             <span className={`pill ${status.status}`}>{status.status}</span>
           </div>
+          {status.metrics && (
+            <div className="run-metrics" aria-label="Run results">
+              <span><strong>{status.metrics.observed}</strong> observed</span>
+              <span><strong>{status.metrics.new}</strong> new</span>
+              <span><strong>{status.metrics.archived}</strong> archived</span>
+              <span><strong>{status.metrics.descriptions_fetched}</strong> described</span>
+              <span><strong>{status.metrics.parsed}</strong> parsed</span>
+            </div>
+          )}
+          {status.trigger === "scheduled" && <p className="muted tiny">Started by automatic collection.</p>}
           <p className="label">Log tail</p>
           <pre ref={logTailRef}>{visibleLogTail(status)}</pre>
         </div>

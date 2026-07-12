@@ -1,8 +1,16 @@
+"""Database-summary freshness and UTC window tests."""
+
 from __future__ import annotations
 
+import os
+import time
 import unittest
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import pandas as pd
 
 from backend.src.utils.database import JobDatabase
 from backend.src.utils.db_summary import (
@@ -10,6 +18,22 @@ from backend.src.utils.db_summary import (
     compute_skill_gap_summary,
     compute_trend_summary,
 )
+from backend.src.utils.time_utils import utc_now
+
+
+@contextmanager
+def _temporary_timezone(name: str):
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 def _insert_job(db: JobDatabase, job_id: str, observed_at: str) -> None:
@@ -92,6 +116,15 @@ class TestCollectionFreshness(unittest.TestCase):
                 "stale",
             )
 
+            self.assertEqual(
+                compute_collection_freshness(
+                    db,
+                    as_of="2026-07-09T12:00:00Z",
+                    stale_after_days=10,
+                )["status"],
+                "aging",
+            )
+
     def test_recent_empty_scrape_does_not_hide_stale_observations(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             db = JobDatabase(db_path=str(Path(tmp_dir) / "jobs.db"))
@@ -119,6 +152,74 @@ class TestCollectionFreshness(unittest.TestCase):
             self.assertEqual(freshness["latest_observation_at"], "2026-04-04T09:00:00+00:00")
             self.assertEqual(freshness["latest_scrape_at"], "2026-07-12T08:00:00+00:00")
             self.assertGreater(freshness["age_days"], 90)
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone control")
+    def test_legacy_berlin_local_observation_is_converted_before_freshness_and_trends(self) -> None:
+        with _temporary_timezone("Europe/Berlin"), TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=str(Path(tmp_dir) / "jobs.db"))
+            # This is the pre-fix app format: 13:00 local wall time in Berlin,
+            # representing 11:00 UTC in July.
+            _insert_job(db, "job-local-naive", "2026-07-12T13:00:00")
+            _insert_observation(db, "job-local-naive", "2026-07-12T13:00:00")
+
+            freshness = compute_collection_freshness(db, as_of="2026-07-12T11:00:01Z")
+            trend = compute_trend_summary(db, as_of="2026-07-12T11:00:01Z")
+
+            self.assertEqual(freshness["last_collected_at"], "2026-07-12T11:00:00+00:00")
+            self.assertAlmostEqual(freshness["age_days"], 1 / 86_400)
+            self.assertEqual(trend["recent_window"]["jobs"], 1)
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone control")
+    def test_mixed_legacy_local_and_canonical_utc_observations_order_by_instant(self) -> None:
+        with _temporary_timezone("Europe/Berlin"), TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=str(Path(tmp_dir) / "jobs.db"))
+            _insert_job(db, "job-legacy", "2026-07-12T13:00:00")  # 11:00Z
+            _insert_observation(db, "job-legacy", "2026-07-12T13:00:00")
+            _insert_job(db, "job-canonical", "2026-07-12T11:30:00+00:00")
+            _insert_observation(db, "job-canonical", "2026-07-12T11:30:00+00:00")
+
+            freshness = compute_collection_freshness(db, as_of="2026-07-12T12:00:00Z")
+
+            self.assertEqual(freshness["last_collected_at"], "2026-07-12T11:30:00+00:00")
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone control")
+    def test_new_collection_timestamps_are_aware_utc_and_immediately_recent(self) -> None:
+        with _temporary_timezone("Europe/Berlin"), TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=str(Path(tmp_dir) / "jobs.db"))
+            db.put_into_sql(
+                pd.DataFrame(
+                    [
+                        {
+                            "job_id": "job-new-utc",
+                            "title": "Data Engineer",
+                            "company": "Example Co",
+                            "location": "Berlin",
+                            "source": "Test",
+                        }
+                    ]
+                )
+            )
+
+            with db._get_connection() as conn:  # noqa: SLF001
+                job_row = conn.execute(
+                    "SELECT scraped_at, created_at FROM jobs WHERE job_id = ?",
+                    ("job-new-utc",),
+                ).fetchone()
+                observation_at = conn.execute(
+                    "SELECT observed_at FROM job_observations WHERE job_id = ?",
+                    ("job-new-utc",),
+                ).fetchone()[0]
+                run_row = conn.execute(
+                    "SELECT observed_at, created_at FROM scrape_runs ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()
+
+            for value in (*job_row, observation_at, *run_row):
+                parsed = datetime.fromisoformat(value)
+                self.assertEqual(parsed.utcoffset(), timedelta(0))
+                self.assertTrue(value.endswith("+00:00"))
+
+            trend = compute_trend_summary(db, as_of=utc_now() + timedelta(seconds=1))
+            self.assertEqual(trend["recent_window"]["jobs"], 1)
 
 
 class TestTrendWindows(unittest.TestCase):

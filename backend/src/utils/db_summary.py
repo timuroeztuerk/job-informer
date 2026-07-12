@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from typing import Any, Dict, List
 
@@ -10,6 +11,7 @@ import pandas as pd
 from loguru import logger
 
 from .database import JobDatabase
+from .time_utils import as_utc_timestamp
 
 
 CITY_ALIASES = {
@@ -202,7 +204,7 @@ def _load_jobs_with_dates(db: JobDatabase) -> pd.DataFrame:
     if jobs_df.empty:
         return jobs_df
 
-    jobs_df["observed_at"] = pd.to_datetime(jobs_df["observed_at"], errors="coerce", utc=True)
+    jobs_df["observed_at"] = jobs_df["observed_at"].apply(as_utc_timestamp)
     jobs_df = jobs_df.dropna(subset=["observed_at"]).copy()
     return jobs_df
 
@@ -255,31 +257,42 @@ def _load_latest_parsed_rows(db: JobDatabase) -> pd.DataFrame:
     if parsed_df.empty:
         return parsed_df
 
-    parsed_df["observed_at"] = pd.to_datetime(parsed_df["observed_at"], errors="coerce", utc=True)
+    parsed_df["observed_at"] = parsed_df["observed_at"].apply(as_utc_timestamp)
     return parsed_df.dropna(subset=["observed_at"]).copy()
 
 
 def _week_start(series: pd.Series) -> pd.Series:
-    normalized = pd.to_datetime(series, errors="coerce", utc=True).dt.normalize()
+    normalized = series.apply(as_utc_timestamp).dt.normalize()
     return normalized - pd.to_timedelta(normalized.dt.weekday, unit="D")
 
 
 def _as_utc_timestamp(value: Any | None = None) -> pd.Timestamp:
     """Return a timezone-aware UTC timestamp for stable date comparisons."""
-    timestamp = pd.Timestamp.now(tz="UTC") if value is None else pd.Timestamp(value)
-    if timestamp.tzinfo is None:
-        return timestamp.tz_localize("UTC")
-    return timestamp.tz_convert("UTC")
+    # Explicit analytical boundaries are UTC by contract; only persisted legacy
+    # market timestamps use the local-wall compatibility policy.
+    return pd.Timestamp.now(tz="UTC") if value is None else as_utc_timestamp(value, naive_policy="utc")
 
 
-def compute_collection_freshness(db: JobDatabase, *, as_of: Any | None = None) -> dict[str, Any]:
+def compute_collection_freshness(
+    db: JobDatabase,
+    *,
+    as_of: Any | None = None,
+    stale_after_days: float | None = None,
+) -> dict[str, Any]:
     """Describe how old the latest actual collected observation is.
 
-    Fresh means no more than two days old, aging means no more than seven days
-    old, and anything older is stale. Scrape-run time is reported separately so
+    Fresh means no more than two days old, aging lasts until the configurable
+    stale threshold, and anything older is stale. Scrape-run time is reported separately so
     an empty recent run cannot make an old collection look current.
     """
     reference_time = _as_utc_timestamp(as_of)
+    if stale_after_days is None:
+        try:
+            stale_after_days = float(os.getenv("COLLECTION_STALE_AFTER_DAYS", "7"))
+        except ValueError:
+            stale_after_days = 7.0
+    stale_after_days = max(0.0, stale_after_days)
+    fresh_after_days = min(2.0, stale_after_days)
     summary: dict[str, Any] = {
         "as_of": reference_time.isoformat(),
         "last_collected_at": None,
@@ -288,6 +301,7 @@ def compute_collection_freshness(db: JobDatabase, *, as_of: Any | None = None) -
         "source": None,
         "age_days": None,
         "status": "empty",
+        "stale_after_days": stale_after_days,
     }
 
     latest_observation = None
@@ -300,7 +314,7 @@ def compute_collection_freshness(db: JobDatabase, *, as_of: Any | None = None) -
                     """
                     SELECT observed_at
                     FROM job_observations
-                    ORDER BY datetime(observed_at) DESC, observation_id DESC
+                    ORDER BY datetime(observed_at, 'utc') DESC, observation_id DESC
                     LIMIT 1
                     """
                 ).fetchone()
@@ -311,7 +325,7 @@ def compute_collection_freshness(db: JobDatabase, *, as_of: Any | None = None) -
                 SELECT COALESCE(last_seen_at, scraped_at, created_at)
                 FROM jobs
                 WHERE archived_at IS NULL
-                ORDER BY datetime(COALESCE(last_seen_at, scraped_at, created_at)) DESC
+                ORDER BY datetime(COALESCE(last_seen_at, scraped_at, created_at), 'utc') DESC
                 LIMIT 1
                 """
             ).fetchone()
@@ -322,7 +336,7 @@ def compute_collection_freshness(db: JobDatabase, *, as_of: Any | None = None) -
                     """
                     SELECT observed_at
                     FROM scrape_runs
-                    ORDER BY datetime(observed_at) DESC
+                    ORDER BY datetime(observed_at, 'utc') DESC
                     LIMIT 1
                     """
                 ).fetchone()
@@ -331,11 +345,9 @@ def compute_collection_freshness(db: JobDatabase, *, as_of: Any | None = None) -
         logger.warning(f"Could not compute collection freshness: {exc}")
         return summary
 
-    observation_timestamp = (
-        pd.to_datetime(latest_observation, errors="coerce", utc=True) if latest_observation else pd.NaT
-    )
-    job_timestamp = pd.to_datetime(latest_job_record, errors="coerce", utc=True) if latest_job_record else pd.NaT
-    scrape_timestamp = pd.to_datetime(latest_scrape, errors="coerce", utc=True) if latest_scrape else pd.NaT
+    observation_timestamp = as_utc_timestamp(latest_observation) if latest_observation else pd.NaT
+    job_timestamp = as_utc_timestamp(latest_job_record) if latest_job_record else pd.NaT
+    scrape_timestamp = as_utc_timestamp(latest_scrape) if latest_scrape else pd.NaT
 
     if not pd.isna(observation_timestamp):
         collected_at = observation_timestamp
@@ -356,7 +368,7 @@ def compute_collection_freshness(db: JobDatabase, *, as_of: Any | None = None) -
 
     age = max(pd.Timedelta(0), reference_time - collected_at)
     age_days = age.total_seconds() / 86_400
-    status = "fresh" if age_days <= 2 else "aging" if age_days <= 7 else "stale"
+    status = "fresh" if age_days <= fresh_after_days else "aging" if age_days <= stale_after_days else "stale"
     summary.update(
         {
             "last_collected_at": collected_at.isoformat(),
@@ -659,8 +671,8 @@ def compute_observation_summary(db: JobDatabase) -> dict:
     if jobs_df.empty:
         return summary
 
-    jobs_df["first_seen_at"] = pd.to_datetime(jobs_df["first_seen_at"], errors="coerce")
-    jobs_df["last_seen_at"] = pd.to_datetime(jobs_df["last_seen_at"], errors="coerce")
+    jobs_df["first_seen_at"] = jobs_df["first_seen_at"].apply(as_utc_timestamp)
+    jobs_df["last_seen_at"] = jobs_df["last_seen_at"].apply(as_utc_timestamp)
     jobs_df["seen_count"] = pd.to_numeric(jobs_df["seen_count"], errors="coerce").fillna(1).clip(lower=1)
     jobs_df["active_days"] = (
         (jobs_df["last_seen_at"] - jobs_df["first_seen_at"]).dt.days.fillna(0).clip(lower=0) + 1
@@ -844,6 +856,7 @@ def build_db_summary(db: JobDatabase) -> dict:
         "skill_gap_summary": compute_skill_gap_summary(db),
         "profile_fit_summary": db.get_fit_summary(),
         "parser_telemetry": db.get_parser_telemetry_summary(),
+        "integrity": db.get_integrity_report(sample_limit=5),
         "parsed_descriptions_stats": base.get("parsed_descriptions_stats", {}),
         "parsed_insights": compute_parsed_insights(
             db,

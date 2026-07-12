@@ -100,6 +100,12 @@ const RecentRuns: React.FC<RecentRunsProps> = ({ className, refreshToken = 0 }) 
                 <span className={`pill small ${run.status}`}>{run.status}</span>
               </div>
               <p className="muted small">{formatDate(run.started_at)}</p>
+              {run.metrics && (
+                <p className="muted tiny">
+                  {run.metrics.observed} observed · {run.metrics.new} new · {run.metrics.archived} archived · {run.metrics.parsed} parsed
+                </p>
+              )}
+              {run.trigger === "scheduled" && <p className="muted tiny">Automatic collection</p>}
               <p className="muted tiny">{run.run_id.slice(0, 10)}</p>
             </div>
           ))}

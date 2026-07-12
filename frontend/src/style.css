@@ -661,6 +661,10 @@ h1 {
   background: #f0f9ff;
 }
 
+.app-freshness {
+  margin: 12px 0 16px;
+}
+
 .collection-freshness h3,
 .collection-freshness p {
   margin: 0;
@@ -1205,6 +1209,19 @@ h1 {
   gap: 8px;
 }
 
+.run-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 10px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-metrics strong {
+  color: #0f172a;
+}
+
 .pill.running {
   background: #ecfeff;
   color: #0284c7;
@@ -1218,6 +1235,11 @@ h1 {
 .pill.failed {
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.pill.interrupted {
+  background: #f1f5f9;
+  color: #475569;
 }
 
 .pill.mode {

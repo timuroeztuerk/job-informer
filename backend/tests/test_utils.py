@@ -1,8 +1,8 @@
-"""Comprehensive unit tests for utility helpers.
+"""Comprehensive tests for backend utility helpers.
 
 These tests previously lived across multiple modules. They are now gathered
-into a single module so they can be discovered easily by ``python -m unittest``
-while still exercising the same behaviours that were covered before.
+into a single test module while still exercising the same behaviours that were
+covered before.
 """
 
 from __future__ import annotations
@@ -15,14 +15,17 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from ..agents.ai_purger import AIPurger, AIPurger_JSON_CLASS
-from ..agents.parser import DescriptionTools, JobDescriptionStructure
-from . import data_utils
-from . import filtering
-from . import profile_fit
-from .database import JobDatabase
-from .db_summary import build_db_summary
-from .openai_responses_client import LLMCallTelemetry, LLMUsage, OpenAIResponsesClient, StructuredLLMResult
+from backend.src.agents.ai_purger import AIPurger, AIPurger_JSON_CLASS
+from backend.src.agents.parser import DescriptionTools, JobDescriptionStructure
+from backend.src.utils import data_utils, filtering, profile_fit
+from backend.src.utils.database import JobDatabase
+from backend.src.utils.db_summary import build_db_summary
+from backend.src.utils.openai_responses_client import (
+    LLMCallTelemetry,
+    LLMUsage,
+    OpenAIResponsesClient,
+    StructuredLLMResult,
+)
 
 
 class TestDataCleaningUtilities(unittest.TestCase):
@@ -203,8 +206,8 @@ class TestObservationHistory(unittest.TestCase):
             db_path = os.path.join(tmp_dir, "jobs.db")
             db = JobDatabase(db_path=db_path)
 
-            first_seen = "2026-04-01T08:00:00"
-            second_seen = "2026-04-03T08:00:00"
+            first_seen = "2026-04-01T08:00:00+00:00"
+            second_seen = "2026-04-03T08:00:00+00:00"
             job_frame = pd.DataFrame(
                 [
                     {

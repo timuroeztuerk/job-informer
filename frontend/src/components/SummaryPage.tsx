@@ -156,6 +156,7 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className, onOpenDashboard })
   const freshness = useMemo(() => summary?.collection_freshness || null, [summary]);
   const fitSummary = useMemo(() => summary?.profile_fit_summary || null, [summary]);
   const parserTelemetry = useMemo(() => summary?.parser_telemetry || null, [summary]);
+  const integrity = useMemo(() => summary?.integrity || null, [summary]);
   const skillGapSummary = useMemo(() => summary?.skill_gap_summary || null, [summary]);
   const trend = useMemo(() => summary?.trend_summary || null, [summary]);
   const orphanedJobs = useMemo(
@@ -555,6 +556,14 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className, onOpenDashboard })
               <div>
                 <p className="muted tiny">Coverage</p>
                 <p className="metric-value">{coverageDisplay}</p>
+              </div>
+              <div>
+                <p className="muted tiny">SQLite integrity</p>
+                <p className="metric-value">{integrity?.sqlite_ok ? "OK" : "Check"}</p>
+              </div>
+              <div>
+                <p className="muted tiny">Orphaned records</p>
+                <p className="metric-value">{formatCount(integrity?.orphan_record_count)}</p>
               </div>
             </div>
           </section>

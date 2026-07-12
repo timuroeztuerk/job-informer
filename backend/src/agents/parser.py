@@ -346,7 +346,7 @@ class DescriptionTools:
                     version INTEGER NOT NULL,
                     model TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
                     PRIMARY KEY (job_id, desc_hash, version)
                 )
                 """

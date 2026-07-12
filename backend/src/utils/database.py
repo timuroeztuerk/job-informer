@@ -10,7 +10,7 @@ import pandas as pd
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from loguru import logger
 
 from .data_utils import build_job_ids, build_normalized_key, normalize_job_url
@@ -23,12 +23,27 @@ from .profile_fit import (
     normalize_fit_profile,
 )
 from .sqlite_connection import connect_sqlite, open_sqlite
+from .time_utils import normalize_utc_iso, utc_now_iso
 
-# Default DB relative to backend directory unless overridden by env
-DEFAULT_DB_PATH = os.getenv(
-    "JOBS_DB_PATH",
-    str(Path(__file__).resolve().parents[2] / "data" / "jobs.db"),
-)
+# Stable fallback relative to the backend directory. ``JOBS_DB_PATH`` is read
+# by ``JobDatabase`` at construction time so a dotenv file loaded after this
+# module was imported is still honored.
+DEFAULT_DB_PATH = str(Path(__file__).resolve().parents[2] / "data" / "jobs.db")
+
+
+def resolve_database_path(db_path: str | Path | None = None) -> str:
+    """Resolve an explicit path, or the current ``JOBS_DB_PATH`` environment value."""
+    if db_path is None:
+        raw_path = os.getenv("JOBS_DB_PATH", "").strip() or DEFAULT_DB_PATH
+    else:
+        raw_path = str(db_path).strip()
+        if not raw_path:
+            raise ValueError("Database path cannot be empty")
+
+    # Preserve SQLite's special in-memory database name for callers that use it.
+    if raw_path == ":memory:":
+        return raw_path
+    return str(Path(raw_path).expanduser().resolve())
 
 
 class JobDatabase:
@@ -36,8 +51,8 @@ class JobDatabase:
 
     ACTIVE_JOBS_WHERE = "archived_at IS NULL"
     
-    def __init__(self, db_path: str = DEFAULT_DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: str | Path | None = None):
+        self.db_path = resolve_database_path(db_path)
         self._ensure_data_dir()
         self._init_db()
     
@@ -62,7 +77,7 @@ class JobDatabase:
                     archived_at TIMESTAMP,
                     archived_reason TEXT,
                     scraped_at TIMESTAMP NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
                 )
             """)
 
@@ -76,21 +91,25 @@ class JobDatabase:
                     skill_gaps TEXT NOT NULL DEFAULT '[]',
                     follow_up_date TEXT,
                     resume_version TEXT NOT NULL DEFAULT '',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+                    updated_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
                 )
             """)
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS scrape_runs (
                     scrape_run_id TEXT PRIMARY KEY,
+                    api_run_id TEXT,
                     mode TEXT NOT NULL DEFAULT 'run-once',
                     keywords TEXT,
                     locations TEXT,
                     observed_at TIMESTAMP NOT NULL,
                     observed_jobs_count INTEGER NOT NULL DEFAULT 0,
                     new_jobs_count INTEGER NOT NULL DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    archived_jobs_count INTEGER NOT NULL DEFAULT 0,
+                    descriptions_fetched_count INTEGER NOT NULL DEFAULT 0,
+                    parsed_jobs_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
                     completed_at TIMESTAMP
                 )
             """)
@@ -120,8 +139,8 @@ class JobDatabase:
                     name TEXT NOT NULL,
                     config_json TEXT NOT NULL,
                     version INTEGER NOT NULL DEFAULT 1,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+                    updated_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
                 )
             """)
 
@@ -162,7 +181,7 @@ class JobDatabase:
                     error_message TEXT,
                     output_preview TEXT,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
                 )
             """)
 
@@ -181,7 +200,7 @@ class JobDatabase:
                     last_refusal_text TEXT,
                     last_response_id TEXT,
                     output_preview TEXT,
-                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
                     PRIMARY KEY (job_id, desc_hash, version)
                 )
             """)
@@ -197,12 +216,13 @@ class JobDatabase:
                     matched_value TEXT,
                     confidence REAL,
                     details_json TEXT NOT NULL DEFAULT '{}',
-                    decided_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    decided_at TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
                 )
             """)
             
             # Create indexes for fast querying
             self._ensure_jobs_columns(conn)
+            self._ensure_scrape_run_columns(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_company ON jobs(company)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON jobs(source)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON jobs(scraped_at)")
@@ -213,6 +233,7 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_annotations_follow_up_date ON job_annotations(follow_up_date)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_job ON job_observations(job_id, observed_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_run ON job_observations(scrape_run_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_scrape_runs_api_run ON scrape_runs(api_run_id)")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_observations_job_seen ON job_observations(job_id, observed_at)")
             # Existing installations predate the foreign key above. This
             # trigger adds the same insert guard without rebuilding the table
@@ -228,6 +249,18 @@ class JobDatabase:
                 END
                 """
             )
+            for table in ("job_annotations", "job_fit_scores", "filter_decisions"):
+                conn.execute(
+                    f"""
+                    CREATE TRIGGER IF NOT EXISTS trg_{table}_job_exists
+                    BEFORE INSERT ON {table}
+                    FOR EACH ROW
+                    WHEN NOT EXISTS (SELECT 1 FROM jobs WHERE job_id = NEW.job_id)
+                    BEGIN
+                        SELECT RAISE(ABORT, '{table}.job_id has no matching job');
+                    END
+                    """
+                )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fit_scores_band ON job_fit_scores(profile_id, band)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fit_scores_score ON job_fit_scores(profile_id, score DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_filter_decisions_job ON filter_decisions(job_id, decided_at DESC)")
@@ -257,6 +290,19 @@ class JobDatabase:
     def _get_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
         cursor = conn.execute(f"PRAGMA table_info({table_name})")
         return {str(row[1]) for row in cursor.fetchall()}
+
+    def _ensure_scrape_run_columns(self, conn: sqlite3.Connection) -> None:
+        """Add operational run fields to databases created by older versions."""
+        columns = self._get_table_columns(conn, "scrape_runs")
+        additions = {
+            "api_run_id": "TEXT",
+            "archived_jobs_count": "INTEGER NOT NULL DEFAULT 0",
+            "descriptions_fetched_count": "INTEGER NOT NULL DEFAULT 0",
+            "parsed_jobs_count": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE scrape_runs ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _run_safe_migration(
@@ -558,8 +604,8 @@ class JobDatabase:
             parsed_payload = self._parse_orphaned_payload(row["payload_json"])
             observed_at = (
                 self._normalize_timestamp(row["observation_observed_at"])
-                or self._normalize_timestamp(row["created_at"])
-                or pd.Timestamp.now().isoformat()
+                or normalize_utc_iso(row["created_at"], naive_policy="utc")
+                or utc_now_iso()
             )
             title = str(row["observation_title"] or "").strip() or f"[Archived placeholder] {job_id}"
             company = str(row["observation_company"] or "").strip() or "Unknown"
@@ -629,6 +675,7 @@ class JobDatabase:
         if not self._table_exists(conn, "parsed_descriptions") or not self._table_exists(conn, "parse_job_states"):
             return
 
+        fallback_timestamp = utc_now_iso()
         self._run_safe_migration(
             conn,
             """
@@ -651,10 +698,10 @@ class JobDatabase:
                 p.model,
                 'success',
                 1,
-                COALESCE(p.created_at, CURRENT_TIMESTAMP),
-                COALESCE(p.created_at, CURRENT_TIMESTAMP),
+                COALESCE(p.created_at, ?),
+                COALESCE(p.created_at, ?),
                 SUBSTR(p.payload_json, 1, 500),
-                COALESCE(p.created_at, CURRENT_TIMESTAMP)
+                COALESCE(p.created_at, ?)
             FROM parsed_descriptions p
             WHERE NOT EXISTS (
                 SELECT 1
@@ -664,6 +711,7 @@ class JobDatabase:
                   AND s.version = p.version
             )
             """,
+            (fallback_timestamp, fallback_timestamp, fallback_timestamp),
             label="backfill parse job states",
         )
 
@@ -677,6 +725,7 @@ class JobDatabase:
             return
 
         profile = default_fit_profile()
+        created_at = utc_now_iso()
         conn.execute(
             """
             INSERT INTO fit_profiles (
@@ -686,24 +735,22 @@ class JobDatabase:
                 version,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 profile["profile_id"],
                 profile["name"],
                 json.dumps(profile["config"]),
                 profile["version"],
+                created_at,
+                created_at,
             ),
         )
 
     @staticmethod
     def _normalize_timestamp(value: Any) -> str | None:
-        if value in (None, "", "nan", "NaT"):
-            return None
-        parsed = pd.to_datetime(value, errors="coerce")
-        if pd.isna(parsed):
-            return None
-        return parsed.isoformat()
+        """Normalize app/market timestamps; legacy naive values are local wall time."""
+        return normalize_utc_iso(value)
 
     @classmethod
     def _pick_earliest_timestamp(cls, *values: Any) -> str | None:
@@ -791,7 +838,7 @@ class JobDatabase:
                     str(decision.get("matched_value") or "").strip() or None,
                     confidence,
                     details_json,
-                    self._normalize_timestamp(decision.get("decided_at")) or pd.Timestamp.now().isoformat(),
+                    self._normalize_timestamp(decision.get("decided_at")) or utc_now_iso(),
                 )
             )
 
@@ -841,7 +888,7 @@ class JobDatabase:
         owns_connection = conn is None
         active_conn = conn or connect_sqlite(self.db_path)
         try:
-            normalized_archived_at = self._normalize_timestamp(archived_at) or pd.Timestamp.now().isoformat()
+            normalized_archived_at = self._normalize_timestamp(archived_at) or utc_now_iso()
             normalized_reason = archived_reason.strip() or "Archived"
             for chunk in self._chunked(normalized_job_ids):
                 placeholders = ",".join("?" for _ in chunk)
@@ -1033,7 +1080,7 @@ class JobDatabase:
             except TypeError:
                 metadata_json = "{}"
 
-        started_ts = self._normalize_timestamp(started_at) or pd.Timestamp.now().isoformat()
+        started_ts = self._normalize_timestamp(started_at) or utc_now_iso()
         finished_ts = self._normalize_timestamp(finished_at) or started_ts
 
         owns_connection = conn is None
@@ -1061,8 +1108,9 @@ class JobDatabase:
                     error_type,
                     error_message,
                     output_preview,
-                    metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    metadata_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_task_type,
@@ -1085,6 +1133,7 @@ class JobDatabase:
                     str(error_message or "").strip() or None,
                     str(output_preview or "").strip() or None,
                     metadata_json,
+                    finished_ts,
                 ),
             )
             if owns_connection:
@@ -1119,7 +1168,7 @@ class JobDatabase:
         if not normalized_job_id or not normalized_hash or not normalized_model or not normalized_status:
             return False
 
-        attempt_ts = self._normalize_timestamp(last_attempt_at) or pd.Timestamp.now().isoformat()
+        attempt_ts = self._normalize_timestamp(last_attempt_at) or utc_now_iso()
         success_ts = self._normalize_timestamp(last_success_at)
 
         owns_connection = conn is None
@@ -1362,12 +1411,13 @@ class JobDatabase:
         self,
         *,
         mode: str = "run-once",
+        api_run_id: Optional[str] = None,
         keywords: Any = None,
         locations: Any = None,
         observed_at: Optional[str] = None,
     ) -> str:
         """Create a scrape run record used to group job observations."""
-        run_observed_at = self._normalize_timestamp(observed_at) or pd.Timestamp.now().isoformat()
+        run_observed_at = self._normalize_timestamp(observed_at) or utc_now_iso()
         scrape_run_id = f"scrape_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
         with self._get_connection() as conn:
@@ -1375,18 +1425,22 @@ class JobDatabase:
                 """
                 INSERT INTO scrape_runs (
                     scrape_run_id,
+                    api_run_id,
                     mode,
                     keywords,
                     locations,
-                    observed_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    observed_at,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scrape_run_id,
+                    (api_run_id or os.getenv("JOB_INFORMER_API_RUN_ID", "")).strip() or None,
                     (mode or "run-once").strip() or "run-once",
                     self._serialize_run_payload(keywords),
                     self._serialize_run_payload(locations),
                     run_observed_at,
+                    utc_now_iso(),
                 ),
             )
             conn.commit()
@@ -1399,6 +1453,9 @@ class JobDatabase:
         *,
         observed_jobs_count: Optional[int] = None,
         new_jobs_count: Optional[int] = None,
+        archived_jobs_count: Optional[int] = None,
+        descriptions_fetched_count: Optional[int] = None,
+        parsed_jobs_count: Optional[int] = None,
         completed_at: Optional[str] = None,
     ) -> None:
         """Mark a scrape run as complete and persist final counters."""
@@ -1406,7 +1463,7 @@ class JobDatabase:
             return
 
         updates: list[str] = ["completed_at = ?"]
-        params: list[Any] = [self._normalize_timestamp(completed_at) or pd.Timestamp.now().isoformat()]
+        params: list[Any] = [self._normalize_timestamp(completed_at) or utc_now_iso()]
 
         if observed_jobs_count is not None:
             updates.append("observed_jobs_count = ?")
@@ -1414,6 +1471,15 @@ class JobDatabase:
         if new_jobs_count is not None:
             updates.append("new_jobs_count = ?")
             params.append(max(0, int(new_jobs_count)))
+        if archived_jobs_count is not None:
+            updates.append("archived_jobs_count = ?")
+            params.append(max(0, int(archived_jobs_count)))
+        if descriptions_fetched_count is not None:
+            updates.append("descriptions_fetched_count = ?")
+            params.append(max(0, int(descriptions_fetched_count)))
+        if parsed_jobs_count is not None:
+            updates.append("parsed_jobs_count = ?")
+            params.append(max(0, int(parsed_jobs_count)))
 
         params.append(scrape_run_id)
         with self._get_connection() as conn:
@@ -1465,6 +1531,7 @@ class JobDatabase:
         next_name = (name or existing.get("name") or DEFAULT_FIT_PROFILE_NAME).strip() or DEFAULT_FIT_PROFILE_NAME
         next_config = normalize_fit_profile(config or existing.get("config"))
         next_version = int(existing.get("version") or DEFAULT_FIT_PROFILE_VERSION) + 1
+        updated_at = utc_now_iso()
 
         with self._get_connection() as conn:
             conn.execute(
@@ -1476,18 +1543,20 @@ class JobDatabase:
                     version,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(profile_id) DO UPDATE SET
                     name = excluded.name,
                     config_json = excluded.config_json,
                     version = excluded.version,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = excluded.updated_at
                 """,
                 (
                     profile_id,
                     next_name,
                     json.dumps(next_config),
                     next_version,
+                    updated_at,
+                    updated_at,
                 ),
             )
             conn.commit()
@@ -1699,7 +1768,7 @@ class JobDatabase:
             logger.warning("No job_id column found in DataFrame")
             return 0
         
-        default_observed_at = self._normalize_timestamp(observed_at) or pd.Timestamp.now().isoformat()
+        default_observed_at = self._normalize_timestamp(observed_at) or utc_now_iso()
         active_scrape_run_id = scrape_run_id
         auto_created_scrape_run = False
         if not active_scrape_run_id:
@@ -1867,9 +1936,10 @@ class JobDatabase:
                             scraped_at,
                             first_seen_at,
                             last_seen_at,
-                            seen_count
+                            seen_count,
+                            created_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             canonical_job_id,
@@ -1885,6 +1955,7 @@ class JobDatabase:
                             job_observed_at,
                             job_observed_at,
                             1,
+                            job_observed_at,
                         ),
                     )
                     inserted_count += 1
@@ -1997,7 +2068,7 @@ class JobDatabase:
     
     def get_recent_jobs(self, days: int = 30) -> pd.DataFrame:
         """Get jobs from last N days"""
-        cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+        cutoff_date = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         
         with self._get_connection() as conn:
             df = pd.read_sql_query("""
@@ -2072,12 +2143,21 @@ class JobDatabase:
             # Recent activity
             cursor.execute("""
                 SELECT COUNT(*) FROM jobs 
-                WHERE archived_at IS NULL AND scraped_at > datetime('now', '-7 days')
+                WHERE archived_at IS NULL
+                  AND datetime(scraped_at, 'utc') > datetime('now', '-7 days')
             """)
             recent_jobs = cursor.fetchone()[0]
             
             # Date range
-            cursor.execute("SELECT MIN(scraped_at), MAX(scraped_at) FROM jobs WHERE archived_at IS NULL")
+            cursor.execute(
+                """
+                SELECT
+                    MIN(datetime(scraped_at, 'utc')),
+                    MAX(datetime(scraped_at, 'utc'))
+                FROM jobs
+                WHERE archived_at IS NULL
+                """
+            )
             date_range = cursor.fetchone()
 
             observation_stats = {}
@@ -2165,15 +2245,15 @@ class JobDatabase:
             'top_companies': top_companies,
             'recent_jobs_7_days': recent_jobs,
             'date_range': {
-                'earliest': date_range[0] if date_range[0] else None,
-                'latest': date_range[1] if date_range[1] else None
+                'earliest': normalize_utc_iso(date_range[0], naive_policy="utc") if date_range[0] else None,
+                'latest': normalize_utc_iso(date_range[1], naive_policy="utc") if date_range[1] else None
             },
             'observation_stats': observation_stats,
             'parsed_descriptions_stats': parsed_descriptions_stats
         }
 
     def get_integrity_report(self, sample_limit: int = 10) -> Dict[str, Any]:
-        """Report database corruption and legacy orphan observations.
+        """Report database corruption and legacy orphan job-owned records.
 
         This is deliberately read-only: existing orphan rows are surfaced for
         an operator to inspect, never silently deleted or rewritten.
@@ -2220,12 +2300,72 @@ class JobDatabase:
                     ).fetchall()
                     orphan_samples = [dict(row) for row in rows]
 
+            orphan_counts: Dict[str, int] = {}
+            for table in ("job_annotations", "job_fit_scores", "parse_job_states", "filter_decisions"):
+                if not self._table_exists(conn, table):
+                    orphan_counts[table] = 0
+                    continue
+                row = conn.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM {table} child
+                    LEFT JOIN jobs j ON j.job_id = child.job_id
+                    WHERE j.job_id IS NULL
+                    """
+                ).fetchone()
+                orphan_counts[table] = int(row[0] or 0)
+
         return {
             "sqlite_ok": quick_check_messages == ["ok"],
             "sqlite_messages": quick_check_messages,
             "orphan_observation_count": orphan_observation_count,
             "orphan_observation_job_count": orphan_observation_job_count,
             "orphan_observation_samples": orphan_samples,
+            "orphan_record_counts": orphan_counts,
+            "orphan_record_count": orphan_observation_count + sum(orphan_counts.values()),
+        }
+
+    def repair_integrity(self, backup_dir: Optional[str | Path] = None) -> Dict[str, Any]:
+        """Back up the database, then remove job-owned rows whose job is missing."""
+        before = self.get_integrity_report(sample_limit=10)
+        source_path = Path(self.db_path).expanduser().resolve()
+        destination_dir = (
+            Path(backup_dir).expanduser().resolve()
+            if backup_dir is not None
+            else source_path.parent / "backups"
+        )
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        backup_path = destination_dir / f"{source_path.stem}.{timestamp}.backup.db"
+
+        with self._get_connection() as source, open_sqlite(backup_path) as destination:
+            source.backup(destination)
+
+        removed: Dict[str, int] = {}
+        with self._get_connection() as conn:
+            tables = (
+                "job_observations",
+                "job_annotations",
+                "job_fit_scores",
+                "parse_job_states",
+                "filter_decisions",
+            )
+            for table in tables:
+                if not self._table_exists(conn, table):
+                    removed[table] = 0
+                    continue
+                cursor = conn.execute(
+                    f"DELETE FROM {table} WHERE job_id NOT IN (SELECT job_id FROM jobs)"
+                )
+                removed[table] = max(0, int(cursor.rowcount or 0))
+            conn.commit()
+
+        after = self.get_integrity_report(sample_limit=10)
+        return {
+            "backup_path": str(backup_path),
+            "removed": removed,
+            "before": before,
+            "after": after,
         }
 
     def get_job_observations(self, job_id: str, limit: int = 20) -> List[Dict[str, Any]]:

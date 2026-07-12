@@ -86,6 +86,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
   const [selectedId, setSelectedId] = useState<string | null>(() => readTextParam("job") || null);
   const [reloadToken, setReloadToken] = useState(0);
   const lastQuerySignatureRef = useRef<string | null>(null);
+  const advanceIfMissingRef = useRef(false);
   const [filtersOpen, setFiltersOpen] = useState(
     () =>
       !!(
@@ -193,6 +194,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
 
         setJobs(data.items);
         setTotal(data.total);
+        const advanceIfMissing = advanceIfMissingRef.current;
+        advanceIfMissingRef.current = false;
 
         const existing = data.items.find((item) => item.job_id === selectedId);
         if (existing) {
@@ -201,7 +204,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
           return;
         }
 
-        if (selectedId && !queryChanged) {
+        if (selectedId && !queryChanged && !advanceIfMissing) {
           try {
             const requestedJob = await fetchJob(selectedId);
             if (cancelled) return;
@@ -248,6 +251,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
         setOffset(0);
         setSelectedId(null);
         onSelect(null);
+      } else {
+        advanceIfMissingRef.current = true;
       }
       setReloadToken((token) => token + 1);
     },

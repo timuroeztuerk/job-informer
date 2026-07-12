@@ -5,6 +5,7 @@ Automated job posting monitoring and notification system
 """
 
 import argparse
+import json
 import sys
 import os
 from pathlib import Path
@@ -50,6 +51,12 @@ def main():
     group.add_argument('--run-once', dest='run_once', action='store_true', help='Run job search once')
     group.add_argument('--test', action='store_true', help='Run combined tests')
     group.add_argument('--db-summary', dest='db_summary', action='store_true', help='Show database summary')
+    group.add_argument(
+        '--repair-integrity',
+        dest='repair_integrity',
+        action='store_true',
+        help='Back up the SQLite database and remove orphaned job-owned records',
+    )
     group.add_argument('--purge', action='store_true', help='Archive unwanted jobs (rules + AI)')
     group.add_argument(
         '--parse-descriptions',
@@ -108,6 +115,7 @@ def main():
         args.run_once,
         args.test,
         args.db_summary,
+        args.repair_integrity,
         args.purge,
         args.parse_descriptions,
         args.reset_ai_purge,
@@ -123,6 +131,8 @@ def main():
         mode_str = 'test'
     elif args.db_summary:
         mode_str = 'db-summary'
+    elif args.repair_integrity:
+        mode_str = 'repair-integrity'
     elif args.purge:
         mode_str = 'purge'
     elif args.inform:
@@ -161,6 +171,8 @@ def main():
             run_all_tests(config)
         elif args.db_summary:
             show_database_summary(config)
+        elif args.repair_integrity:
+            repair_database_integrity(config)
         elif args.purge:
             run_purge_pipeline(config)
         elif args.inform:
@@ -307,6 +319,20 @@ def show_database_summary(config: Config):
             print(f"  {i}. {city.get('name')}: {city.get('count', 0):,} jobs ({percentage:.1f}%)")
     else:
         print(f"\n==== Top 5 Cities ====\nNo jobs to summarize.\n")
+
+    integrity = summary.get("integrity") or {}
+    print("\n🧱 Database integrity:")
+    print(f"  SQLite check: {'ok' if integrity.get('sqlite_ok') else 'needs attention'}")
+    print(f"  Orphaned job-owned records: {integrity.get('orphan_record_count', 0):,}")
+
+
+def repair_database_integrity(config: Config):
+    """Create a consistent backup before removing legacy orphan records."""
+    db = JobDatabase(db_path=config.jobs_db_path)
+    result = db.repair_integrity()
+    print(json.dumps(result, indent=2, default=str))
+    logger.success("Integrity repair completed; backup saved to {}", result["backup_path"])
+    return result
 
 
 def _print_top_list(title: str, entries: list[dict], *, limit: int | None = None):

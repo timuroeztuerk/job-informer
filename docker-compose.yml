@@ -12,6 +12,8 @@ services:
     environment:
       API_TOKEN: ${API_TOKEN:-}
       JOBS_DB_PATH: /app/data/jobs.db
+      AUTO_COLLECTION_INTERVAL_HOURS: ${AUTO_COLLECTION_INTERVAL_HOURS:-0}
+      COLLECTION_STALE_AFTER_DAYS: ${COLLECTION_STALE_AFTER_DAYS:-7}
     volumes:
       - ./backend/data:/app/data
       - job-logs:/app/logs
