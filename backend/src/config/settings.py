@@ -173,26 +173,12 @@ class Config:
             enable_description_parser=_get_bool('ENABLE_DESCRIPTION_PARSER', 'true'),
             desc_parser_model=os.getenv('DESC_PARSER_MODEL', os.getenv('OPENAI_MODEL', 'gpt-5-mini')),
             desc_parser_prompt=os.getenv('DESC_PARSER_PROMPT', (
-                'Extract the fields below from the job description and return STRICTLY VALID JSON.\n'
-                'Rules: output JSON only (no markdown, no code fences, no prose). Use double quotes. No comments, no trailing commas, no ellipses.\n'
-                'If unknown: use "unspecified" for enums, null for numbers, [] for arrays.\n'
-                'Schema to return (exact keys/types):\n'
-                '{\n'
-                '  "seniority": "intern|junior|mid|senior|lead|principal|unspecified",\n'
-                '  "employment_type": "full-time|part-time|contract|internship|unspecified",\n'
-                '  "remote": "yes|no|hybrid|unspecified",\n'
-                '  "languages": ["en", "de", "both"],\n'
-                '  "programming_languages": ["python", "sql", "java", ...],\n'
-                '  "tools": ["aws", "azure", "tensorflow", ...],\n'
-                '  "skills": ["ml", "statistics", ...],\n'
-                '  "degree_field": "computer science|data science|engineering|unspecified",\n'
-                '  "degree_type": "bachelor|master|phd|unspecified",\n'
-                '  "years_experience_min": 0,\n'
-                '  "location": ["city in germany"],\n'
-                '  "salary_eur_range": {"min": null, "max": null},\n'
-                '  "extra benefits": ["flexible hours", "deutschlandticket", "gym", "..."],\n'
-                '  "summary": "1-2 sentences, max 30 words"\n'
-                '}'
+                'Extract structured job information from the provided title, company, and description.\n'
+                'Use only the provided text. Do not infer beyond what is reasonably stated.\n'
+                'If unknown: use "unspecified" for enum/string placeholders, null for numeric values, and [] for list fields.\n'
+                'Keep languages, programming languages, tools, skills, locations, and extra benefits concise and deduplicated.\n'
+                'Interpret salary_eur_range as annual gross EUR only when explicitly stated; otherwise leave min and max null.\n'
+                'Keep the summary factual and short: 1-2 sentences, max 30 words.'
             )),
             desc_parser_batch_size=int(os.getenv('DESC_PARSER_BATCH_SIZE', '25')),
             desc_parser_max_batches=int(os.getenv('DESC_PARSER_MAX_BATCHES', '10')),

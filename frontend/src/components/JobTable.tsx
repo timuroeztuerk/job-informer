@@ -230,6 +230,27 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
           <p className="label">Jobs</p>
           <h3>{total ? total.toLocaleString() : "No"} records</h3>
         </div>
+        <label className="tiny sort-control">
+          <span>Sort</span>
+          <select
+            value={sort}
+            className="input"
+            onChange={(e) => {
+              setSort(e.target.value as SortOption);
+              setOffset(0);
+              setReloadToken((token) => token + 1);
+            }}
+          >
+            <option value="scraped_at_desc">Newest</option>
+            <option value="scraped_at_asc">Oldest</option>
+            <option value="last_seen_desc">Last seen</option>
+            <option value="last_seen_asc">Least recent</option>
+            <option value="seen_count_desc">Most recurring</option>
+            <option value="seen_count_asc">Least recurring</option>
+            <option value="title_asc">Title A-Z</option>
+            <option value="title_desc">Title Z-A</option>
+          </select>
+        </label>
       </div>
 
       <details
@@ -374,27 +395,6 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
                     {formatAnnotationLabel(value)}
                   </option>
                 ))}
-            </select>
-          </label>
-          <label className="tiny">
-            <span>Sort</span>
-            <select
-              value={sort}
-              className="input"
-              onChange={(e) => {
-                setSort(e.target.value as SortOption);
-                setOffset(0);
-                setReloadToken((token) => token + 1);
-              }}
-            >
-              <option value="scraped_at_desc">Newest</option>
-              <option value="scraped_at_asc">Oldest</option>
-              <option value="last_seen_desc">Last seen</option>
-              <option value="last_seen_asc">Least recent</option>
-              <option value="seen_count_desc">Most recurring</option>
-              <option value="seen_count_asc">Least recurring</option>
-              <option value="title_asc">Title A-Z</option>
-              <option value="title_desc">Title Z-A</option>
             </select>
           </label>
           <button className="ghost sm" type="button" onClick={clearFilters} disabled={loading}>

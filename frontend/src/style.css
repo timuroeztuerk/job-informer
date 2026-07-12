@@ -336,6 +336,67 @@ h1 {
   padding: 14px;
 }
 
+.table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.sort-control {
+  min-width: 180px;
+}
+
+.sort-control span {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.operator-drawer {
+  overflow: hidden;
+}
+
+.operator-drawer-toggle {
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.operator-drawer-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.operator-drawer-toggle::after {
+  content: "+";
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.operator-drawer[open] .operator-drawer-toggle::after {
+  content: "−";
+}
+
+.operator-drawer[open] .operator-drawer-toggle {
+  margin-bottom: 10px;
+}
+
+.recent-runs .header.compact {
+  margin-bottom: 10px;
+}
+
 .annotation-card {
   overflow: hidden;
 }
@@ -378,6 +439,50 @@ h1 {
   flex-direction: column;
   align-items: flex-end;
   gap: 4px;
+  padding-right: 8px;
+}
+
+.parsed-card {
+  overflow: hidden;
+}
+
+.parsed-toggle {
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.parsed-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.parsed-toggle::after {
+  content: "+";
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 18px;
+  font-weight: 600;
+  background: #fff;
+}
+
+.parsed-card[open] .parsed-toggle::after {
+  content: "−";
+}
+
+.parsed-summary-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
   padding-right: 8px;
 }
 
@@ -485,7 +590,7 @@ h1 {
 }
 
 .intelligence-hero {
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .intelligence-hero-row {
@@ -494,8 +599,8 @@ h1 {
 
 .intelligence-section {
   display: grid;
-  gap: 14px;
-  margin-bottom: 16px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .section-head {
@@ -508,35 +613,70 @@ h1 {
 
 .section-head h3 {
   margin: 2px 0 0;
+  font-size: 18px;
 }
 
 .intel-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
 }
 
 .intel-grid.four {
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .intel-grid.two-up {
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
 .intel-card,
 .intel-panel {
   background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
   border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 14px;
+  border-radius: 14px;
+  padding: 12px;
 }
 
 .intel-value {
-  margin: 6px 0;
-  font-size: 24px;
+  margin: 4px 0;
+  font-size: 20px;
   font-weight: 800;
   line-height: 1.1;
+}
+
+.market-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.market-strip-column {
+  min-width: 0;
+}
+
+.market-strip-list {
+  display: grid;
+  gap: 6px;
+}
+
+.market-strip-item {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 10px;
+  padding: 4px 0;
+}
+
+.market-strip-item:hover {
+  color: #0f172a;
+  border-color: #cbd5e1;
+  background: rgba(248, 250, 252, 0.85);
+  padding: 6px 8px;
 }
 
 .window-copy {
@@ -549,12 +689,12 @@ h1 {
 }
 
 .weekly-panel {
-  padding: 16px;
+  padding: 12px;
 }
 
 .weekly-list.featured {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .weekly-row.interactive {
@@ -563,7 +703,7 @@ h1 {
   border: 1px solid transparent;
   background: transparent;
   border-radius: 12px;
-  padding: 8px;
+  padding: 6px;
 }
 
 .weekly-row.interactive:hover {
@@ -573,7 +713,7 @@ h1 {
 
 .momentum-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .momentum-item {
@@ -585,7 +725,7 @@ h1 {
   border: 1px solid transparent;
   background: transparent;
   border-radius: 12px;
-  padding: 8px;
+  padding: 6px;
   text-align: left;
   cursor: default;
 }
@@ -605,15 +745,15 @@ h1 {
 
 .intel-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .intel-list-item {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   border: 1px solid transparent;
   border-radius: 12px;
-  padding: 8px;
+  padding: 6px;
   background: transparent;
   text-align: left;
 }
@@ -650,13 +790,13 @@ h1 {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 10px;
 }
 
 .metric-value {
   margin: 4px 0 0;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
 }
 
@@ -682,23 +822,23 @@ h1 {
 
 .recurring-panel {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .recurring-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .recurring-item {
   width: 100%;
   display: grid;
-  gap: 8px;
+  gap: 6px;
   text-align: left;
   border: 1px solid var(--border);
   background: #fff;
   border-radius: 14px;
-  padding: 12px;
+  padding: 10px;
 }
 
 .recurring-item:hover {
@@ -722,6 +862,22 @@ h1 {
   .intel-list-copy {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .table-header,
+  .operator-drawer-toggle,
+  .parsed-toggle,
+  .parsed-summary-pills {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .sort-control {
+    width: 100%;
+  }
+
+  .market-strip {
+    grid-template-columns: 1fr;
   }
 
   .annotation-toggle,

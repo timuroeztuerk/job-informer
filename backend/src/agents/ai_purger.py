@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
+from ..utils.openai_responses_client import OpenAIResponsesClient
 from .parser import DescriptionTools
-from ..utils.llm_connection import LLMConnection
 
 @dataclass
 class JobEntry:
@@ -48,16 +48,23 @@ class AIPurger:
     Set process_all=True in constructor to process all jobs in the database.
     """
 
-    def __init__(self, config: Config, test_mode: bool = False, process_all: bool = True):
+    def __init__(
+        self,
+        config: Config,
+        test_mode: bool = False,
+        process_all: bool = True,
+        db: Optional[JobDatabase] = None,
+        llm_client: Optional[OpenAIResponsesClient] = None,
+    ):
         self.config = config
         self.test_mode = test_mode
         self.process_all = process_all  # If True, processes all jobs; if False, processes only default batch size
-        self.db = JobDatabase()
+        self.db = db or JobDatabase()
         self.parser = DescriptionTools(config=self.config, db=self.db)
         self.parser._ensure_table()
         purge_model = getattr(self.config, 'openai_model', 'gpt-5-mini')
         purge_api_key = getattr(self.config, 'openai_api_key', '').strip() or None
-        self.llm = LLMConnection(
+        self.llm = llm_client or OpenAIResponsesClient(
             api_key=purge_api_key,
             model=purge_model,
             timeout_seconds=float(getattr(self.config, 'llm_timeout_seconds', 45)),
@@ -202,6 +209,14 @@ class AIPurger:
                 "reason": reason,
                 "confidence": confidence,
                 "purge": purge,
+                "decision_source": "ai",
+                "decision_action": "archive",
+                "filter_name": "ai_relevance_review",
+                "matched_value": None,
+                "details": {
+                    "reference_id": candidate_id,
+                    "llm_reason": reason,
+                },
             })
 
         seen: set[str] = set()
@@ -237,7 +252,7 @@ class AIPurger:
                 query = f"""
                 SELECT job_id, title, company 
                 FROM jobs 
-                WHERE COALESCE(analyzed, 0) = 0
+                WHERE {self.db.ACTIVE_JOBS_WHERE} AND COALESCE(analyzed, 0) = 0
                 ORDER BY COALESCE(created_at, scraped_at) DESC{limit_clause}
                 """
                 rows = conn.execute(query).fetchall()
@@ -286,30 +301,62 @@ class AIPurger:
                     prompt_preview,
                 )
 
-                # Get structured LLM response
-                analysis_result = self.llm.generate_structured(prompt, AIPurger_JSON_CLASS)
-                if not analysis_result:
+                batch_entity_id = (
+                    f"purge-batch:{batch_num}:{batch[0].id}:{batch[-1].id}"
+                    if batch
+                    else f"purge-batch:{batch_num}"
+                )
+                batch_metadata = {
+                    "batch_num": batch_num,
+                    "batch_size": len(batch),
+                    "job_ids": [job.id for job in batch],
+                    "reference_ids": [item["id"] for item in jobs_data],
+                }
+
+                result = self.llm.parse_structured(
+                    response_model=AIPurger_JSON_CLASS,
+                    input=f"JOBS DATA:\n{json.dumps(jobs_data, ensure_ascii=False, indent=2)}",
+                    instructions=self.purge_prompt.strip(),
+                    max_output_tokens=1024,
+                )
+                telemetry = result.telemetry
+                self.db.record_llm_attempt(
+                    task_type="purge",
+                    entity_id=batch_entity_id,
+                    model=telemetry.model,
+                    status=telemetry.status,
+                    started_at=telemetry.started_at,
+                    finished_at=telemetry.finished_at,
+                    latency_ms=telemetry.latency_ms,
+                    response_id=telemetry.response_id,
+                    retry_count=telemetry.retry_count,
+                    exhausted_retries=telemetry.exhausted_retries,
+                    input_tokens=telemetry.usage.input_tokens,
+                    output_tokens=telemetry.usage.output_tokens,
+                    total_tokens=telemetry.usage.total_tokens,
+                    refusal_text=telemetry.refusal_text,
+                    error_type=telemetry.error_type,
+                    error_message=telemetry.error_message,
+                    output_preview=telemetry.output_preview,
+                    metadata=batch_metadata,
+                )
+
+                if result.parsed is None:
+                    if telemetry.status == "refusal":
+                        logger.warning(
+                            "AI purge batch {} refused: {}",
+                            batch_num,
+                            telemetry.refusal_text or "no refusal text",
+                        )
+                    else:
+                        logger.error(
+                            "AI purge batch {} failed: {}",
+                            batch_num,
+                            telemetry.error_message or telemetry.error_type or "unknown error",
+                        )
                     continue
-                
-                if isinstance(analysis_result, list):
-                    legacy_candidates: List[AIPurgeCandidate] = []
-                    for legacy_entry in analysis_result:
-                        legacy_id = self._extract_id(legacy_entry)
-                        if legacy_id:
-                            legacy_candidates.append(AIPurgeCandidate(id=legacy_id))
-                    if not legacy_candidates:
-                        logger.warning("Legacy LLM payload had no valid IDs; skipping batch")
-                        continue
-                    analysis = AIPurger_JSON_CLASS(purge_candidates=legacy_candidates)
-                elif isinstance(analysis_result, str):
-                    try:
-                        parsed_payload = json.loads(analysis_result)
-                        analysis = AIPurger_JSON_CLASS.model_validate(parsed_payload)
-                    except Exception as parse_error:
-                        logger.error(f"Failed to parse JSON: {parse_error}")
-                        continue
-                else:
-                    analysis = analysis_result
+
+                analysis = result.parsed
                 
                 batches_processed += 1
                 
@@ -441,13 +488,19 @@ class AIPurger:
                 cursor = conn.cursor()
                 
                 # Get analyzed count
-                analyzed_count = cursor.execute("SELECT COUNT(*) FROM jobs WHERE analyzed = 1").fetchone()[0]
+                analyzed_count = cursor.execute(
+                    f"SELECT COUNT(*) FROM jobs WHERE {self.db.ACTIVE_JOBS_WHERE} AND analyzed = 1"
+                ).fetchone()[0]
                 
                 # Get unanalyzed count
-                unanalyzed_count = cursor.execute("SELECT COUNT(*) FROM jobs WHERE COALESCE(analyzed, 0) = 0").fetchone()[0]
+                unanalyzed_count = cursor.execute(
+                    f"SELECT COUNT(*) FROM jobs WHERE {self.db.ACTIVE_JOBS_WHERE} AND COALESCE(analyzed, 0) = 0"
+                ).fetchone()[0]
                 
                 # Get total count
-                total_count = cursor.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+                total_count = cursor.execute(
+                    f"SELECT COUNT(*) FROM jobs WHERE {self.db.ACTIVE_JOBS_WHERE}"
+                ).fetchone()[0]
                 
                 return {
                     "analyzed": analyzed_count,
@@ -459,35 +512,22 @@ class AIPurger:
             logger.error(f"Error getting analysis status: {e}")
             return {"analyzed": 0, "unanalyzed": 0, "total": 0}
 
-    def purge_jobs_by_ids(self, job_ids: List[str]) -> int:
+    def archive_jobs_by_ids(self, job_ids: List[str]) -> int:
         """
-        Purge jobs from database by their IDs
-        Returns count of jobs successfully deleted
+        Archive jobs from database by their IDs.
         """
         if not job_ids:
-            logger.info("No job IDs to purge")
+            logger.info("No job IDs to archive")
             return 0
             
-        logger.info(f"Purging {len(job_ids)} jobs from database")
+        logger.info(f"Archiving {len(job_ids)} jobs from database")
         
         try:
-            with sqlite3.connect(self.db.db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Delete jobs by IDs
-                placeholders = ','.join(['?' for _ in job_ids])
-                delete_query = f"DELETE FROM jobs WHERE job_id IN ({placeholders})"
-                
-                cursor.execute(delete_query, job_ids)
-                conn.commit()
-                
-                deleted_count = cursor.rowcount
-                logger.info(f"Successfully purged {deleted_count} jobs from database")
-                
-                return deleted_count
-                
+            archived_count = self.db.archive_jobs(job_ids, archived_reason="Archived by AI review")
+            logger.info(f"Successfully archived {archived_count} jobs in database")
+            return archived_count
         except Exception as e:
-            logger.error(f"Error purging jobs from database: {e}")
+            logger.error(f"Error archiving jobs in database: {e}")
             return 0
 
     def run_purge_mode(self) -> Dict[str, Any]:
@@ -505,6 +545,7 @@ class AIPurger:
             "batches_processed": 0,
             "jobs_to_purge": 0,
             "jobs_purged": 0,
+            "jobs_archived": 0,
             "test_mode": self.test_mode,
             "llm_stats": {},
             "success": False,
@@ -529,24 +570,31 @@ class AIPurger:
             summary["llm_stats"] = self.llm.get_stats()
             
             if not job_ids_to_purge:
-                logger.info("No jobs identified for purging")
+                logger.info("No jobs identified for archival")
                 summary["success"] = True
                 return summary
             
-            # Purge jobs (skip in test mode)
+            # Archive jobs (skip in test mode)
             if self.test_mode:
-                logger.info(f"TEST MODE: Would purge {len(job_ids_to_purge)} jobs")
+                logger.info(f"TEST MODE: Would archive {len(job_ids_to_purge)} jobs")
                 summary["jobs_purged"] = 0
+                summary["jobs_archived"] = 0
                 summary["success"] = True
             else:
-                purged_count = self.purge_jobs_by_ids(job_ids_to_purge)
-                summary["jobs_purged"] = purged_count
-                
-                if purged_count > 0:
-                    logger.info(f"Purged {purged_count} jobs")
+                archive_summary = self.db.archive_jobs_with_filter_decisions(
+                    summary["purge_decisions"],
+                    default_reason="Archived by AI review",
+                )
+                archived_count = int(archive_summary.get("archived", 0) or 0)
+                summary["jobs_purged"] = archived_count
+                summary["jobs_archived"] = archived_count
+                summary["filter_decisions_recorded"] = int(archive_summary.get("decisions_recorded", 0) or 0)
+
+                if archived_count > 0:
+                    logger.info(f"Archived {archived_count} jobs")
                     summary["success"] = True
                 else:
-                    summary["error"] = "No jobs were actually purged"
+                    summary["error"] = "No jobs were actually archived"
                     summary["llm_stats"] = self.llm.get_stats()
             
             return summary

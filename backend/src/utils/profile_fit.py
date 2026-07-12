@@ -489,13 +489,14 @@ def build_job_fit_rows(
         }
 
     params: list[Any] = []
-    where_clause = ""
+    where_parts = ["j.archived_at IS NULL"]
     if job_ids:
         normalized_job_ids = [str(job_id).strip() for job_id in job_ids if str(job_id).strip()]
         if normalized_job_ids:
             placeholders = ",".join("?" for _ in normalized_job_ids)
-            where_clause = f"WHERE j.job_id IN ({placeholders})"
+            where_parts.append(f"j.job_id IN ({placeholders})")
             params.extend(normalized_job_ids)
+    where_clause = f"WHERE {' AND '.join(where_parts)}"
 
     parsed_join = ""
     parsed_select = "NULL AS payload_json"

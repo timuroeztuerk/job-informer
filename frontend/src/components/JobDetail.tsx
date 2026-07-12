@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { deleteJob, fetchJob, updateJobAnnotation } from "../api";
+import { deleteJob as archiveJob, fetchJob, updateJobAnnotation } from "../api";
 import type { Job, JobAnnotation, JobAnnotationPriority, JobAnnotationStatus, ParsedPayload } from "../types";
 
 interface JobDetailProps {
@@ -42,7 +42,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted, onAnnotationSaved
   const [error, setError] = useState<string | null>(null);
   const [details, setDetails] = useState<Job | null>(null);
   const [parsed, setParsed] = useState<ParsedPayload | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [savingAnnotation, setSavingAnnotation] = useState(false);
   const [annotation, setAnnotation] = useState<JobAnnotation>(defaultAnnotation);
   const [skillGapInput, setSkillGapInput] = useState("");
@@ -52,6 +52,8 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted, onAnnotationSaved
 
     const load = async () => {
       if (!job) {
+        setLoading(false);
+        setError(null);
         setDetails(null);
         setParsed(null);
         setAnnotation(defaultAnnotation);
@@ -60,6 +62,10 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted, onAnnotationSaved
       }
       setLoading(true);
       setError(null);
+      setDetails(null);
+      setParsed(null);
+      setAnnotation(defaultAnnotation);
+      setSkillGapInput("");
       try {
         const fullJob = await fetchJob(job.job_id);
         if (cancelled) return;
@@ -116,32 +122,35 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted, onAnnotationSaved
   };
 
   const annotationUpdatedAt = useMemo(() => formatDateTime(annotation.updated_at), [annotation.updated_at]);
+  const currentDetails = job && details?.job_id === job.job_id ? details : null;
 
-  const confirmDelete = async () => {
-    if (!details || deleting) return;
-    const ok = window.confirm("Delete this job? This cannot be undone.");
+  const confirmArchive = async () => {
+    if (!job || !currentDetails || loading || archiving) return;
+    const targetJobId = job.job_id;
+    const ok = window.confirm("Archive this job? It will be hidden from the active job list.");
     if (!ok) return;
-    setDeleting(true);
+    setArchiving(true);
     try {
-      await deleteJob(details.job_id);
+      await archiveJob(targetJobId);
       setDetails(null);
       setParsed(null);
       setAnnotation(defaultAnnotation);
       setSkillGapInput("");
       onDeleted();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete job.");
+      setError(err instanceof Error ? err.message : "Failed to archive job.");
     } finally {
-      setDeleting(false);
+      setArchiving(false);
     }
   };
 
   const saveAnnotation = async () => {
-    if (!details || savingAnnotation) return;
+    if (!job || !currentDetails || loading || savingAnnotation) return;
+    const targetJobId = job.job_id;
     setSavingAnnotation(true);
     setError(null);
     try {
-      const saved = await updateJobAnnotation(details.job_id, {
+      const saved = await updateJobAnnotation(targetJobId, {
         ...annotation,
         notes: annotation.notes.trim(),
         why_interesting: annotation.why_interesting.trim(),
@@ -184,17 +193,22 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted, onAnnotationSaved
                   Open posting
                 </a>
               )}
-              <button className="danger" type="button" onClick={confirmDelete} disabled={deleting}>
-                Delete
+              <button
+                className="danger"
+                type="button"
+                onClick={confirmArchive}
+                disabled={archiving || loading || !currentDetails}
+              >
+                {archiving ? "Archiving…" : "Archive"}
               </button>
             </div>
           </header>
 
           {error && <div className="error">{error}</div>}
           {!error && loading && <div className="muted">Loading details…</div>}
-          {!error && !loading && details && (
+          {!error && !loading && currentDetails && (
             <>
-              <p className="muted">Scraped {formatDate(details.scraped_at)}</p>
+              <p className="muted">Scraped {formatDate(currentDetails.scraped_at)}</p>
 
               <details className="annotation-card">
                 <summary className="annotation-header annotation-toggle">
@@ -328,7 +342,18 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted, onAnnotationSaved
               </details>
 
               {parsed && (
-                <div className="parsed">
+                <details className="parsed parsed-card">
+                  <summary className="parsed-toggle">
+                    <div>
+                      <p className="summary-title">Parsed signals</p>
+                      <p className="muted small">Model-extracted metadata, skills, and compensation hints.</p>
+                    </div>
+                    <div className="parsed-summary-pills">
+                      <span className="pill small">{parsed.seniority || "unspecified"}</span>
+                      <span className="pill small">{parsed.remote || "unspecified"}</span>
+                    </div>
+                  </summary>
+
                   <div className="pill-row">
                     <span className="pill">{parsed.seniority || "unspecified"}</span>
                     <span className="pill">{parsed.employment_type || "unspecified"}</span>
@@ -410,13 +435,13 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onDeleted, onAnnotationSaved
                       <p className="muted">{benefitsText(parsed["extra benefits"])}</p>
                     </div>
                   </div>
-                </div>
+                </details>
               )}
 
-              {details.description ? (
+              {currentDetails.description ? (
                 <details className="raw">
                   <summary>Full description</summary>
-                  <p className="body">{details.description}</p>
+                  <p className="body">{currentDetails.description}</p>
                 </details>
               ) : (
                 <p className="muted">No description stored.</p>

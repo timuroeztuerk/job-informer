@@ -191,6 +191,7 @@ def _load_jobs_with_dates(db: JobDatabase) -> pd.DataFrame:
                     source,
                     COALESCE(scraped_at, created_at) AS observed_at
                 FROM jobs
+                WHERE archived_at IS NULL
                 """,
                 conn,
             )
@@ -239,6 +240,7 @@ def _load_latest_parsed_rows(db: JobDatabase) -> pd.DataFrame:
                         ) AS row_num
                     FROM parsed_descriptions p
                     INNER JOIN jobs j ON j.job_id = p.job_id
+                    WHERE j.archived_at IS NULL
                 ) ranked
                 WHERE ranked.row_num = 1
                 """,
@@ -458,7 +460,7 @@ def compute_city_summary(db: JobDatabase) -> dict:
     summary = {"top_cities": [], "total_jobs": 0}
     try:
         with db._get_connection() as conn:  # noqa: SLF001
-            df = pd.read_sql_query("SELECT location FROM jobs", conn)
+            df = pd.read_sql_query("SELECT location FROM jobs WHERE archived_at IS NULL", conn)
     except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
         logger.warning(f"Could not load city data for summary: {exc}")
         return summary
@@ -500,6 +502,7 @@ def compute_observation_summary(db: JobDatabase) -> dict:
                     last_seen_at,
                     COALESCE(seen_count, 1) AS seen_count
                 FROM jobs
+                WHERE archived_at IS NULL
                 """,
                 conn,
             )
@@ -674,6 +677,7 @@ def build_db_summary(db: JobDatabase) -> dict:
         "observation_stats": base.get("observation_stats", {}),
         "observation_summary": compute_observation_summary(db),
         "profile_fit_summary": db.get_fit_summary(),
+        "parser_telemetry": db.get_parser_telemetry_summary(),
         "parsed_descriptions_stats": base.get("parsed_descriptions_stats", {}),
         "parsed_insights": compute_parsed_insights(
             db,

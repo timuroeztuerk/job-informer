@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 # Ensure local src imports work when running `uvicorn api:app`
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from src.utils.database import JobDatabase  # noqa: E402
 from src.utils.db_summary import build_db_summary  # noqa: E402
@@ -69,7 +69,6 @@ API_TOKEN = os.getenv("API_TOKEN", "")
 MAX_LOG_BYTES = _as_int_env("MAX_LOG_BYTES", 30000)  # Avoid sending huge logs to the frontend
 
 FRONTEND_DIST_DIR = ROOT / "frontend" / "dist"
-FRONTEND_INDEX = FRONTEND_DIST_DIR / "index.html"
 
 
 @dataclass(frozen=True)
@@ -118,12 +117,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-if FRONTEND_DIST_DIR.exists():
-    assets_dir = FRONTEND_DIST_DIR / "assets"
-    if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="frontend-assets")
-
 
 @app.get("/health")
 def health_check() -> dict:
@@ -516,6 +509,7 @@ def list_jobs(
     min_fit_score: Optional[float] = Query(default=None, ge=0, le=100),
     annotation_status: Optional[str] = None,
     annotation_priority: Optional[str] = None,
+    archived: Literal["exclude", "include", "only"] = Query(default="exclude"),
     date_from: Optional[str] = Query(default=None, description="ISO date/time lower bound"),
     date_to: Optional[str] = Query(default=None, description="ISO date/time upper bound"),
     sort: str = Query(
@@ -528,6 +522,11 @@ def list_jobs(
     clauses = ["1=1"]
     params: list[str] = []
     join_params: list[Any] = [fit_profile_id]
+
+    if archived == "exclude":
+        clauses.append("j.archived_at IS NULL")
+    elif archived == "only":
+        clauses.append("j.archived_at IS NOT NULL")
 
     if search:
         like = f"%{search}%"
@@ -588,6 +587,8 @@ def list_jobs(
                     j.url,
                     j.salary,
                     j.scraped_at,
+                    j.archived_at,
+                    j.archived_reason,
                     j.first_seen_at,
                     j.last_seen_at,
                     j.seen_count,
@@ -647,6 +648,8 @@ def get_job(
             annotation = _job_annotation_for_job(conn, job_id)
             observations = _job_observations_for_job(conn, job_id)
             fit = _job_fit_for_job(conn, job_id, fit_profile_id)
+            filter_decisions = _require_job_db().get_filter_decisions(job_id)
+            parse_status = _require_job_db().get_parse_status(job_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Database error: {exc}") from exc
 
@@ -659,6 +662,8 @@ def get_job(
     job["observation"] = _observation_from_row(row)
     job["observations"] = observations
     job["fit"] = fit
+    job["parse_status"] = parse_status
+    job["filter_decisions"] = filter_decisions
     return job
 
 
@@ -774,22 +779,53 @@ def recompute_fit_profile(
 
 @app.delete("/jobs/{job_id:path}", status_code=204)
 def delete_job(job_id: str, _: bool = Depends(require_token)) -> Response:
-    """Delete a job and its parsed descriptions."""
+    """Archive a job instead of hard-deleting it."""
     try:
+        db = _require_job_db()
         with open_jobs_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM job_annotations WHERE job_id = ?", (job_id,))
-            cursor.execute("DELETE FROM job_fit_scores WHERE job_id = ?", (job_id,))
-            cursor.execute("DELETE FROM job_observations WHERE job_id = ?", (job_id,))
-            cursor.execute("DELETE FROM parsed_descriptions WHERE job_id = ?", (job_id,))
-            cursor.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Job not found")
-            conn.commit()
+            existing = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        archive_summary = db.archive_jobs_with_filter_decisions(
+            [
+                {
+                    "job_id": job_id,
+                    "decision_source": "manual",
+                    "decision_action": "archive",
+                    "filter_name": "manual_archive",
+                    "reason": "Archived manually via API",
+                }
+            ],
+            default_reason="Archived manually via API",
+        )
+        if int(archive_summary.get("archived", 0) or 0) == 0:
+            raise HTTPException(status_code=409, detail="Job is already archived")
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to delete job: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Failed to archive job: {exc}") from exc
+    return Response(status_code=204)
+
+
+@app.post("/jobs/{job_id:path}/restore", status_code=204)
+def restore_job(job_id: str, _: bool = Depends(require_token)) -> Response:
+    """Restore a previously archived job to the active set."""
+    try:
+        with open_jobs_db() as conn:
+            row = conn.execute("SELECT archived_at FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if row["archived_at"] in (None, ""):
+            raise HTTPException(status_code=409, detail="Job is not archived")
+
+        restored = _require_job_db().restore_job(job_id)
+        if not restored:
+            raise HTTPException(status_code=500, detail="Failed to restore job")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to restore job: {exc}") from exc
     return Response(status_code=204)
 
 
@@ -799,11 +835,16 @@ def job_stats(_: bool = Depends(require_token)) -> dict:
     try:
         summary = _require_job_db().get_job_summary()
         with open_jobs_db() as conn:
-            sources = [r[0] for r in conn.execute("SELECT DISTINCT source FROM jobs ORDER BY source").fetchall()]
+            sources = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT source FROM jobs WHERE archived_at IS NULL ORDER BY source"
+                ).fetchall()
+            ]
             companies = [
                 r[0]
                 for r in conn.execute(
-                    "SELECT DISTINCT company FROM jobs ORDER BY company LIMIT 200"
+                    "SELECT DISTINCT company FROM jobs WHERE archived_at IS NULL ORDER BY company LIMIT 200"
                 ).fetchall()
             ]
         summary["sources_list"] = sources
@@ -1125,23 +1166,33 @@ def _latest_parsed_description(conn: sqlite3.Connection, job_id: str) -> dict | 
         return None
 
 
-if FRONTEND_INDEX.exists():
-    @app.get("/", include_in_schema=False)
-    async def serve_frontend_root() -> FileResponse:
-        return FileResponse(str(FRONTEND_INDEX))
+def mount_frontend(app_instance: FastAPI, frontend_dist_dir: Path) -> None:
+    """Mount built assets and an index-only SPA fallback when a build exists."""
+    frontend_index = frontend_dist_dir / "index.html"
+    if not frontend_index.is_file():
+        return
 
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_frontend_spa(full_path: str):
-        if full_path.startswith("assets/"):
-            raise HTTPException(status_code=404, detail="Not Found")
-        if full_path.startswith("_") or full_path.endswith(".ico") or full_path == "favicon.ico":
-            candidate = FRONTEND_DIST_DIR / full_path
-            if candidate.exists() and candidate.is_file():
-                return FileResponse(str(candidate))
-        candidate = FRONTEND_DIST_DIR / full_path
-        if candidate.exists() and candidate.is_file():
-            return FileResponse(str(candidate))
-        return FileResponse(str(FRONTEND_INDEX))
+    assets_dir = frontend_dist_dir / "assets"
+    if assets_dir.is_dir():
+        app_instance.mount(
+            "/assets",
+            StaticFiles(directory=str(assets_dir)),
+            name="frontend-assets",
+        )
+
+    @app_instance.get("/", include_in_schema=False)
+    async def serve_frontend_root() -> FileResponse:
+        return FileResponse(str(frontend_index))
+
+    @app_instance.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend_spa(full_path: str) -> FileResponse:
+        # Client-side routes all receive the SPA shell. Never resolve the
+        # request path against the filesystem; decoded traversal segments in
+        # ``full_path`` must not influence which local file is returned.
+        return FileResponse(str(frontend_index))
+
+
+mount_frontend(app, FRONTEND_DIST_DIR)
 
 
 if __name__ == "__main__":

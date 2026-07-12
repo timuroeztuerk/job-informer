@@ -56,12 +56,17 @@ const RecentRuns: React.FC<RecentRunsProps> = ({ className }) => {
   const wrapperClassName = ["panel", "recent-runs", className].filter(Boolean).join(" ");
 
   return (
-    <section className={wrapperClassName}>
-      <div className="header">
+    <details className={`${wrapperClassName} operator-drawer`}>
+      <summary className="operator-drawer-toggle">
         <div>
-          <p className="label">Recent runs</p>
-          <h3>Latest activity</h3>
+          <p className="label">Operator drawer</p>
+          <h3>Recent runs</h3>
         </div>
+        <span className="muted tiny">{runs.length ? `${runs.length} recent` : loading ? "Loading" : "Closed by default"}</span>
+      </summary>
+
+      <div className="header compact">
+        <p className="muted small">Latest activity</p>
         <button className="ghost" type="button" onClick={load} disabled={loading}>
           Refresh
         </button>
@@ -87,7 +92,7 @@ const RecentRuns: React.FC<RecentRunsProps> = ({ className }) => {
           ))}
         </div>
       )}
-    </section>
+    </details>
   );
 };
 

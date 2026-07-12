@@ -1,21 +1,21 @@
 """
 Description Parser
 - Incremental, cached parsing of job descriptions into structured JSON
-- Uses an OpenAI-compatible API (via LLMConnection) for structured extraction
+- Uses the OpenAI Responses API for structured extraction
 - Writes results into a separate SQLite table to avoid touching jobs.db schema
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 import hashlib
 import json
 import sqlite3
 import sys
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 from loguru import logger
@@ -23,9 +23,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
+from ..utils.openai_responses_client import (
+    LLMCallTelemetry,
+    LLMUsage,
+    OpenAIResponsesClient,
+    StructuredLLMResult,
+)
 from .job_scraper import JobScraper
-# from ..utils.utilities import Utilities  # Temporarily commented out
-from ..utils.llm_connection import LLMConnection
 
 
 @dataclass
@@ -38,28 +42,35 @@ class ParsedDescription:
     created_at: str
 
 
+class SalaryRange(BaseModel):
+    min: Optional[int] = None
+    max: Optional[int] = None
+
+    model_config = {
+        "extra": "forbid",
+    }
+
+
 class JobDescriptionStructure(BaseModel):
     """Pydantic model for structured job description parsing"""
-    seniority: str = "unspecified"
-    employment_type: str = "unspecified"
-    remote: str = "unspecified"
+    seniority: Literal["intern", "junior", "mid", "senior", "lead", "principal", "unspecified"] = "unspecified"
+    employment_type: Literal["full-time", "part-time", "contract", "internship", "unspecified"] = "unspecified"
+    remote: Literal["yes", "no", "hybrid", "unspecified"] = "unspecified"
     languages: List[str] = Field(default_factory=list)
     programming_languages: List[str] = Field(default_factory=list)
     tools: List[str] = Field(default_factory=list)
     skills: List[str] = Field(default_factory=list)
     degree_field: str = "unspecified"
-    degree_type: str = "unspecified"
+    degree_type: Literal["bachelor", "master", "phd", "unspecified"] = "unspecified"
     years_experience_min: Optional[int] = None
     location: List[str] = Field(default_factory=list)
-    salary_eur_min: Optional[int] = None
-    salary_eur_max: Optional[int] = None
-    salary_eur_range: Optional[dict[str, Optional[int]]] = None
+    salary_eur_range: SalaryRange = Field(default_factory=SalaryRange)
     extra_benefits: List[str] = Field(default_factory=list, alias="extra benefits")
     summary: str = "unspecified"
 
     model_config = {
         "populate_by_name": True,
-        "extra": "ignore",
+        "extra": "forbid",
     }
 
     @model_validator(mode="before")
@@ -70,24 +81,22 @@ class JobDescriptionStructure(BaseModel):
 
         data = dict(value)
 
-        if "extra_benefits" not in data and "extra benefits" in data:
-            data["extra_benefits"] = data.get("extra benefits")
-        elif "extra benefits" not in data and "extra_benefits" in data:
-            data["extra benefits"] = data.get("extra_benefits")
+        if "extra benefits" in data:
+            data.pop("extra_benefits", None)
+        elif "extra_benefits" in data:
+            data["extra benefits"] = data.pop("extra_benefits")
 
-        data.setdefault("salary_eur_min", None)
-        data.setdefault("salary_eur_max", None)
-        data.setdefault("salary_eur_range", None)
-
+        salary_min = data.pop("salary_eur_min", None)
+        salary_max = data.pop("salary_eur_max", None)
         salary_range = data.get("salary_eur_range")
         if salary_range is None:
-            range_min = data.get("salary_eur_min")
-            range_max = data.get("salary_eur_max")
-            if range_min is not None or range_max is not None:
-                data["salary_eur_range"] = {
-                    "min": range_min,
-                    "max": range_max,
-                }
+            salary_range = {"min": salary_min, "max": salary_max}
+        elif isinstance(salary_range, dict):
+            salary_range = {
+                "min": salary_range.get("min", salary_min),
+                "max": salary_range.get("max", salary_max),
+            }
+        data["salary_eur_range"] = salary_range
 
         return data
 
@@ -130,6 +139,62 @@ class JobDescriptionStructure(BaseModel):
             return split_values
         return [str(value).strip()] if str(value).strip() else []
 
+    @field_validator("seniority", mode="before")
+    @classmethod
+    def _normalize_seniority(cls, value):
+        clean = str(value or "").strip().lower()
+        if clean in {"intern", "internship"}:
+            return "intern"
+        if clean in {"junior", "jr"}:
+            return "junior"
+        if clean in {"mid", "mid-level", "mid level", "regular"}:
+            return "mid"
+        if clean == "senior":
+            return "senior"
+        if clean == "lead":
+            return "lead"
+        if clean == "principal":
+            return "principal"
+        return "unspecified"
+
+    @field_validator("employment_type", mode="before")
+    @classmethod
+    def _normalize_employment_type(cls, value):
+        clean = str(value or "").strip().lower()
+        if clean in {"full-time", "full time"}:
+            return "full-time"
+        if clean in {"part-time", "part time"}:
+            return "part-time"
+        if clean in {"contract", "contractor"}:
+            return "contract"
+        if clean in {"intern", "internship"}:
+            return "internship"
+        return "unspecified"
+
+    @field_validator("remote", mode="before")
+    @classmethod
+    def _normalize_remote(cls, value):
+        clean = str(value or "").strip().lower()
+        if clean in {"yes", "remote", "fully remote"}:
+            return "yes"
+        if clean in {"no", "on-site", "onsite", "office"}:
+            return "no"
+        if clean == "hybrid":
+            return "hybrid"
+        return "unspecified"
+
+    @field_validator("degree_type", mode="before")
+    @classmethod
+    def _normalize_degree_type(cls, value):
+        clean = str(value or "").strip().lower()
+        if clean in {"bachelor", "bachelors", "b.sc", "ba"}:
+            return "bachelor"
+        if clean in {"master", "masters", "m.sc", "msc", "ma"}:
+            return "master"
+        if clean in {"phd", "doctorate", "doctoral"}:
+            return "phd"
+        return "unspecified"
+
     @staticmethod
     def _parse_salary_number(value):
         if isinstance(value, bool):
@@ -162,40 +227,35 @@ class JobDescriptionStructure(BaseModel):
             return int(round(number))
         return None
 
-    @field_validator("salary_eur_min", "salary_eur_max", mode="before")
-    @classmethod
-    def _coerce_salary(cls, value):
-        return cls._parse_salary_number(value)
-
     @field_validator("salary_eur_range", mode="before")
     @classmethod
     def _coerce_salary_range(cls, value):
         if value is None:
-            return None
+            return {"min": None, "max": None}
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
-                return None
+                return {"min": None, "max": None}
             parts = re.findall(r"(\d+(?:[.,]\d+)?\s*[km]?)", stripped, flags=re.IGNORECASE)
             if not parts:
-                return None
+                return {"min": None, "max": None}
             parsed = [cls._parse_salary_number(part) for part in parts]
             parsed = [p for p in parsed if p is not None]
             if not parsed:
-                return None
+                return {"min": None, "max": None}
             return {"min": parsed[0], "max": parsed[min(1, len(parsed) - 1)]}
         if isinstance(value, (list, tuple)):
             values = [cls._parse_salary_number(item) for item in value]
             values = [v for v in values if v is not None]
             if not values:
-                return None
+                return {"min": None, "max": None}
             return {"min": values[0], "max": values[min(1, len(values) - 1)]}
         if isinstance(value, dict):
             return {
                 "min": cls._parse_salary_number(value.get("min")),
                 "max": cls._parse_salary_number(value.get("max")),
             }
-        return None
+        return {"min": None, "max": None}
 
     @field_validator("years_experience_min", mode="before")
     @classmethod
@@ -223,29 +283,10 @@ class JobDescriptionStructure(BaseModel):
     def normalize_output_payload(cls, payload: dict) -> dict:
         if not isinstance(payload, dict):
             return {}
-        data = dict(payload)
-        salary_min = data.pop("salary_eur_min", None)
-        salary_max = data.pop("salary_eur_max", None)
-
-        salary_range = data.get("salary_eur_range")
-        if not isinstance(salary_range, dict):
-            salary_range = {"min": None, "max": None}
-
-        range_min = salary_range.get("min")
-        range_max = salary_range.get("max")
-        if isinstance(range_min, str):
-            range_min = cls._coerce_salary_like(range_min)
-        if isinstance(range_max, str):
-            range_max = cls._coerce_salary_like(range_max)
-        if range_min is None and salary_min is not None:
-            range_min = salary_min
-        if range_max is None and salary_max is not None:
-            range_max = salary_max
-
-        data["salary_eur_range"] = {
-            "min": cls._coerce_salary_like(range_min),
-            "max": cls._coerce_salary_like(range_max),
-        }
+        validated = cls.model_validate(payload)
+        data = validated.model_dump(by_alias=True)
+        if not isinstance(data.get("salary_eur_range"), dict):
+            data["salary_eur_range"] = {"min": None, "max": None}
         return data
 
     @staticmethod
@@ -260,7 +301,12 @@ class DescriptionTools:
     from the LLM, improving reliability and reducing parsing errors.
     """
 
-    def __init__(self, config: Config, db: Optional[JobDatabase] = None):
+    def __init__(
+        self,
+        config: Config,
+        db: Optional[JobDatabase] = None,
+        llm_client: Optional[OpenAIResponsesClient] = None,
+    ):
         self.config: Config = config
         self.db: JobDatabase = db or JobDatabase()
         self._ensure_table()
@@ -273,7 +319,7 @@ class DescriptionTools:
             self.config, 'openai_model', 'gpt-5-mini'
         )
         parser_api_key = getattr(self.config, 'openai_api_key', '').strip() or None
-        self.llm = LLMConnection(
+        self.llm = llm_client or OpenAIResponsesClient(
             api_key=parser_api_key,
             model=parser_model,
             timeout_seconds=float(getattr(self.config, 'llm_timeout_seconds', 45)),
@@ -283,6 +329,7 @@ class DescriptionTools:
             retry_jitter=float(getattr(self.config, 'llm_retry_jitter', 0.2)),
         )
         self.prompt: str = getattr(self.config, 'desc_parser_prompt', '')
+        self.max_output_tokens: int = 2048
         # Track how many characters the last progress update used so we can
         # properly clear the line on the next update.
         self._progress_line_length: int = 0
@@ -414,16 +461,77 @@ class DescriptionTools:
                 return None
             return ParsedDescription(*row)
 
-    def _store(self, record: ParsedDescription) -> None:
-        with sqlite3.connect(self.db.db_path) as conn:
-            conn.execute(
+    def _store(self, record: ParsedDescription, *, conn: Optional[sqlite3.Connection] = None) -> None:
+        owns_connection = conn is None
+        active_conn = conn or sqlite3.connect(self.db.db_path)
+        try:
+            active_conn.execute(
                 """
                 INSERT OR IGNORE INTO parsed_descriptions(job_id, desc_hash, version, model, payload_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (record.job_id, record.desc_hash, record.version, record.model, record.payload_json, record.created_at),
             )
-            conn.commit()
+            if owns_connection:
+                active_conn.commit()
+        finally:
+            if owns_connection:
+                active_conn.close()
+
+    def _build_parser_instructions(self) -> str:
+        prompt = str(self.prompt or "").strip()
+        if prompt:
+            return prompt
+        return (
+            "Extract job information from the provided title, company, and description. "
+            "Use only the provided text. If a field is unclear, use 'unspecified', null, or an empty list."
+        )
+
+    @staticmethod
+    def _build_parser_input(description_text: str, *, title: str, company: str) -> str:
+        return (
+            f"JOB_TITLE: {str(title).strip()}\n"
+            f"COMPANY: {str(company).strip()}\n\n"
+            f"DESCRIPTION:\n{description_text.strip()}\n"
+        )
+
+    @staticmethod
+    def _serialize_parsed_payload(parsed: JobDescriptionStructure) -> str:
+        payload = JobDescriptionStructure.normalize_output_payload(parsed.model_dump(by_alias=True))
+        return json.dumps(payload)
+
+    async def _call_llm_async(
+        self,
+        description_text: str,
+        job_id: str = "unknown",
+        *,
+        title: str = "Unknown Title",
+        company: str = "Unknown Company",
+    ) -> StructuredLLMResult[JobDescriptionStructure]:
+        """Call the shared Responses API client and return structured telemetry."""
+        if not description_text.strip():
+            logger.warning(f"Job {job_id}: Empty description, skipping LLM call")
+            created_at = datetime.now(UTC).isoformat()
+            return StructuredLLMResult(
+                parsed=None,
+                telemetry=LLMCallTelemetry(
+                    model=self.llm.model,
+                    status="failed",
+                    started_at=created_at,
+                    finished_at=created_at,
+                    latency_ms=0.0,
+                    error_type="EmptyDescription",
+                    error_message="Empty description, skipping LLM call.",
+                    usage=LLMUsage(),
+                ),
+            )
+
+        return await self.llm.parse_structured_async(
+            response_model=JobDescriptionStructure,
+            input=self._build_parser_input(description_text, title=title, company=company),
+            instructions=self._build_parser_instructions(),
+            max_output_tokens=self.max_output_tokens,
+        )
 
     def _call_llm(
         self,
@@ -433,72 +541,65 @@ class DescriptionTools:
         title: str = "Unknown Title",
         company: str = "Unknown Company",
     ) -> Optional[str]:
-        """Call unified LLM using structured generation; return raw JSON text or None."""
-        if not description_text.strip():
-            logger.warning(f"Job {job_id}: Empty description, skipping LLM call")
-            return None
+        """Sync compatibility wrapper returning the canonical payload JSON string."""
         if not getattr(self.llm, 'api_key', ''):
             logger.error("OPENAI_API_KEY missing; cannot parse descriptions")
             return None
 
-        prompt = (
-            f"{self.prompt}\n\n"
-            f"JOB_TITLE: {str(title).strip()}\n"
-            f"COMPANY: {str(company).strip()}\n\n"
-            f"DESCRIPTION:\n{description_text.strip()}\n\n"
-            "Use ONLY the provided job title, company, and description text for extraction. "
-            "Return valid JSON only. "
-            "If fields are unclear, use 'unspecified' or null, not invented values."
-        )
-        
-        # Add system message to clarify schema, especially for salary and benefits fields
-        system_msg = ("Extract job information into the specified structure. "
-                     "For salary, prefer salary_eur_min and salary_eur_max when available, both in EUR. "
-                     "If only a range is available, set salary_eur_range with min/max and leave missing fields null. "
-                     "If salary information is not available, use null. "
-                     "For extra benefits, return a list of strings, never a single comma-separated string.")
-        
         try:
-            # Use structured generation with the Pydantic model
-            result = self.llm.generate_structured(prompt, JobDescriptionStructure, system=system_msg)
-            
-            if result is None:
-                logger.error(f"Job {job_id}: LLM returned None for structured generation")
-                return None
-            
-            # Handle both parsed object and JSON string responses
-            if isinstance(result, str):
-                # If it's already a JSON string, validate it and normalize the payload shape.
-                try:
-                    parsed_json = json.loads(result)
-                    if isinstance(parsed_json, dict):
-                        try:
-                            validated = JobDescriptionStructure.model_validate(parsed_json)
-                            normalized = JobDescriptionStructure.normalize_output_payload(
-                                validated.model_dump(by_alias=True)
-                            )
-                        except Exception:
-                            normalized = JobDescriptionStructure.normalize_output_payload(parsed_json)
-                        return json.dumps(normalized)
-                    return result
-                except json.JSONDecodeError as e:
-                    logger.error(f"Job {job_id}: Invalid JSON returned from structured LLM call: {e}")
-                    return None
-            elif isinstance(result, JobDescriptionStructure):
-                # If it's a parsed Pydantic object, convert to the expected JSON format
-                # Convert flattened salary fields back to nested structure
-                data = result.model_dump(by_alias=True)
-                data = JobDescriptionStructure.normalize_output_payload(data)
-                
-                json_result = json.dumps(data)
-                return json_result
-            else:
-                logger.error(f"Job {job_id}: Unexpected result type from LLM: {type(result)}")
-                return None
-                
+            result = self.llm.parse_structured(
+                response_model=JobDescriptionStructure,
+                input=self._build_parser_input(description_text, title=title, company=company),
+                instructions=self._build_parser_instructions(),
+                max_output_tokens=self.max_output_tokens,
+            )
         except Exception as e:
             logger.error(f"Job {job_id}: LLM structured request error: {e}")
             return None
+
+        if result.parsed is None:
+            if result.telemetry.refusal_text:
+                logger.warning(f"Job {job_id}: LLM refusal: {result.telemetry.refusal_text}")
+            elif result.telemetry.error_message:
+                logger.error(f"Job {job_id}: LLM structured request error: {result.telemetry.error_message}")
+            return None
+
+        return self._serialize_parsed_payload(result.parsed)
+
+    async def _dispatch_parse_requests(
+        self,
+        jobs_to_process: List[Dict[str, Any]],
+        *,
+        batch_num: int,
+        total_batches: int,
+        total_items: int,
+        completed_offset: int,
+        concurrency: int,
+    ) -> List[Dict[str, Any]]:
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+
+        async def worker(item: Dict[str, Any]) -> Dict[str, Any]:
+            async with semaphore:
+                result = await self._call_llm_async(
+                    item["description"],
+                    item["job_id"],
+                    title=item["title"],
+                    company=item["company"],
+                )
+                return {**item, "result": result}
+
+        tasks = [asyncio.create_task(worker(item)) for item in jobs_to_process]
+        completed = completed_offset
+        results: List[Dict[str, Any]] = []
+        for future in asyncio.as_completed(tasks):
+            result = await future
+            results.append(result)
+            completed += 1
+            running = max(0, len(jobs_to_process) - len(results))
+            telemetry = result["result"].telemetry
+            status = f"{completed}/{total_items} done - {running} running | {telemetry.status}: {result['title'][:30]}..."
+            self._update_progress(batch_num, total_batches, completed, total_items, status=status)
+        return results
 
     def parse_batch(self, jobs_df: pd.DataFrame, batch_num: int = 1, total_batches: int = 1) -> int:
         """Parse a batch of jobs with non-empty descriptions and no cache hit.
@@ -510,7 +611,7 @@ class DescriptionTools:
         dry = bool(getattr(self.config, 'desc_parser_dry_run', False))
         # Allow parallel LLM calls; default to 10
         concurrency = max(1, int(getattr(self.config, 'desc_parser_concurrency', 10)))
-        created_ts = datetime.utcnow().isoformat()
+        created_ts = datetime.now(UTC).isoformat()
         
         new_count = 0
         total_items = int(len(jobs_df))
@@ -573,74 +674,144 @@ class DescriptionTools:
 
         # If dry-run, bypass LLM and just store placeholders synchronously
         if dry:
-            for item in jobs_to_process:
-                rec = ParsedDescription(
-                    job_id=item['job_id'],
-                    desc_hash=item['desc_hash'],
-                    version=version,
-                    model=self.llm.model,
-                    payload_json=json.dumps({"dry_run": True}),
-                    created_at=created_ts,
-                )
-                try:
-                    self._store(rec)
-                    new_count += 1
-                except Exception as e:
-                    logger.error(f"Job {item['job_id']}: Failed to store parsed description (dry-run): {e}")
-                finally:
-                    completed_items += 1
-                    self._update_progress(batch_num, total_batches, completed_items, total_items,
-                                          status=f"Dry-run stored {item['title'][:30]}...")
-        else:
-            # Parallelize LLM calls, but serialize DB writes to avoid SQLite locks
-            def worker(item: Dict[str, Any]) -> Dict[str, Any]:
-                try:
-                    payload = self._call_llm(
-                        item['description'],
-                        item['job_id'],
-                        title=item['title'],
-                        company=item['company'],
+            with sqlite3.connect(self.db.db_path) as conn:
+                for item in jobs_to_process:
+                    rec = ParsedDescription(
+                        job_id=item['job_id'],
+                        desc_hash=item['desc_hash'],
+                        version=version,
+                        model=self.llm.model,
+                        payload_json=json.dumps({"dry_run": True}),
+                        created_at=created_ts,
                     )
-                    return {**item, 'payload': payload}
-                except Exception as e:
-                    logger.error(f"Job {item['job_id']}: Worker error: {e}")
-                    return {**item, 'payload': None, 'error': str(e)}
-
+                    try:
+                        self._store(rec, conn=conn)
+                        self.db.upsert_parse_job_state(
+                            job_id=item["job_id"],
+                            desc_hash=item["desc_hash"],
+                            version=version,
+                            model=self.llm.model,
+                            status="success",
+                            last_attempt_at=created_ts,
+                            last_success_at=created_ts,
+                            output_preview='{"dry_run": true}',
+                            conn=conn,
+                        )
+                        new_count += 1
+                    except Exception as e:
+                        logger.error(f"Job {item['job_id']}: Failed to store parsed description (dry-run): {e}")
+                    finally:
+                        completed_items += 1
+                        self._update_progress(batch_num, total_batches, completed_items, total_items,
+                                              status=f"Dry-run stored {item['title'][:30]}...")
+                conn.commit()
+        else:
             if jobs_to_process:
                 status_msg = f"Dispatching {len(jobs_to_process)} LLM calls (concurrency={concurrency})"
                 self._update_progress(batch_num, total_batches, completed_items, total_items, status=status_msg)
 
-            with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                future_map = {executor.submit(worker, item): item for item in jobs_to_process}
-                for future in as_completed(future_map):
-                    result = future.result()
-                    job_id = result['job_id']
-                    title = result['title']
-                    payload = result.get('payload')
+            results = asyncio.run(
+                self._dispatch_parse_requests(
+                    jobs_to_process,
+                    batch_num=batch_num,
+                    total_batches=total_batches,
+                    total_items=total_items,
+                    completed_offset=completed_items,
+                    concurrency=concurrency,
+                )
+            )
+            completed_items = total_items
 
-                    if not payload:
-                        logger.error(f"Job {job_id}: LLM call failed, skipping storage")
-                    else:
+            with sqlite3.connect(self.db.db_path) as conn:
+                for result in results:
+                    job_id = result["job_id"]
+                    telemetry = result["result"].telemetry
+                    parsed_payload = result["result"].parsed
+                    metadata = {
+                        "desc_hash": result["desc_hash"],
+                        "version": version,
+                        "title": result["title"],
+                        "company": result["company"],
+                    }
+                    self.db.record_llm_attempt(
+                        task_type="parser",
+                        entity_id=job_id,
+                        entity_hash=result["desc_hash"],
+                        version=version,
+                        model=telemetry.model,
+                        status=telemetry.status,
+                        started_at=telemetry.started_at,
+                        finished_at=telemetry.finished_at,
+                        latency_ms=telemetry.latency_ms,
+                        response_id=telemetry.response_id,
+                        retry_count=telemetry.retry_count,
+                        exhausted_retries=telemetry.exhausted_retries,
+                        input_tokens=telemetry.usage.input_tokens,
+                        output_tokens=telemetry.usage.output_tokens,
+                        total_tokens=telemetry.usage.total_tokens,
+                        refusal_text=telemetry.refusal_text,
+                        error_type=telemetry.error_type,
+                        error_message=telemetry.error_message,
+                        output_preview=telemetry.output_preview,
+                        metadata=metadata,
+                        conn=conn,
+                    )
+
+                    if telemetry.status == "success" and parsed_payload is not None:
                         rec = ParsedDescription(
                             job_id=job_id,
-                            desc_hash=result['desc_hash'],
+                            desc_hash=result["desc_hash"],
                             version=version,
-                            model=self.llm.model,
-                            payload_json=payload,
+                            model=telemetry.model,
+                            payload_json=self._serialize_parsed_payload(parsed_payload),
                             created_at=created_ts,
                         )
                         try:
-                            self._store(rec)
+                            self._store(rec, conn=conn)
+                            self.db.upsert_parse_job_state(
+                                job_id=job_id,
+                                desc_hash=result["desc_hash"],
+                                version=version,
+                                model=telemetry.model,
+                                status="success",
+                                last_attempt_at=telemetry.finished_at,
+                                last_success_at=telemetry.finished_at,
+                                last_response_id=telemetry.response_id,
+                                output_preview=telemetry.output_preview,
+                                conn=conn,
+                            )
                             new_count += 1
                         except Exception as e:
                             logger.error(f"Job {job_id}: Failed to store parsed description: {e}")
-
-                    completed_items += 1
-                    running = len(jobs_to_process) - (completed_items - (total_items - len(jobs_to_process)))
-                    status = f"{completed_items}/{total_items} done — {max(running,0)} running"
-                    # Include a short title preview for user feedback
-                    status = f"{status} | Last: {title[:30]}..."
-                    self._update_progress(batch_num, total_batches, completed_items, total_items, status=status)
+                            self.db.upsert_parse_job_state(
+                                job_id=job_id,
+                                desc_hash=result["desc_hash"],
+                                version=version,
+                                model=telemetry.model,
+                                status="failed",
+                                last_attempt_at=telemetry.finished_at,
+                                last_error_type="StorageError",
+                                last_error_message=str(e),
+                                last_response_id=telemetry.response_id,
+                                output_preview=telemetry.output_preview,
+                                conn=conn,
+                            )
+                    else:
+                        self.db.upsert_parse_job_state(
+                            job_id=job_id,
+                            desc_hash=result["desc_hash"],
+                            version=version,
+                            model=telemetry.model,
+                            status=telemetry.status,
+                            last_attempt_at=telemetry.finished_at,
+                            last_error_type=telemetry.error_type,
+                            last_error_message=telemetry.error_message,
+                            last_refusal_text=telemetry.refusal_text,
+                            last_response_id=telemetry.response_id,
+                            output_preview=telemetry.output_preview,
+                            conn=conn,
+                        )
+                conn.commit()
 
         # Final progress update
         self._update_progress(batch_num, total_batches, total_items, total_items, status="Batch complete")
@@ -771,7 +942,8 @@ class DescriptionTools:
                 """
                 SELECT job_id, description, title, company
                 FROM jobs
-                WHERE description IS NOT NULL AND TRIM(description) <> ''
+                WHERE archived_at IS NULL
+                AND description IS NOT NULL AND TRIM(description) <> ''
                 ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
                 """,
                 conn,
@@ -802,18 +974,30 @@ class DescriptionTools:
             logger.error(f"Description parser error: {e}")
             return False
 
-    def backfill_missing_descriptions(self, scraper: JobScraper, batch_size: int = 50, max_batches: int = 10) -> bool:
+    def backfill_missing_descriptions(
+        self,
+        scraper: JobScraper,
+        batch_size: Optional[int] = None,
+        max_batches: Optional[int] = None,
+    ) -> bool:
         """Fetch and fill descriptions for jobs in DB missing descriptions.
-        Processes up to (batch_size * max_batches) jobs with gentle pacing and rate-limit awareness.
+        Processes the missing-description backlog in batches with gentle pacing and rate-limit awareness.
         Jobs that fail to fetch descriptions are marked to avoid retrying.
         """
         try:
+            if batch_size is None:
+                batch_size = int(getattr(self.config, 'scrape_descriptions_limit', 20) or 20)
+            else:
+                batch_size = int(batch_size)
+            if batch_size <= 0:
+                batch_size = 50
+
             total_updated = 0
             total_failed = 0
             batches_processed = 0
             consecutive_empty_batches = 0
             
-            while batches_processed < max_batches:
+            while max_batches is None or batches_processed < max_batches:
                 to_fill = scraper.db.get_jobs_missing_descriptions(limit=batch_size, exclude_failed=True)
                 if to_fill.empty:
                     consecutive_empty_batches += 1

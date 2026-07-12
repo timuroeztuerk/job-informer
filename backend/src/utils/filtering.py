@@ -3,7 +3,7 @@ Centralized job filtering utilities
 """
 import re
 import unicodedata
-from typing import List
+from typing import List, Optional
 
 STUDY_ROLE_PATTERNS = [
     r"\bintern(?:ship)?\b",
@@ -36,49 +36,68 @@ def normalize_text(text: str) -> str:
     return normalized.lower().strip()
 
 
-def should_filter_by_keywords(title: str, unwanted_keywords: List[str]) -> bool:
-    """Centralized keyword filtering logic with word boundaries for specificity."""
+def match_keyword_filter(title: str, unwanted_keywords: List[str]) -> Optional[str]:
+    """Return the matched keyword/phrase when a title should be filtered."""
     if not title or not unwanted_keywords:
-        return False
-    
+        return None
+
     title_normalized = normalize_text(title)
-    
-    # Check each keyword with appropriate matching strategy
     for keyword in unwanted_keywords:
         if not keyword:
             continue
-            
-        # Keywords should already be normalized
+
         keyword_clean = keyword.strip()
-        
-        # For multi-word phrases, use substring matching
+        if not keyword_clean:
+            continue
+
         if ' ' in keyword_clean:
             if keyword_clean in title_normalized:
-                return True
+                return keyword_clean
         else:
-            # For single words, use word boundary matching for specificity
             pattern = r'\b' + re.escape(keyword_clean) + r'\b'
             if re.search(pattern, title_normalized):
-                return True
-    
-    return False
+                return keyword_clean
+
+    return None
+
+
+def should_filter_by_keywords(title: str, unwanted_keywords: List[str]) -> bool:
+    """Centralized keyword filtering logic with word boundaries for specificity."""
+    return match_keyword_filter(title, unwanted_keywords) is not None
+
+
+def match_company_filter(company: str, unwanted_companies: List[str]) -> Optional[str]:
+    """Return the matched company blacklist token when present."""
+    if not company or not unwanted_companies:
+        return None
+
+    company_normalized = normalize_text(company)
+    for unwanted_company in unwanted_companies:
+        if not unwanted_company:
+            continue
+        if unwanted_company in company_normalized:
+            return unwanted_company
+
+    return None
 
 
 def should_filter_by_company(company: str, unwanted_companies: List[str]) -> bool:
     """Centralized company filtering logic."""
-    if not company or not unwanted_companies:
-        return False
-        
-    company_normalized = normalize_text(company)
-    
-    # Companies should already be normalized
-    return any(unwanted_company in company_normalized for unwanted_company in unwanted_companies if unwanted_company)
+    return match_company_filter(company, unwanted_companies) is not None
+
+
+def match_study_title_pattern(title: str) -> Optional[str]:
+    """Return the matched study-role pattern when the title clearly describes one."""
+    if not title:
+        return None
+
+    title_normalized = normalize_text(title)
+    for pattern in STUDY_ROLE_PATTERNS:
+        if re.search(pattern, title_normalized):
+            return pattern
+    return None
 
 
 def should_filter_study_title(title: str) -> bool:
     """Return True when the title clearly describes internship/student/study-track roles."""
-    if not title:
-        return False
-
-    title_normalized = normalize_text(title)
-    return any(re.search(pattern, title_normalized) for pattern in STUDY_ROLE_PATTERNS)
+    return match_study_title_pattern(title) is not None

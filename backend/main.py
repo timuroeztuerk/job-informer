@@ -50,7 +50,7 @@ def main():
     group.add_argument('--run-once', dest='run_once', action='store_true', help='Run job search once')
     group.add_argument('--test', action='store_true', help='Run combined tests')
     group.add_argument('--db-summary', dest='db_summary', action='store_true', help='Show database summary')
-    group.add_argument('--purge', action='store_true', help='Purge unwanted jobs (rules + AI)')
+    group.add_argument('--purge', action='store_true', help='Archive unwanted jobs (rules + AI)')
     group.add_argument(
         '--parse-descriptions',
         dest='parse_descriptions',
@@ -319,30 +319,30 @@ def _print_top_list(title: str, entries: list[dict], *, limit: int | None = None
         print(f"  {entry.get('name')}: {entry.get('count', 0):,}{pct_str}")
 
 def purge_unwanted_jobs(config: Config):
-    """Purge unwanted jobs from database"""
+    """Archive unwanted jobs from database"""
     scraper = JobScraper(config)
     try:
-        logger.info("Starting database purge...")
+        logger.info("Starting database cleanup...")
         success = scraper.purge_unwanted_jobs()
         
         if success:
-            logger.success("=== Database Purge Completed Successfully ===")
+            logger.success("=== Database Cleanup Completed Successfully ===")
         else:
-            logger.error("=== Database Purge Failed ===")
+            logger.error("=== Database Cleanup Failed ===")
             sys.exit(1)
     except Exception as e:
-        logger.error(f"Database purge error: {e}")
+        logger.error(f"Database cleanup error: {e}")
         sys.exit(1)
 
 def run_purge_pipeline(config: Config):
-    """Run rule-based purge, then AI purge."""
-    logger.info("=== Running purge pipeline (rules + AI) ===")
+    """Run rule-based archival, then AI archival."""
+    logger.info("=== Running cleanup pipeline (rules + AI) ===")
     purge_unwanted_jobs(config)
     run_ai_purge_mode(config)
 
 def run_ai_purge_mode(config: Config):
-    """Run AI-powered job purging using LLM analysis"""
-    logger.info("=== Starting AI-Powered Job Purging ===")
+    """Run AI-powered job archival using LLM analysis"""
+    logger.info("=== Starting AI-Powered Job Cleanup ===")
     
     try:
         # Initialize AI Purger
@@ -350,17 +350,19 @@ def run_ai_purge_mode(config: Config):
         
         # Test LLM connection first
         if hasattr(ai_purger.llm, 'api_key') and ai_purger.llm.api_key:
-            logger.info("AI LLM API key is configured - proceeding with purge")
+            logger.info("AI LLM API key is configured - proceeding with archival")
         else:
             logger.error("Failed to connect to LLM - no API key configured")
             sys.exit(1)
         
-        # Run the AI purge process
+        # Run the AI archive process
         summary = ai_purger.run_purge_mode()
         
         # Log summary
-        logger.info(f"AI Purge Summary: Analyzed {summary['jobs_analyzed']:,} jobs in {summary.get('batches_processed', 0)} batches")
-        logger.info(f"Jobs marked for purging: {summary['jobs_to_purge']:,}, Jobs actually purged: {summary['jobs_purged']:,}")
+        logger.info(f"AI Cleanup Summary: Analyzed {summary['jobs_analyzed']:,} jobs in {summary.get('batches_processed', 0)} batches")
+        logger.info(
+            f"Jobs marked for archival: {summary['jobs_to_purge']:,}, Jobs actually archived: {summary.get('jobs_archived', summary['jobs_purged']):,}"
+        )
         if summary.get("llm_stats"):
             logger.info("LLM stats (AI purge): {}", summary["llm_stats"])
         
@@ -368,11 +370,11 @@ def run_ai_purge_mode(config: Config):
             logger.success("=== Done ===")
         else:
             error_msg = summary.get('error', 'Unknown error')
-            logger.error(f"=== AI-Powered Purge Failed: {error_msg} ===")
+            logger.error(f"=== AI-Powered Cleanup Failed: {error_msg} ===")
             sys.exit(1)
             
     except Exception as e:
-        logger.error(f"AI purge mode failed: {e}")
+        logger.error(f"AI cleanup mode failed: {e}")
         sys.exit(1)
 
 def run_inform_mode(config: Config, selection: str):

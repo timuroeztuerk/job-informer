@@ -31,6 +31,8 @@ DEFAULT_DB_PATH = os.getenv(
 
 class JobDatabase:
     """SQLite-based job storage with fast deduplication and querying"""
+
+    ACTIVE_JOBS_WHERE = "archived_at IS NULL"
     
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
@@ -55,6 +57,8 @@ class JobDatabase:
                     salary TEXT,
                     description TEXT,
                     normalized_key TEXT,
+                    archived_at TIMESTAMP,
+                    archived_reason TEXT,
                     scraped_at TIMESTAMP NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -130,12 +134,76 @@ class JobDatabase:
                     PRIMARY KEY (profile_id, job_id)
                 )
             """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS llm_attempts (
+                    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    entity_hash TEXT,
+                    version INTEGER,
+                    model TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TIMESTAMP NOT NULL,
+                    finished_at TIMESTAMP NOT NULL,
+                    latency_ms REAL NOT NULL DEFAULT 0,
+                    response_id TEXT,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    exhausted_retries INTEGER NOT NULL DEFAULT 0,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    total_tokens INTEGER,
+                    refusal_text TEXT,
+                    error_type TEXT,
+                    error_message TEXT,
+                    output_preview TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS parse_job_states (
+                    job_id TEXT NOT NULL,
+                    desc_hash TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    model TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_attempt_at TIMESTAMP,
+                    last_success_at TIMESTAMP,
+                    last_error_type TEXT,
+                    last_error_message TEXT,
+                    last_refusal_text TEXT,
+                    last_response_id TEXT,
+                    output_preview TEXT,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (job_id, desc_hash, version)
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS filter_decisions (
+                    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    decision_source TEXT NOT NULL,
+                    decision_action TEXT NOT NULL DEFAULT 'archive',
+                    filter_name TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    matched_value TEXT,
+                    confidence REAL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    decided_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             
             # Create indexes for fast querying
+            self._ensure_jobs_columns(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_company ON jobs(company)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_source ON jobs(source)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON jobs(scraped_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON jobs(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_archived_at ON jobs(archived_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_annotations_status ON job_annotations(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_annotations_priority ON job_annotations(priority)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_annotations_follow_up_date ON job_annotations(follow_up_date)")
@@ -144,11 +212,18 @@ class JobDatabase:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_observations_job_seen ON job_observations(job_id, observed_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fit_scores_band ON job_fit_scores(profile_id, band)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fit_scores_score ON job_fit_scores(profile_id, score DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_filter_decisions_job ON filter_decisions(job_id, decided_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_filter_decisions_source ON filter_decisions(decision_source, decided_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_attempts_task_type ON llm_attempts(task_type, finished_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_attempts_entity ON llm_attempts(task_type, entity_id, finished_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_job_states_status ON parse_job_states(status, last_attempt_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_job_states_job ON parse_job_states(job_id, last_attempt_at DESC)")
 
-            self._ensure_jobs_columns(conn)
             self._ensure_default_fit_profile(conn)
             conn.commit()
             self._backfill_observation_fields(conn)
+            self._backfill_jobs_for_orphaned_parsed_descriptions(conn)
+            self._backfill_parse_job_states(conn)
 
             conn.commit()
 
@@ -204,6 +279,8 @@ class JobDatabase:
             "first_seen_at": "ALTER TABLE jobs ADD COLUMN first_seen_at TIMESTAMP",
             "last_seen_at": "ALTER TABLE jobs ADD COLUMN last_seen_at TIMESTAMP",
             "seen_count": "ALTER TABLE jobs ADD COLUMN seen_count INTEGER DEFAULT 1",
+            "archived_at": "ALTER TABLE jobs ADD COLUMN archived_at TIMESTAMP",
+            "archived_reason": "ALTER TABLE jobs ADD COLUMN archived_reason TEXT",
         }
         for column_name, ddl in migrations.items():
             if column_name in columns:
@@ -310,6 +387,235 @@ class JobDatabase:
             label="refresh observation aggregates on jobs",
         )
 
+    @staticmethod
+    def _infer_source_from_job_id(job_id: str) -> str:
+        normalized = (job_id or "").strip().lower()
+        if "linkedin" in normalized:
+            return "LinkedIn"
+        if "indeed" in normalized:
+            return "Indeed"
+        return "Unknown"
+
+    @staticmethod
+    def _infer_url_from_job_id(job_id: str) -> str:
+        normalized = (job_id or "").strip()
+        if not normalized:
+            return ""
+        if normalized.startswith(("http://", "https://")):
+            return normalized
+        if "/" in normalized and "." in normalized.split("/", 1)[0]:
+            return f"https://{normalized}"
+        return ""
+
+    @staticmethod
+    def _parse_orphaned_payload(payload_json: Any) -> Dict[str, str]:
+        fallback = {"location": "Unknown", "description": ""}
+        if not payload_json:
+            return fallback
+        try:
+            payload = json.loads(payload_json)
+        except Exception:
+            return fallback
+        if not isinstance(payload, dict):
+            return fallback
+
+        location_value = payload.get("location")
+        location = "Unknown"
+        if isinstance(location_value, list):
+            for item in location_value:
+                clean = str(item or "").strip()
+                if clean:
+                    location = clean
+                    break
+        elif isinstance(location_value, str) and location_value.strip():
+            location = location_value.strip()
+
+        summary = str(payload.get("summary") or "").strip()
+        return {"location": location or "Unknown", "description": summary}
+
+    def _backfill_jobs_for_orphaned_parsed_descriptions(self, conn: sqlite3.Connection) -> None:
+        """Create archived placeholder jobs so old parsed payloads keep a parent row."""
+        if not self._table_exists(conn, "parsed_descriptions"):
+            return
+
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                ranked.job_id,
+                ranked.payload_json,
+                ranked.created_at,
+                latest_obs.title AS observation_title,
+                latest_obs.company AS observation_company,
+                latest_obs.location AS observation_location,
+                latest_obs.source AS observation_source,
+                latest_obs.url AS observation_url,
+                latest_obs.salary AS observation_salary,
+                latest_obs.observed_at AS observation_observed_at,
+                COALESCE(obs_counts.seen_count, 0) AS observation_seen_count
+            FROM (
+                SELECT
+                    p.job_id,
+                    p.payload_json,
+                    p.created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY p.job_id
+                        ORDER BY p.version DESC, datetime(p.created_at) DESC, p.rowid DESC
+                    ) AS row_num
+                FROM parsed_descriptions p
+            ) ranked
+            LEFT JOIN jobs j ON j.job_id = ranked.job_id
+            LEFT JOIN (
+                SELECT
+                    ranked_obs.job_id,
+                    ranked_obs.title,
+                    ranked_obs.company,
+                    ranked_obs.location,
+                    ranked_obs.source,
+                    ranked_obs.url,
+                    ranked_obs.salary,
+                    ranked_obs.observed_at
+                FROM (
+                    SELECT
+                        o.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY o.job_id
+                            ORDER BY datetime(o.observed_at) DESC, o.observation_id DESC
+                        ) AS row_num
+                    FROM job_observations o
+                ) ranked_obs
+                WHERE ranked_obs.row_num = 1
+            ) latest_obs ON latest_obs.job_id = ranked.job_id
+            LEFT JOIN (
+                SELECT job_id, COUNT(*) AS seen_count
+                FROM job_observations
+                GROUP BY job_id
+            ) obs_counts ON obs_counts.job_id = ranked.job_id
+            WHERE ranked.row_num = 1 AND j.job_id IS NULL
+            """
+        ).fetchall()
+
+        if not rows:
+            return
+
+        insert_rows = []
+        for row in rows:
+            job_id = str(row["job_id"] or "").strip()
+            if not job_id:
+                continue
+
+            parsed_payload = self._parse_orphaned_payload(row["payload_json"])
+            observed_at = (
+                self._normalize_timestamp(row["observation_observed_at"])
+                or self._normalize_timestamp(row["created_at"])
+                or pd.Timestamp.now().isoformat()
+            )
+            title = str(row["observation_title"] or "").strip() or f"[Archived placeholder] {job_id}"
+            company = str(row["observation_company"] or "").strip() or "Unknown"
+            location = str(row["observation_location"] or "").strip() or parsed_payload["location"] or "Unknown"
+            source = str(row["observation_source"] or "").strip() or self._infer_source_from_job_id(job_id)
+            url = str(row["observation_url"] or "").strip() or self._infer_url_from_job_id(job_id)
+            salary = str(row["observation_salary"] or "").strip() or "Not specified"
+            description = parsed_payload["description"]
+            seen_count = max(1, int(row["observation_seen_count"] or 0))
+
+            insert_rows.append(
+                (
+                    job_id,
+                    title,
+                    company,
+                    location,
+                    source,
+                    url,
+                    salary,
+                    description,
+                    job_id,
+                    observed_at,
+                    "Backfilled archived placeholder for orphaned parsed description",
+                    observed_at,
+                    observed_at,
+                    observed_at,
+                    observed_at,
+                    seen_count,
+                    1,
+                )
+            )
+
+        if not insert_rows:
+            return
+
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO jobs (
+                job_id,
+                title,
+                company,
+                location,
+                source,
+                url,
+                salary,
+                description,
+                normalized_key,
+                archived_at,
+                archived_reason,
+                scraped_at,
+                created_at,
+                first_seen_at,
+                last_seen_at,
+                seen_count,
+                analyzed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            insert_rows,
+        )
+        logger.info(
+            "Backfilled {} archived placeholder job rows for orphaned parsed descriptions",
+            len(insert_rows),
+        )
+
+    def _backfill_parse_job_states(self, conn: sqlite3.Connection) -> None:
+        """Backfill parse status rows for existing parsed payloads."""
+        if not self._table_exists(conn, "parsed_descriptions") or not self._table_exists(conn, "parse_job_states"):
+            return
+
+        self._run_safe_migration(
+            conn,
+            """
+            INSERT INTO parse_job_states (
+                job_id,
+                desc_hash,
+                version,
+                model,
+                status,
+                attempt_count,
+                last_attempt_at,
+                last_success_at,
+                output_preview,
+                updated_at
+            )
+            SELECT
+                p.job_id,
+                p.desc_hash,
+                p.version,
+                p.model,
+                'success',
+                1,
+                COALESCE(p.created_at, CURRENT_TIMESTAMP),
+                COALESCE(p.created_at, CURRENT_TIMESTAMP),
+                SUBSTR(p.payload_json, 1, 500),
+                COALESCE(p.created_at, CURRENT_TIMESTAMP)
+            FROM parsed_descriptions p
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM parse_job_states s
+                WHERE s.job_id = p.job_id
+                  AND s.desc_hash = p.desc_hash
+                  AND s.version = p.version
+            )
+            """,
+            label="backfill parse job states",
+        )
+
     def _ensure_default_fit_profile(self, conn: sqlite3.Connection) -> None:
         """Seed the single-user default fit profile when absent."""
         existing = conn.execute(
@@ -375,10 +681,629 @@ class JobDatabase:
             values = [str(item).strip() for item in value if str(item).strip()]
             return json.dumps(values) if values else None
         return str(value)
+
+    @staticmethod
+    def _chunked(values: list[Any], chunk_size: int = 500) -> list[list[Any]]:
+        if not values:
+            return []
+        return [values[idx: idx + chunk_size] for idx in range(0, len(values), chunk_size)]
+
+    def _active_jobs_clause(self, alias: str = "") -> str:
+        prefix = f"{alias}." if alias else ""
+        return f"{prefix}{self.ACTIVE_JOBS_WHERE}"
     
     def _get_connection(self):
         """Get database connection"""
         return sqlite3.connect(self.db_path)
+
+    def record_filter_decisions(
+        self,
+        decisions: List[Dict[str, Any]],
+        *,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> int:
+        """Persist filter/audit decisions for later review."""
+        payloads = []
+        for decision in decisions:
+            job_id = str(decision.get("job_id") or "").strip()
+            filter_name = str(decision.get("filter_name") or "").strip()
+            reason = str(decision.get("reason") or "").strip()
+            if not job_id or not filter_name or not reason:
+                continue
+
+            raw_confidence = decision.get("confidence")
+            try:
+                confidence = None if raw_confidence in (None, "") else float(raw_confidence)
+            except (TypeError, ValueError):
+                confidence = None
+
+            details = decision.get("details")
+            if details is None:
+                details_json = "{}"
+            elif isinstance(details, str):
+                details_json = details.strip() or "{}"
+            else:
+                try:
+                    details_json = json.dumps(details)
+                except TypeError:
+                    details_json = "{}"
+
+            payloads.append(
+                (
+                    job_id,
+                    str(decision.get("decision_source") or "rule").strip() or "rule",
+                    str(decision.get("decision_action") or "archive").strip() or "archive",
+                    filter_name,
+                    reason,
+                    str(decision.get("matched_value") or "").strip() or None,
+                    confidence,
+                    details_json,
+                    self._normalize_timestamp(decision.get("decided_at")) or pd.Timestamp.now().isoformat(),
+                )
+            )
+
+        if not payloads:
+            return 0
+
+        owns_connection = conn is None
+        active_conn = conn or sqlite3.connect(self.db_path)
+        try:
+            active_conn.executemany(
+                """
+                INSERT INTO filter_decisions (
+                    job_id,
+                    decision_source,
+                    decision_action,
+                    filter_name,
+                    reason,
+                    matched_value,
+                    confidence,
+                    details_json,
+                    decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                payloads,
+            )
+            if owns_connection:
+                active_conn.commit()
+            return len(payloads)
+        finally:
+            if owns_connection:
+                active_conn.close()
+
+    def archive_jobs(
+        self,
+        job_ids: List[str],
+        *,
+        archived_reason: str,
+        archived_at: Optional[str] = None,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> int:
+        """Soft-archive jobs instead of deleting them."""
+        normalized_job_ids = [str(job_id).strip() for job_id in job_ids if str(job_id).strip()]
+        if not normalized_job_ids:
+            return 0
+
+        archived_count = 0
+        owns_connection = conn is None
+        active_conn = conn or sqlite3.connect(self.db_path)
+        try:
+            normalized_archived_at = self._normalize_timestamp(archived_at) or pd.Timestamp.now().isoformat()
+            normalized_reason = archived_reason.strip() or "Archived"
+            for chunk in self._chunked(normalized_job_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                active_job_ids = [
+                    str(row[0])
+                    for row in active_conn.execute(
+                        f"SELECT job_id FROM jobs WHERE {self._active_jobs_clause()} AND job_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                ]
+                if not active_job_ids:
+                    continue
+                active_conn.executemany(
+                    """
+                    UPDATE jobs
+                    SET
+                        archived_at = ?,
+                        archived_reason = CASE
+                            WHEN archived_reason IS NULL OR TRIM(archived_reason) = '' THEN ?
+                            ELSE archived_reason
+                        END
+                    WHERE job_id = ?
+                    """,
+                    [(normalized_archived_at, normalized_reason, job_id) for job_id in active_job_ids],
+                )
+                archived_count += len(active_job_ids)
+
+            if owns_connection:
+                active_conn.commit()
+            return archived_count
+        finally:
+            if owns_connection:
+                active_conn.close()
+
+    @staticmethod
+    def _group_job_ids_by_reason(job_reason_map: Dict[str, str], default_reason: str) -> Dict[str, List[str]]:
+        grouped: Dict[str, List[str]] = {}
+        for job_id, reason in job_reason_map.items():
+            normalized_reason = reason.strip() if reason else default_reason
+            grouped.setdefault(normalized_reason or default_reason, []).append(job_id)
+        return grouped
+
+    def archive_jobs_with_filter_decisions(
+        self,
+        decisions: List[Dict[str, Any]],
+        *,
+        default_reason: str = "Archived by filter",
+    ) -> Dict[str, int]:
+        """Archive jobs and persist the reasons that led to the archive."""
+        if not decisions:
+            return {"archived": 0, "decisions_recorded": 0}
+
+        job_reason_map: Dict[str, str] = {}
+        for decision in decisions:
+            job_id = str(decision.get("job_id") or "").strip()
+            reason = str(decision.get("reason") or "").strip()
+            if job_id and reason and job_id not in job_reason_map:
+                job_reason_map[job_id] = reason
+
+        with sqlite3.connect(self.db_path) as conn:
+            decisions_recorded = self.record_filter_decisions(decisions, conn=conn)
+            archived_count = 0
+            for reason, grouped_job_ids in self._group_job_ids_by_reason(job_reason_map, default_reason).items():
+                archived_count += self.archive_jobs(grouped_job_ids, archived_reason=reason, conn=conn)
+            conn.commit()
+
+        return {"archived": archived_count, "decisions_recorded": decisions_recorded}
+
+    def restore_job(
+        self,
+        job_id: str,
+        *,
+        reason: str = "Job restored for reconsideration",
+        decision_source: str = "manual",
+    ) -> bool:
+        """Restore a previously archived job."""
+        normalized_job_id = str(job_id or "").strip()
+        if not normalized_job_id:
+            return False
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT archived_at FROM jobs WHERE job_id = ?",
+                (normalized_job_id,),
+            ).fetchone()
+            if row is None:
+                return False
+
+            conn.execute(
+                """
+                UPDATE jobs
+                SET archived_at = NULL, archived_reason = NULL, analyzed = 0
+                WHERE job_id = ?
+                """,
+                (normalized_job_id,),
+            )
+            self.record_filter_decisions(
+                [
+                    {
+                        "job_id": normalized_job_id,
+                        "decision_source": decision_source,
+                        "decision_action": "restore",
+                        "filter_name": "manual_restore",
+                        "reason": reason,
+                    }
+                ],
+                conn=conn,
+            )
+            conn.commit()
+        return True
+
+    def get_filter_decisions(self, job_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return recent filter/audit decisions for a specific job."""
+        normalized_job_id = str(job_id or "").strip()
+        if not normalized_job_id:
+            return []
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT
+                    decision_id,
+                    job_id,
+                    decision_source,
+                    decision_action,
+                    filter_name,
+                    reason,
+                    matched_value,
+                    confidence,
+                    details_json,
+                    decided_at
+                FROM filter_decisions
+                WHERE job_id = ?
+                ORDER BY datetime(decided_at) DESC, decision_id DESC
+                LIMIT ?
+                """,
+                (normalized_job_id, max(1, int(limit))),
+            ).fetchall()
+
+        decisions: List[Dict[str, Any]] = []
+        for row in rows:
+            item = {key: row[key] for key in row.keys()}
+            try:
+                item["details"] = json.loads(item.pop("details_json") or "{}")
+            except Exception:
+                item["details"] = {}
+                item.pop("details_json", None)
+            decisions.append(item)
+        return decisions
+
+    def record_llm_attempt(
+        self,
+        *,
+        task_type: str,
+        entity_id: str,
+        model: str,
+        status: str,
+        started_at: Optional[str] = None,
+        finished_at: Optional[str] = None,
+        latency_ms: float = 0.0,
+        entity_hash: Optional[str] = None,
+        version: Optional[int] = None,
+        response_id: Optional[str] = None,
+        retry_count: int = 0,
+        exhausted_retries: bool = False,
+        input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+        total_tokens: Optional[int] = None,
+        refusal_text: Optional[str] = None,
+        error_type: Optional[str] = None,
+        error_message: Optional[str] = None,
+        output_preview: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> int:
+        """Persist one logical LLM invocation attempt."""
+        normalized_task_type = str(task_type or "").strip()
+        normalized_entity_id = str(entity_id or "").strip()
+        normalized_model = str(model or "").strip()
+        normalized_status = str(status or "").strip()
+        if not normalized_task_type or not normalized_entity_id or not normalized_model or not normalized_status:
+            return 0
+
+        metadata_json = "{}"
+        if metadata:
+            try:
+                metadata_json = json.dumps(metadata)
+            except TypeError:
+                metadata_json = "{}"
+
+        started_ts = self._normalize_timestamp(started_at) or pd.Timestamp.now().isoformat()
+        finished_ts = self._normalize_timestamp(finished_at) or started_ts
+
+        owns_connection = conn is None
+        active_conn = conn or sqlite3.connect(self.db_path)
+        try:
+            cursor = active_conn.execute(
+                """
+                INSERT INTO llm_attempts (
+                    task_type,
+                    entity_id,
+                    entity_hash,
+                    version,
+                    model,
+                    status,
+                    started_at,
+                    finished_at,
+                    latency_ms,
+                    response_id,
+                    retry_count,
+                    exhausted_retries,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    refusal_text,
+                    error_type,
+                    error_message,
+                    output_preview,
+                    metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_task_type,
+                    normalized_entity_id,
+                    str(entity_hash or "").strip() or None,
+                    int(version) if version is not None else None,
+                    normalized_model,
+                    normalized_status,
+                    started_ts,
+                    finished_ts,
+                    max(0.0, float(latency_ms or 0.0)),
+                    str(response_id or "").strip() or None,
+                    max(0, int(retry_count or 0)),
+                    1 if exhausted_retries else 0,
+                    int(input_tokens) if input_tokens is not None else None,
+                    int(output_tokens) if output_tokens is not None else None,
+                    int(total_tokens) if total_tokens is not None else None,
+                    str(refusal_text or "").strip() or None,
+                    str(error_type or "").strip() or None,
+                    str(error_message or "").strip() or None,
+                    str(output_preview or "").strip() or None,
+                    metadata_json,
+                ),
+            )
+            if owns_connection:
+                active_conn.commit()
+            return int(cursor.lastrowid or 0)
+        finally:
+            if owns_connection:
+                active_conn.close()
+
+    def upsert_parse_job_state(
+        self,
+        *,
+        job_id: str,
+        desc_hash: str,
+        version: int,
+        model: str,
+        status: str,
+        last_attempt_at: Optional[str] = None,
+        last_success_at: Optional[str] = None,
+        last_error_type: Optional[str] = None,
+        last_error_message: Optional[str] = None,
+        last_refusal_text: Optional[str] = None,
+        last_response_id: Optional[str] = None,
+        output_preview: Optional[str] = None,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        """Persist the latest parser state for a job/hash/version tuple."""
+        normalized_job_id = str(job_id or "").strip()
+        normalized_hash = str(desc_hash or "").strip()
+        normalized_model = str(model or "").strip()
+        normalized_status = str(status or "").strip()
+        if not normalized_job_id or not normalized_hash or not normalized_model or not normalized_status:
+            return False
+
+        attempt_ts = self._normalize_timestamp(last_attempt_at) or pd.Timestamp.now().isoformat()
+        success_ts = self._normalize_timestamp(last_success_at)
+
+        owns_connection = conn is None
+        active_conn = conn or sqlite3.connect(self.db_path)
+        try:
+            active_conn.execute(
+                """
+                INSERT INTO parse_job_states (
+                    job_id,
+                    desc_hash,
+                    version,
+                    model,
+                    status,
+                    attempt_count,
+                    last_attempt_at,
+                    last_success_at,
+                    last_error_type,
+                    last_error_message,
+                    last_refusal_text,
+                    last_response_id,
+                    output_preview,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id, desc_hash, version) DO UPDATE SET
+                    model = excluded.model,
+                    status = excluded.status,
+                    attempt_count = parse_job_states.attempt_count + 1,
+                    last_attempt_at = excluded.last_attempt_at,
+                    last_success_at = CASE
+                        WHEN excluded.status = 'success' THEN excluded.last_attempt_at
+                        ELSE parse_job_states.last_success_at
+                    END,
+                    last_error_type = CASE
+                        WHEN excluded.status = 'failed' THEN excluded.last_error_type
+                        ELSE NULL
+                    END,
+                    last_error_message = CASE
+                        WHEN excluded.status = 'failed' THEN excluded.last_error_message
+                        ELSE NULL
+                    END,
+                    last_refusal_text = CASE
+                        WHEN excluded.status = 'refusal' THEN excluded.last_refusal_text
+                        ELSE NULL
+                    END,
+                    last_response_id = excluded.last_response_id,
+                    output_preview = excluded.output_preview,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_job_id,
+                    normalized_hash,
+                    int(version),
+                    normalized_model,
+                    normalized_status,
+                    attempt_ts,
+                    success_ts if normalized_status == "success" else None,
+                    str(last_error_type or "").strip() or None,
+                    str(last_error_message or "").strip() or None,
+                    str(last_refusal_text or "").strip() or None,
+                    str(last_response_id or "").strip() or None,
+                    str(output_preview or "").strip() or None,
+                    attempt_ts,
+                ),
+            )
+            if owns_connection:
+                active_conn.commit()
+            return True
+        finally:
+            if owns_connection:
+                active_conn.close()
+
+    def get_parse_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Return the latest parse status for a job."""
+        normalized_job_id = str(job_id or "").strip()
+        if not normalized_job_id:
+            return None
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT
+                    job_id,
+                    desc_hash,
+                    version,
+                    model,
+                    status,
+                    attempt_count,
+                    last_attempt_at,
+                    last_success_at,
+                    last_error_type,
+                    last_error_message,
+                    last_refusal_text,
+                    last_response_id,
+                    output_preview,
+                    updated_at
+                FROM parse_job_states
+                WHERE job_id = ?
+                ORDER BY version DESC, datetime(COALESCE(last_attempt_at, updated_at)) DESC
+                LIMIT 1
+                """,
+                (normalized_job_id,),
+            ).fetchone()
+
+            if row is None and self._table_exists(conn, "parsed_descriptions"):
+                row = conn.execute(
+                    """
+                    SELECT
+                        job_id,
+                        desc_hash,
+                        version,
+                        model,
+                        'success' AS status,
+                        1 AS attempt_count,
+                        created_at AS last_attempt_at,
+                        created_at AS last_success_at,
+                        NULL AS last_error_type,
+                        NULL AS last_error_message,
+                        NULL AS last_refusal_text,
+                        NULL AS last_response_id,
+                        SUBSTR(payload_json, 1, 500) AS output_preview,
+                        created_at AS updated_at
+                    FROM parsed_descriptions
+                    WHERE job_id = ?
+                    ORDER BY version DESC, datetime(created_at) DESC
+                    LIMIT 1
+                    """,
+                    (normalized_job_id,),
+                ).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "job_id": row["job_id"],
+            "desc_hash": row["desc_hash"],
+            "version": int(row["version"]),
+            "model": row["model"],
+            "status": row["status"],
+            "attempt_count": int(row["attempt_count"] or 0),
+            "last_attempt_at": row["last_attempt_at"],
+            "last_success_at": row["last_success_at"],
+            "last_error_type": row["last_error_type"],
+            "last_error_message": row["last_error_message"],
+            "last_refusal_text": row["last_refusal_text"],
+            "last_response_id": row["last_response_id"],
+            "output_preview": row["output_preview"],
+            "updated_at": row["updated_at"],
+        }
+
+    def get_parser_telemetry_summary(self, *, recent_days: int = 7) -> Dict[str, Any]:
+        """Return aggregate parser telemetry for the summary page."""
+        summary: Dict[str, Any] = {
+            "attempts": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "refusal_count": 0,
+            "recent_window_days": max(1, int(recent_days)),
+            "recent_attempts": 0,
+            "recent_success_rate": None,
+            "average_latency_ms": None,
+            "exhausted_retries": 0,
+            "jobs_with_current_failed_status": 0,
+        }
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if not self._table_exists(conn, "llm_attempts"):
+                return summary
+
+            totals = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS attempts,
+                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failure_count,
+                    SUM(CASE WHEN status = 'refusal' THEN 1 ELSE 0 END) AS refusal_count,
+                    AVG(latency_ms) AS average_latency_ms,
+                    SUM(CASE WHEN exhausted_retries = 1 THEN 1 ELSE 0 END) AS exhausted_retries
+                FROM llm_attempts
+                WHERE task_type = 'parser'
+                """
+            ).fetchone()
+
+            recent = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS attempts,
+                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count
+                FROM llm_attempts
+                WHERE task_type = 'parser'
+                  AND datetime(finished_at) >= datetime('now', ?)
+                """,
+                (f"-{summary['recent_window_days']} days",),
+            ).fetchone()
+
+            failed_jobs = 0
+            if self._table_exists(conn, "parse_job_states"):
+                failed_jobs_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS failed_jobs
+                    FROM (
+                        SELECT
+                            job_id,
+                            status,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY job_id
+                                ORDER BY version DESC, datetime(COALESCE(last_attempt_at, updated_at)) DESC
+                            ) AS row_num
+                        FROM parse_job_states
+                    ) ranked
+                    WHERE row_num = 1 AND status = 'failed'
+                    """
+                ).fetchone()
+                failed_jobs = int(failed_jobs_row["failed_jobs"] or 0) if failed_jobs_row else 0
+
+        attempts = int(totals["attempts"] or 0) if totals else 0
+        success_count = int(totals["success_count"] or 0) if totals else 0
+        failure_count = int(totals["failure_count"] or 0) if totals else 0
+        refusal_count = int(totals["refusal_count"] or 0) if totals else 0
+        recent_attempts = int(recent["attempts"] or 0) if recent else 0
+        recent_successes = int(recent["success_count"] or 0) if recent else 0
+
+        summary.update(
+            {
+                "attempts": attempts,
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "refusal_count": refusal_count,
+                "recent_attempts": recent_attempts,
+                "recent_success_rate": (recent_successes / recent_attempts) if recent_attempts else None,
+                "average_latency_ms": float(totals["average_latency_ms"]) if totals and totals["average_latency_ms"] is not None else None,
+                "exhausted_retries": int(totals["exhausted_retries"] or 0) if totals else 0,
+                "jobs_with_current_failed_status": failed_jobs,
+            }
+        )
+        return summary
 
     def start_scrape_run(
         self,
@@ -649,9 +1574,10 @@ class JobDatabase:
             conn.row_factory = sqlite3.Row
             score_rows = conn.execute(
                 """
-                SELECT band, COUNT(*) AS count, AVG(score) AS avg_score
-                FROM job_fit_scores
-                WHERE profile_id = ?
+                SELECT s.band, COUNT(*) AS count, AVG(s.score) AS avg_score
+                FROM job_fit_scores s
+                INNER JOIN jobs j ON j.job_id = s.job_id
+                WHERE s.profile_id = ? AND j.archived_at IS NULL
                 GROUP BY band
                 """,
                 (profile_id,),
@@ -667,7 +1593,7 @@ class JobDatabase:
                     s.reasons_json
                 FROM job_fit_scores s
                 INNER JOIN jobs j ON j.job_id = s.job_id
-                WHERE s.profile_id = ?
+                WHERE s.profile_id = ? AND j.archived_at IS NULL
                 ORDER BY s.score DESC, datetime(COALESCE(j.last_seen_at, j.scraped_at, j.created_at)) DESC
                 LIMIT 5
                 """,
@@ -946,7 +1872,7 @@ class JobDatabase:
         with sqlite3.connect(self.db_path) as conn:
             df = pd.read_sql_query("""
                 SELECT * FROM jobs 
-                WHERE scraped_at > ?
+                WHERE archived_at IS NULL AND scraped_at > ?
                 ORDER BY scraped_at DESC
             """, conn, params=[cutoff_date])
         
@@ -961,7 +1887,7 @@ class JobDatabase:
         with sqlite3.connect(self.db_path) as conn:
             df = pd.read_sql_query("""
                 SELECT * FROM jobs 
-                WHERE company LIKE ?
+                WHERE archived_at IS NULL AND company LIKE ?
                 ORDER BY scraped_at DESC
             """, conn, params=[f'%{company}%'])
         
@@ -976,7 +1902,7 @@ class JobDatabase:
         with sqlite3.connect(self.db_path) as conn:
             df = pd.read_sql_query("""
                 SELECT * FROM jobs 
-                WHERE source = ?
+                WHERE archived_at IS NULL AND source = ?
                 ORDER BY scraped_at DESC
             """, conn, params=[source])
         
@@ -992,17 +1918,21 @@ class JobDatabase:
             cursor = conn.cursor()
             
             # Total jobs
-            cursor.execute("SELECT COUNT(*) FROM jobs")
+            cursor.execute("SELECT COUNT(*) FROM jobs WHERE archived_at IS NULL")
             total_jobs = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM jobs WHERE archived_at IS NOT NULL")
+            archived_jobs = cursor.fetchone()[0]
             
             # Jobs by source
-            cursor.execute("SELECT source, COUNT(*) FROM jobs GROUP BY source")
+            cursor.execute("SELECT source, COUNT(*) FROM jobs WHERE archived_at IS NULL GROUP BY source")
             jobs_by_source = dict(cursor.fetchall())
             
             # Jobs by company (top 10)
             cursor.execute("""
                 SELECT company, COUNT(*) as count 
                 FROM jobs 
+                WHERE archived_at IS NULL
                 GROUP BY company 
                 ORDER BY count DESC 
                 LIMIT 10
@@ -1012,12 +1942,12 @@ class JobDatabase:
             # Recent activity
             cursor.execute("""
                 SELECT COUNT(*) FROM jobs 
-                WHERE scraped_at > datetime('now', '-7 days')
+                WHERE archived_at IS NULL AND scraped_at > datetime('now', '-7 days')
             """)
             recent_jobs = cursor.fetchone()[0]
             
             # Date range
-            cursor.execute("SELECT MIN(scraped_at), MAX(scraped_at) FROM jobs")
+            cursor.execute("SELECT MIN(scraped_at), MAX(scraped_at) FROM jobs WHERE archived_at IS NULL")
             date_range = cursor.fetchone()
 
             observation_stats = {}
@@ -1026,10 +1956,12 @@ class JobDatabase:
                     cursor.execute("SELECT COUNT(*) FROM job_observations")
                     total_observations = cursor.fetchone()[0]
 
-                    cursor.execute("SELECT COUNT(*) FROM jobs WHERE COALESCE(seen_count, 1) > 1")
+                    cursor.execute("SELECT COUNT(*) FROM jobs WHERE archived_at IS NULL AND COALESCE(seen_count, 1) > 1")
                     repeat_jobs = cursor.fetchone()[0]
 
-                    cursor.execute("SELECT AVG(COALESCE(seen_count, 1)), MAX(COALESCE(seen_count, 1)) FROM jobs")
+                    cursor.execute(
+                        "SELECT AVG(COALESCE(seen_count, 1)), MAX(COALESCE(seen_count, 1)) FROM jobs WHERE archived_at IS NULL"
+                    )
                     avg_seen_count, max_seen_count = cursor.fetchone()
 
                     cursor.execute("SELECT COUNT(*) FROM scrape_runs")
@@ -1060,6 +1992,7 @@ class JobDatabase:
                         SELECT COUNT(*) 
                         FROM parsed_descriptions pd
                         INNER JOIN jobs j ON pd.job_id = j.job_id
+                        WHERE j.archived_at IS NULL
                     """)
                     active_parsed = cursor.fetchone()[0]
 
@@ -1068,6 +2001,7 @@ class JobDatabase:
                         SELECT COUNT(DISTINCT pd.job_id)
                         FROM parsed_descriptions pd
                         INNER JOIN jobs j ON pd.job_id = j.job_id
+                        WHERE j.archived_at IS NULL
                     """)
                     active_jobs_parsed = cursor.fetchone()[0]
 
@@ -1080,7 +2014,7 @@ class JobDatabase:
                         SELECT COUNT(DISTINCT pd.job_id) 
                         FROM parsed_descriptions pd 
                         LEFT JOIN jobs j ON pd.job_id = j.job_id 
-                        WHERE j.job_id IS NULL
+                        WHERE j.job_id IS NULL OR j.archived_at IS NOT NULL
                     """)
                     orphaned_parsed = cursor.fetchone()[0]
                     
@@ -1096,6 +2030,7 @@ class JobDatabase:
             
         return {
             'total_jobs': total_jobs,
+            'archived_jobs': archived_jobs,
             'jobs_by_source': jobs_by_source,
             'top_companies': top_companies,
             'recent_jobs_7_days': recent_jobs,
@@ -1164,7 +2099,7 @@ class JobDatabase:
         filepath = f"data/{filename}"
         
         with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query("SELECT * FROM jobs ORDER BY scraped_at DESC", conn)
+            df = pd.read_sql_query("SELECT * FROM jobs WHERE archived_at IS NULL ORDER BY scraped_at DESC", conn)
         
         if not df.empty and 'scraped_at' in df.columns:
             df['scraped_at'] = pd.to_datetime(df['scraped_at'])
@@ -1185,7 +2120,8 @@ class JobDatabase:
                     """
                     SELECT job_id, url, source, title, company, scraped_at
                     FROM jobs
-                    WHERE (description IS NULL OR TRIM(description) = '')
+                    WHERE archived_at IS NULL
+                    AND (description IS NULL OR TRIM(description) = '')
                     AND description != 'FETCH_FAILED'
                     ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
                     LIMIT ?
@@ -1198,7 +2134,8 @@ class JobDatabase:
                     """
                     SELECT job_id, url, source, title, company, scraped_at
                     FROM jobs
-                    WHERE description IS NULL OR TRIM(description) = ''
+                    WHERE archived_at IS NULL
+                    AND (description IS NULL OR TRIM(description) = '')
                     ORDER BY datetime(COALESCE(scraped_at, created_at)) DESC
                     LIMIT ?
                     """,
@@ -1214,7 +2151,7 @@ class JobDatabase:
                 """
                 SELECT job_id, url, source, title, company, location, scraped_at, created_at
                 FROM jobs
-                WHERE (
+                WHERE archived_at IS NULL AND (
                     title LIKE '%*%' OR company LIKE '%*%' OR location LIKE '%*%' OR
                     TRIM(title) = '' OR TRIM(company) = '' OR TRIM(location) = ''
                 )
@@ -1231,7 +2168,7 @@ class JobDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.cursor()
             try:
-                cur.execute("UPDATE jobs SET description = '' WHERE description = 'FETCH_FAILED'")
+                cur.execute("UPDATE jobs SET description = '' WHERE archived_at IS NULL AND description = 'FETCH_FAILED'")
                 conn.commit()
                 count = cur.rowcount or 0
                 if count > 0:
@@ -1244,7 +2181,7 @@ class JobDatabase:
     def get_failed_description_count(self) -> int:
         """Get count of jobs marked as FETCH_FAILED."""
         with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute("SELECT COUNT(*) FROM jobs WHERE description = 'FETCH_FAILED'")
+            cur = conn.execute("SELECT COUNT(*) FROM jobs WHERE archived_at IS NULL AND description = 'FETCH_FAILED'")
             return cur.fetchone()[0] or 0
 
     def mark_description_fetch_failed(self, job_ids: List[str]) -> int:
@@ -1255,7 +2192,7 @@ class JobDatabase:
             cur = conn.cursor()
             try:
                 cur.executemany(
-                    "UPDATE jobs SET description = 'FETCH_FAILED' WHERE job_id = ?",
+                    "UPDATE jobs SET description = 'FETCH_FAILED' WHERE archived_at IS NULL AND job_id = ?",
                     [(job_id,) for job_id in job_ids]
                 )
                 conn.commit()
@@ -1272,7 +2209,7 @@ class JobDatabase:
             cur = conn.cursor()
             try:
                 cur.executemany(
-                    "UPDATE jobs SET description = ? WHERE job_id = ?",
+                    "UPDATE jobs SET description = ? WHERE archived_at IS NULL AND job_id = ?",
                     [(u['description'], u['job_id']) for u in updates]
                 )
                 conn.commit()

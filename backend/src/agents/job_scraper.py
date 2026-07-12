@@ -23,6 +23,9 @@ from ..utils.database import JobDatabase
 from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url, remove_historical_duplicates
 from ..utils.terminal_utils import _sleep_with_feedback, _print_progress, _progress_bar, _sleep_quiet
 from ..utils.filtering import (
+    match_company_filter,
+    match_keyword_filter,
+    match_study_title_pattern,
     normalize_text,
     should_filter_by_company,
     should_filter_by_keywords,
@@ -933,6 +936,81 @@ class JobScraper:
             return False
         return should_filter_by_company(company, unwanted_companies)
 
+    def _build_filter_decisions_for_jobs(self, jobs_df: pd.DataFrame) -> List[Dict[str, object]]:
+        """Return audit records for jobs that current rule-based filters would archive."""
+        if jobs_df.empty or 'job_id' not in jobs_df.columns:
+            return []
+
+        try:
+            unwanted_keywords = self.config.get_unwanted_keywords_list()
+        except Exception:
+            unwanted_keywords = []
+        try:
+            unwanted_companies = self.config.get_unwanted_companies_list()
+        except Exception:
+            unwanted_companies = []
+
+        decisions: List[Dict[str, object]] = []
+        for _, row in jobs_df.iterrows():
+            job_id = str(row.get('job_id') or '').strip()
+            if not job_id:
+                continue
+
+            title = str(row.get('title') or '').strip()
+            company = str(row.get('company') or '').strip()
+
+            matched_keyword = match_keyword_filter(title, unwanted_keywords)
+            if matched_keyword:
+                decisions.append(
+                    {
+                        "job_id": job_id,
+                        "decision_source": "rule",
+                        "decision_action": "archive",
+                        "filter_name": "title_keyword",
+                        "matched_value": matched_keyword,
+                        "reason": f"Archived by title keyword filter: {matched_keyword}",
+                        "details": {"title": title, "company": company},
+                    }
+                )
+
+            matched_company = match_company_filter(company, unwanted_companies)
+            if matched_company:
+                decisions.append(
+                    {
+                        "job_id": job_id,
+                        "decision_source": "rule",
+                        "decision_action": "archive",
+                        "filter_name": "company_blacklist",
+                        "matched_value": matched_company,
+                        "reason": f"Archived by company blacklist match: {matched_company}",
+                        "details": {"title": title, "company": company},
+                    }
+                )
+
+            matched_study_pattern = match_study_title_pattern(title)
+            if matched_study_pattern:
+                decisions.append(
+                    {
+                        "job_id": job_id,
+                        "decision_source": "rule",
+                        "decision_action": "archive",
+                        "filter_name": "study_title",
+                        "matched_value": matched_study_pattern,
+                        "reason": "Archived as internship or study-track role based on title",
+                        "details": {"title": title, "company": company},
+                    }
+                )
+
+        return decisions
+
+    @staticmethod
+    def _job_ids_from_filter_decisions(decisions: List[Dict[str, object]]) -> set[str]:
+        return {
+            str(decision.get("job_id") or "").strip()
+            for decision in decisions
+            if str(decision.get("job_id") or "").strip()
+        }
+
     def purge_keywords(self, title: str) -> bool:
         """Check for unwanted keywords in a job title using word boundaries for specificity (case-insensitive)."""
         return self._should_filter_by_keywords(title)
@@ -1061,7 +1139,7 @@ class JobScraper:
         return None, None, None
 
     def _enrich_jobs_with_descriptions(self, jobs: List[Dict]) -> int:
-        """Fetch full descriptions for a list of fresh jobs, bounded by config."""
+        """Fetch full descriptions for a list of jobs, bounded by config."""
         if not jobs:
             return 0
         if not bool(getattr(self.config, 'scrape_descriptions_on_search', False)):
@@ -1213,7 +1291,7 @@ class JobScraper:
         existing_keys = self._get_existing_normalized_keys()
 
         try:
-            jobs, fresh_jobs, skipped_unwanted, existing_matches = self._collect_observed_jobs(
+            jobs, _fresh_jobs, skipped_unwanted, existing_matches = self._collect_observed_jobs(
                 page_jobs=page_jobs,
                 source='LinkedIn',
                 existing_keys=existing_keys,
@@ -1230,7 +1308,6 @@ class JobScraper:
 
             for j in jobs:
                 j['description'] = ''
-            self._enrich_jobs_with_descriptions(fresh_jobs)
         except Exception as e:
             logger.error(f"Error scraping LinkedIn: {e}")
 
@@ -1279,7 +1356,7 @@ class JobScraper:
         existing_keys = self._get_existing_normalized_keys()
 
         try:
-            jobs, fresh_jobs, skipped_unwanted, existing_matches = self._collect_observed_jobs(
+            jobs, _fresh_jobs, skipped_unwanted, existing_matches = self._collect_observed_jobs(
                 page_jobs=page_jobs,
                 source='Indeed',
                 existing_keys=existing_keys,
@@ -1295,7 +1372,6 @@ class JobScraper:
 
             for j in jobs:
                 j['description'] = ''
-            self._enrich_jobs_with_descriptions(fresh_jobs)
         except Exception as e:
             logger.error(f"Error scraping Indeed: {e}")
 
@@ -1500,14 +1576,13 @@ class JobScraper:
                 logger.warning("No jobs found in this search.")
                 return False
 
-            # Apply additional filtering to newly scraped jobs
-            jobs_df = self.filter_scraped_jobs(jobs_df)
+            filter_decisions = self._build_filter_decisions_for_jobs(jobs_df)
+            archived_job_ids = self._job_ids_from_filter_decisions(filter_decisions)
+            active_jobs_df = jobs_df
+            if archived_job_ids and 'job_id' in jobs_df.columns:
+                active_jobs_df = jobs_df[~jobs_df['job_id'].astype(str).isin(archived_job_ids)].copy()
             if self.max_total_jobs:
-                jobs_df = jobs_df.head(self.max_total_jobs)
-
-            if jobs_df.empty:
-                logger.warning("All scraped jobs were filtered out by purge criteria")
-                return False
+                active_jobs_df = active_jobs_df.head(self.max_total_jobs)
 
             # Store jobs in SQLite database (fast deduplication)
             run_observed_at = pd.Timestamp.now().isoformat()
@@ -1517,21 +1592,73 @@ class JobScraper:
                 locations=locations,
                 observed_at=run_observed_at,
             )
-            new_jobs_count = self.db.put_into_sql(
+            _ = self.db.put_into_sql(
                 jobs_df,
                 scrape_run_id=scrape_run_id,
                 observed_at=run_observed_at,
             )
-            if new_jobs_count:
-                parsed_count = self._parse_scraped_jobs(jobs_df)
-                if parsed_count:
-                    logger.info("Parsed {} freshly scraped descriptions in this run", parsed_count)
+            archived_count = 0
+            if filter_decisions:
+                archive_summary = self.db.archive_jobs_with_filter_decisions(
+                    filter_decisions,
+                    default_reason="Archived by scrape-time rule filter",
+                )
+                archived_count = int(archive_summary.get("archived", 0) or 0)
+                logger.info(
+                    "Archived {} filtered jobs from this scrape and recorded {} filter decisions",
+                    archived_count,
+                    int(archive_summary.get("decisions_recorded", 0) or 0),
+                )
 
-            if self.min_new_jobs_to_continue and new_jobs_count < self.min_new_jobs_to_continue:
+            if bool(getattr(self.config, 'scrape_descriptions_on_search', False)):
+                from .parser import DescriptionTools
+
+                desc = DescriptionTools(config=self.config, db=self.db)
+                fetch_batch_size = int(getattr(self.config, 'scrape_descriptions_limit', 20) or 20)
+                if fetch_batch_size <= 0:
+                    fetch_batch_size = 50
+
+                logger.info(
+                    "Draining description backlog with batch_size={} until no missing descriptions remain",
+                    fetch_batch_size,
+                )
+                backfill_success = desc.backfill_missing_descriptions(
+                    self,
+                    batch_size=fetch_batch_size,
+                    max_batches=None,
+                )
+                if not backfill_success:
+                    logger.warning("Description backlog fetch encountered issues during this scrape run")
+
+                if bool(getattr(self.config, 'enable_description_parser', False)) and getattr(self.config, 'openai_api_key', '').strip():
+                    parse_success = desc.run_description_parser()
+                    if not parse_success:
+                        logger.warning("Description parser encountered issues during this scrape run")
+
+            with self.db._get_connection() as conn:
+                active_new_jobs_count = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM job_observations o
+                        INNER JOIN jobs j ON j.job_id = o.job_id
+                        WHERE o.scrape_run_id = ?
+                          AND o.is_new = 1
+                          AND j.archived_at IS NULL
+                        """,
+                        (scrape_run_id,),
+                    ).fetchone()[0]
+                )
+
+            if active_jobs_df.empty:
+                logger.warning("All scraped jobs were archived by filter criteria")
+                return False
+
+            if self.min_new_jobs_to_continue and active_new_jobs_count < self.min_new_jobs_to_continue:
                 self.last_run_threshold_hit = True
                 logger.info(
                     "Found {} new jobs, below MIN_NEW_JOBS_TO_CONTINUE={}; skipping further processing",
-                    new_jobs_count,
+                    active_new_jobs_count,
                     self.min_new_jobs_to_continue,
                 )
                 return False
@@ -1539,15 +1666,17 @@ class JobScraper:
             # Save CSV for backup/auditing unless dry-run
             csv_filename = None
             if not self.config.dry_run:
-                csv_filename = self.save_jobs_to_csv(jobs_df)
+                csv_filename = self.save_jobs_to_csv(active_jobs_df)
                 logger.info("Saved snapshot of scraped jobs to {}", csv_filename)
             else:
                 logger.info("DRY_RUN is enabled; skipping CSV save")
 
             logger.info(
-                "Scraping completed: {} observed jobs, {} new jobs stored{}",
+                "Scraping completed: {} observed jobs, {} active jobs kept, {} new active jobs stored, {} archived by filters{}",
                 len(jobs_df),
-                new_jobs_count,
+                len(active_jobs_df),
+                active_new_jobs_count,
+                archived_count,
                 f" (CSV saved to {csv_filename})" if csv_filename else ""
             )
             return True
@@ -1586,26 +1715,20 @@ class JobScraper:
         logger.info(f"Filtering {original_count} newly scraped jobs...")
         
         try:
-            # 1) Remove jobs matching unwanted keywords in TITLE with centralized logic
-            unwanted_kw = self.config.get_unwanted_keywords_list()
-            if unwanted_kw and 'title' in jobs_df.columns:
-                mask_keep = ~jobs_df['title'].apply(self._should_filter_by_keywords)
-                jobs_df = jobs_df[mask_keep]
-                    
-            # 2) Remove jobs matching unwanted companies with centralized logic
-            unwanted_companies = self.config.get_unwanted_companies_list()
-            if unwanted_companies and 'company' in jobs_df.columns:
-                mask_keep = ~jobs_df['company'].apply(self._should_filter_by_company)
-                jobs_df = jobs_df[mask_keep]
-            
-            # 3) Remove study-track roles such as internships, working-student, thesis, or trainee positions
-            if 'title' in jobs_df.columns:
-                before_employment_filter = len(jobs_df)
-                mask_keep = ~jobs_df['title'].apply(self._should_filter_study_title)
-                jobs_df = jobs_df[mask_keep]
-                employment_filtered = before_employment_filter - len(jobs_df)
-                if employment_filtered > 0:
-                    logger.info(f"Filtered out {employment_filtered} study-track jobs based on title")
+            decisions = self._build_filter_decisions_for_jobs(jobs_df)
+            filtered_job_ids = self._job_ids_from_filter_decisions(decisions)
+            if filtered_job_ids and 'job_id' in jobs_df.columns:
+                jobs_df = jobs_df[~jobs_df['job_id'].astype(str).isin(filtered_job_ids)].copy()
+
+            study_role_filtered = len(
+                {
+                    str(decision.get("job_id") or "").strip()
+                    for decision in decisions
+                    if decision.get("filter_name") == "study_title"
+                }
+            )
+            if study_role_filtered > 0:
+                logger.info(f"Filtered out {study_role_filtered} study-track jobs based on title")
             
             filtered_count = len(jobs_df)
             removed_count = original_count - filtered_count
@@ -1626,7 +1749,10 @@ class JobScraper:
         try:
             # Get all jobs from database
             with self.db._get_connection() as conn:
-                all_jobs_df = pd.read_sql_query("SELECT * FROM jobs ORDER BY scraped_at DESC", conn)
+                all_jobs_df = pd.read_sql_query(
+                    "SELECT * FROM jobs WHERE archived_at IS NULL ORDER BY scraped_at DESC",
+                    conn,
+                )
             
             if all_jobs_df.empty:
                 logger.warning("No jobs found in database to purge")
@@ -1635,21 +1761,26 @@ class JobScraper:
             original_count = len(all_jobs_df)
             logger.info(f"Found {original_count} jobs in database")
 
-            # 1) Remove jobs matching unwanted keywords in TITLE only with centralized logic
-            unwanted_kw = self.config.get_unwanted_keywords_list()
-            if unwanted_kw and 'title' in all_jobs_df.columns:
-                mask_title_unwanted = all_jobs_df['title'].apply(self._should_filter_by_keywords)
-                unwanted_by_title = all_jobs_df[mask_title_unwanted]
-            else:
-                unwanted_by_title = all_jobs_df.iloc[0:0]
-
-            # Unwanted by company names (COMPANY only, case-insensitive substring with centralized logic)
-            unwanted_companies = self.config.get_unwanted_companies_list()
-            if unwanted_companies and 'company' in all_jobs_df.columns:
-                mask_company_unwanted = all_jobs_df['company'].apply(self._should_filter_by_company)
-                unwanted_by_company = all_jobs_df[mask_company_unwanted]
-            else:
-                unwanted_by_company = all_jobs_df.iloc[0:0]
+            rule_decisions = self._build_filter_decisions_for_jobs(all_jobs_df)
+            unwanted_ids = self._job_ids_from_filter_decisions(rule_decisions)
+            unwanted_by_title = all_jobs_df[
+                all_jobs_df['job_id'].astype(str).isin(
+                    {
+                        str(decision.get("job_id") or "").strip()
+                        for decision in rule_decisions
+                        if decision.get("filter_name") == "title_keyword"
+                    }
+                )
+            ]
+            unwanted_by_company = all_jobs_df[
+                all_jobs_df['job_id'].astype(str).isin(
+                    {
+                        str(decision.get("job_id") or "").strip()
+                        for decision in rule_decisions
+                        if decision.get("filter_name") == "company_blacklist"
+                    }
+                )
+            ]
 
             # 1.5) Remove internship/student-study roles identified from parsed descriptions
             import json
@@ -1665,6 +1796,7 @@ class JobScraper:
                             FROM parsed_descriptions
                             GROUP BY job_id
                         ) latest ON p.job_id = latest.job_id AND p.version = latest.max_version
+                        WHERE j.archived_at IS NULL
                     """, conn)
                 
                 study_role_examples = []
@@ -1675,6 +1807,20 @@ class JobScraper:
                         
                         if 'internship' in employment_type or self._should_filter_study_title(str(row.get('title', ''))):
                             study_role_job_ids.add(row['job_id'])
+                            rule_decisions.append(
+                                {
+                                    "job_id": str(row['job_id']),
+                                    "decision_source": "rule",
+                                    "decision_action": "archive",
+                                    "filter_name": "parsed_employment_type",
+                                    "matched_value": employment_type or "internship",
+                                    "reason": "Archived as internship or study-track role based on parsed employment type",
+                                    "details": {
+                                        "title": str(row.get('title') or ''),
+                                        "company": str(row.get('company') or ''),
+                                    },
+                                }
+                            )
                             if len(study_role_examples) < 3:
                                 study_role_examples.append((row['title'], row['company']))
 
@@ -1693,18 +1839,12 @@ class JobScraper:
             except Exception as e:
                 logger.warning(f"Could not check internship/study-role jobs from parsed descriptions: {e}")
 
-            # Combine unwanted ids
-            unwanted_ids = set()
-            if not unwanted_by_title.empty:
-                unwanted_ids.update(unwanted_by_title['job_id'].tolist())
-            if not unwanted_by_company.empty:
-                unwanted_ids.update(unwanted_by_company['job_id'].tolist())
             if study_role_job_ids:
                 unwanted_ids.update(study_role_job_ids)
 
-            # 2) Remove duplicates: keep most recent per normalized (title, company, source)
+            # 2) Archive duplicates: keep most recent per normalized (title, company, source)
             #    Note: We intentionally ignore location so entries with the same title+company
-            #    but different locations are considered duplicates and purged.
+            #    but different locations are considered duplicates and archived.
             norm_df = all_jobs_df.copy()
             for col in ['title', 'company', 'location', 'source']:
                 if col in norm_df.columns:
@@ -1724,50 +1864,56 @@ class JobScraper:
                 pass
 
             norm_df_sorted = norm_df.sort_values(by=['_order'], ascending=False)
-            keep_idx = norm_df_sorted.drop_duplicates(
+            keep_rows = norm_df_sorted.drop_duplicates(
                 subset=['title_norm', 'company_norm', 'source_norm'], keep='first'
-            ).index
+            )
+            keep_idx = keep_rows.index
             dup_mask = ~norm_df.index.isin(keep_idx)
             duplicate_jobs = all_jobs_df[dup_mask]
             duplicate_ids = set(duplicate_jobs['job_id'].tolist())
+            keeper_map = {
+                (row['title_norm'], row['company_norm'], row['source_norm']): str(row['job_id'])
+                for _, row in keep_rows.iterrows()
+            }
+            for _, row in norm_df[dup_mask].iterrows():
+                group_key = (row['title_norm'], row['company_norm'], row['source_norm'])
+                rule_decisions.append(
+                    {
+                        "job_id": str(row['job_id']),
+                        "decision_source": "rule",
+                        "decision_action": "archive",
+                        "filter_name": "duplicate_title_company_source",
+                        "matched_value": "|".join(group_key),
+                        "reason": "Archived as an older duplicate of the same title, company, and source",
+                        "details": {"kept_job_id": keeper_map.get(group_key)},
+                    }
+                )
 
-            # Union of all job_ids to delete
-            to_delete_ids = list(unwanted_ids.union(duplicate_ids))
+            # Union of all job_ids to archive
+            to_archive_ids = list(unwanted_ids.union(duplicate_ids))
 
-            if not to_delete_ids:
+            if not to_archive_ids:
                 logger.info("No unwanted or duplicate jobs found - database is clean")
                 return True
 
             logger.info(
-                f"Will remove {len(to_delete_ids)} jobs (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}], duplicates: {len(duplicate_ids)})"
+                f"Will archive {len(to_archive_ids)} jobs (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}], duplicates: {len(duplicate_ids)})"
             )
 
-            # Delete selected jobs
+            archive_summary = self.db.archive_jobs_with_filter_decisions(
+                rule_decisions,
+                default_reason="Archived by database cleanup rule",
+            )
             with self.db._get_connection() as conn:
-                cursor = conn.cursor()
-                try:
-                    cursor.executemany("DELETE FROM jobs WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
-                    conn.commit()
-                    
-                    # Also clean up related records for deleted jobs
-                    if to_delete_ids:
-                        cursor.executemany("DELETE FROM job_fit_scores WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
-                        cursor.executemany("DELETE FROM job_observations WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
-                        cursor.executemany("DELETE FROM parsed_descriptions WHERE job_id = ?", [(jid,) for jid in to_delete_ids])
-                        conn.commit()
-                except Exception as e:
-                    logger.error(f"Error during deletion: {e}")
-                    return False
-
-                # Verify deletion
-                cursor.execute("SELECT COUNT(*) FROM jobs")
-                final_count = cursor.fetchone()[0]
+                final_count = conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE archived_at IS NULL"
+                ).fetchone()[0]
 
             logger.info(
-                f"Purge complete: {len(to_delete_ids)} jobs removed (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}], duplicates: {len(duplicate_ids)}). Remaining: {final_count}"
+                f"Cleanup complete: {int(archive_summary.get('archived', 0) or 0)} jobs archived (unwanted: {len(unwanted_ids)} [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}], duplicates: {len(duplicate_ids)}). Remaining active: {final_count}"
             )
 
-            if len(to_delete_ids) > 0:
+            if len(to_archive_ids) > 0:
                 # Show examples
                 frames = []
                 if 'unwanted_by_title' in locals() and not unwanted_by_title.empty:
@@ -1777,7 +1923,7 @@ class JobScraper:
                 frames.append(duplicate_jobs)
                 sample_display = pd.concat(frames, ignore_index=True).head(3)
                 if not sample_display.empty:
-                    logger.info("Examples of removed jobs:")
+                    logger.info("Examples of archived jobs:")
                     for _, job in sample_display.iterrows():
                         logger.info(f"  - {job['title']} at {job['company']}")
             

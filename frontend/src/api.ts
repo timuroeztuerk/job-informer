@@ -10,6 +10,7 @@ import type {
   RunStatus,
   RunSummary,
 } from "./types";
+import { buildApiUrl } from "./apiUrl";
 
 export const API_BASE = import.meta.env.VITE_API_BASE || "/";
 const API_TOKEN = import.meta.env.VITE_API_TOKEN;
@@ -23,15 +24,7 @@ function authHeaders(extra?: Record<string, string>): HeadersInit {
 }
 
 function buildUrl(path: string, params?: Record<string, string | number | undefined>): string {
-  const url = new URL(path, API_BASE.endsWith("/") ? API_BASE : `${API_BASE}/`);
-  if (params) {
-    Object.entries(params).forEach(([key, value]) => {
-      if (value !== undefined && value !== "") {
-        url.searchParams.set(key, String(value));
-      }
-    });
-  }
-  return url.toString();
+  return buildApiUrl(path, params, API_BASE, window.location.origin);
 }
 
 async function handleJson<T>(res: Response): Promise<T> {

@@ -917,7 +917,10 @@ class EmailSender:
         try:
             # Get all jobs from database and apply current filters
             with scraper.db._get_connection() as conn:
-                all_jobs_df = pd.read_sql_query("SELECT * FROM jobs ORDER BY scraped_at DESC", conn)
+                all_jobs_df = pd.read_sql_query(
+                    "SELECT * FROM jobs WHERE archived_at IS NULL ORDER BY scraped_at DESC",
+                    conn,
+                )
             
             if all_jobs_df.empty:
                 logger.warning("No historical job data found in database")

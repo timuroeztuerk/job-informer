@@ -11,15 +11,18 @@ import json
 import os
 import unittest
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import pandas as pd
 
+from ..agents.ai_purger import AIPurger, AIPurger_JSON_CLASS
 from ..agents.parser import DescriptionTools, JobDescriptionStructure
 from . import data_utils
 from . import filtering
 from . import profile_fit
 from .database import JobDatabase
-from .llm_connection import LLMConnection
+from .db_summary import build_db_summary
+from .openai_responses_client import LLMCallTelemetry, LLMUsage, OpenAIResponsesClient, StructuredLLMResult
 
 
 class TestDataCleaningUtilities(unittest.TestCase):
@@ -272,6 +275,102 @@ class TestObservationHistory(unittest.TestCase):
             self.assertEqual(observation_stats["repeat_jobs"], 1)
             self.assertEqual(observation_stats["max_seen_count"], 2)
 
+    def test_archive_and_restore_job_records_filter_audit(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "jobs.db")
+            db = JobDatabase(db_path=db_path)
+            frame = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:archive-1",
+                        "title": "Working Student Data Science",
+                        "company": "ACME",
+                        "location": "Berlin",
+                        "source": "LinkedIn",
+                        "url": "https://www.linkedin.com/jobs/view/archive-1/",
+                        "salary": "Not specified",
+                        "description": "",
+                    }
+                ]
+            )
+
+            db.put_into_sql(frame, observed_at="2026-04-01T09:00:00")
+            archive_summary = db.archive_jobs_with_filter_decisions(
+                [
+                    {
+                        "job_id": "linkedin:archive-1",
+                        "decision_source": "rule",
+                        "decision_action": "archive",
+                        "filter_name": "study_title",
+                        "matched_value": r"\bworking student\b",
+                        "reason": "Archived as internship or study-track role based on title",
+                    }
+                ]
+            )
+
+            self.assertEqual(archive_summary["archived"], 1)
+            with db._get_connection() as conn:  # noqa: SLF001
+                row = conn.execute(
+                    "SELECT archived_at, archived_reason FROM jobs WHERE job_id = ?",
+                    ("linkedin:archive-1",),
+                ).fetchone()
+
+            self.assertIsNotNone(row[0])
+            self.assertEqual(row[1], "Archived as internship or study-track role based on title")
+            self.assertEqual(len(db.get_filter_decisions("linkedin:archive-1")), 1)
+
+            restored = db.restore_job("linkedin:archive-1")
+            self.assertTrue(restored)
+
+            with db._get_connection() as conn:  # noqa: SLF001
+                restored_row = conn.execute(
+                    "SELECT archived_at, archived_reason, analyzed FROM jobs WHERE job_id = ?",
+                    ("linkedin:archive-1",),
+                ).fetchone()
+
+            self.assertIsNone(restored_row[0])
+            self.assertIsNone(restored_row[1])
+            self.assertEqual(restored_row[2], 0)
+            self.assertEqual(len(db.get_filter_decisions("linkedin:archive-1")), 2)
+
+    def test_archived_jobs_are_excluded_from_active_summary(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "jobs.db")
+            db = JobDatabase(db_path=db_path)
+            frame = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:active-1",
+                        "title": "Data Scientist",
+                        "company": "ACME",
+                        "location": "Berlin",
+                        "source": "LinkedIn",
+                        "url": "https://www.linkedin.com/jobs/view/active-1/",
+                        "salary": "Not specified",
+                        "description": "",
+                    },
+                    {
+                        "job_id": "linkedin:archived-1",
+                        "title": "Working Student Data Science",
+                        "company": "Beta",
+                        "location": "Munich",
+                        "source": "LinkedIn",
+                        "url": "https://www.linkedin.com/jobs/view/archived-1/",
+                        "salary": "Not specified",
+                        "description": "",
+                    },
+                ]
+            )
+
+            db.put_into_sql(frame, observed_at="2026-04-01T09:00:00")
+            db.archive_jobs(["linkedin:archived-1"], archived_reason="Archived for test")
+
+            summary = db.get_job_summary()
+
+            self.assertEqual(summary["total_jobs"], 1)
+            self.assertEqual(summary["archived_jobs"], 1)
+            self.assertEqual(summary["jobs_by_source"], {"LinkedIn": 1})
+
 
 class TestProfileFitScoring(unittest.TestCase):
     """Tests for profile-fit ranking and persistence."""
@@ -356,18 +455,151 @@ class TestProfileFitScoring(unittest.TestCase):
             self.assertIn(fit["band"], {"high", "medium"})
 
 
-class _FakeStructuredLLM:
+def _make_test_config(**overrides):
+    defaults = {
+        "openai_api_key": "test-key",
+        "openai_model": "gpt-5-mini",
+        "desc_parser_model": "gpt-5-mini",
+        "desc_parser_prompt": "",
+        "desc_parser_version": 1,
+        "desc_parser_min_chars": 20,
+        "desc_parser_max_chars": 12000,
+        "desc_parser_dry_run": False,
+        "desc_parser_concurrency": 4,
+        "desc_parser_batch_size": 25,
+        "desc_parser_max_batches": 10,
+        "llm_timeout_seconds": 1.0,
+        "llm_max_retries": 1,
+        "llm_retry_base_delay": 0.0,
+        "llm_retry_max_delay": 0.0,
+        "llm_retry_jitter": 0.0,
+        "ai_purge_min_confidence": 0.75,
+        "ai_purge_max_ratio": 0.35,
+        "ai_purge_max_jobs": 0,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _telemetry(
+    *,
+    status: str = "success",
+    model: str = "gpt-5-mini",
+    retry_count: int = 0,
+    exhausted_retries: bool = False,
+    refusal_text: str | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+    output_preview: str | None = '{"summary":"preview"}',
+    response_id: str | None = "resp_test",
+    input_tokens: int | None = 10,
+    output_tokens: int | None = 20,
+) -> LLMCallTelemetry:
+    total_tokens = None
+    if input_tokens is not None or output_tokens is not None:
+        total_tokens = (input_tokens or 0) + (output_tokens or 0)
+    return LLMCallTelemetry(
+        model=model,
+        status=status,
+        started_at="2026-04-04T10:00:00+00:00",
+        finished_at="2026-04-04T10:00:01+00:00",
+        latency_ms=125.0,
+        response_id=response_id,
+        retry_count=retry_count,
+        exhausted_retries=exhausted_retries,
+        refusal_text=refusal_text,
+        error_type=error_type,
+        error_message=error_message,
+        output_preview=output_preview,
+        usage=LLMUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+        ),
+    )
+
+
+class _SequenceStructuredClient:
     api_key = "test-key"
+    model = "gpt-5-mini"
 
-    def __init__(self, payload: str):
-        self.payload = payload
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
 
-    def generate_structured(self, prompt, response_model, *, system=None, temperature=0.0, max_tokens=2048):
-        return self.payload
+    def _next_result(self):
+        if not self.results:
+            raise AssertionError("No fake LLM results left")
+        return self.results.pop(0)
+
+    async def parse_structured_async(
+        self,
+        *,
+        response_model,
+        input,
+        instructions=None,
+        max_output_tokens=2048,
+        temperature=None,
+    ):
+        self.calls.append(
+            {
+                "mode": "async",
+                "response_model": response_model,
+                "input": input,
+                "instructions": instructions,
+                "max_output_tokens": max_output_tokens,
+                "temperature": temperature,
+            }
+        )
+        return self._next_result()
+
+    def parse_structured(
+        self,
+        *,
+        response_model,
+        input,
+        instructions=None,
+        max_output_tokens=2048,
+        temperature=None,
+    ):
+        self.calls.append(
+            {
+                "mode": "sync",
+                "response_model": response_model,
+                "input": input,
+                "instructions": instructions,
+                "max_output_tokens": max_output_tokens,
+                "temperature": temperature,
+            }
+        )
+        return self._next_result()
+
+    def get_stats(self):
+        return {"requests": len(self.calls), "model": self.model}
 
 
-class TestDescriptionParserFallbacks(unittest.TestCase):
-    """Tests for parser fallback normalization when the LLM returns raw JSON."""
+class _FakeResponsesAPI:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    async def parse(self, **kwargs):
+        self.calls += 1
+        if not self.outcomes:
+            raise AssertionError("No fake Responses API outcomes left")
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _FakeResponsesClient:
+    def __init__(self, outcomes):
+        self.responses = _FakeResponsesAPI(outcomes)
+
+
+class TestDescriptionParserResponses(unittest.TestCase):
+    """Tests for structured parser normalization and persistence."""
 
     def test_job_description_structure_accepts_missing_salary_and_string_benefits(self) -> None:
         result = JobDescriptionStructure.model_validate(
@@ -379,71 +611,462 @@ class TestDescriptionParserFallbacks(unittest.TestCase):
         )
 
         payload = result.model_dump(by_alias=True)
-        self.assertIsNone(payload["salary_eur_min"])
-        self.assertIsNone(payload["salary_eur_max"])
+        self.assertEqual(payload["salary_eur_range"], {"min": None, "max": None})
         self.assertEqual(
             payload["extra benefits"],
             ["training academy", "childcare support", "diversity focus", "team culture"],
         )
 
-    def test_call_llm_normalizes_raw_json_string_result(self) -> None:
-        parser = object.__new__(DescriptionTools)
-        parser.prompt = ""
-        parser.llm = _FakeStructuredLLM(
-            (
-                '{"seniority":"senior","summary":"International role in Berlin.",'
-                '"extra benefits":"[remote flexibility, parental leave, accessibility accommodations]"}'
+    def test_parse_batch_persists_parse_status_and_telemetry_on_success(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=os.path.join(tmp_dir, "jobs.db"))
+            parser = DescriptionTools(
+                config=_make_test_config(desc_parser_min_chars=10),
+                db=db,
+                llm_client=_SequenceStructuredClient(
+                    [
+                        StructuredLLMResult(
+                            parsed=JobDescriptionStructure.model_validate(
+                                {
+                                    "seniority": "senior",
+                                    "skills": ["machine learning", "llm"],
+                                    "summary": "LLM-focused data scientist role.",
+                                }
+                            ),
+                            telemetry=_telemetry(status="success"),
+                        )
+                    ]
+                ),
             )
-        )
-
-        result = parser._call_llm(
-            "Own LLM and analytics workflows.",
-            job_id="linkedin:test-1",
-            title="Senior Data Scientist",
-            company="ACME",
-        )
-
-        self.assertIsNotNone(result)
-        payload = json.loads(result)
-        self.assertEqual(
-            payload["extra benefits"],
-            ["remote flexibility", "parental leave", "accessibility accommodations"],
-        )
-        self.assertEqual(payload["salary_eur_range"], {"min": None, "max": None})
-
-
-class _FakeLLMMessage:
-    def __init__(self, content=None, refusal=None):
-        self.content = content
-        self.refusal = refusal
-
-
-class _FakeLLMChoice:
-    def __init__(self, message):
-        self.message = message
-
-
-class _FakeLLMResponse:
-    def __init__(self, message):
-        self.choices = [_FakeLLMChoice(message)]
-
-
-class TestLLMConnectionHelpers(unittest.TestCase):
-    """Tests for low-level LLM response normalization helpers."""
-
-    def test_extract_message_content_supports_content_blocks(self) -> None:
-        llm = object.__new__(LLMConnection)
-        response = _FakeLLMResponse(
-            _FakeLLMMessage(
-                content=[
-                    {"type": "output_text", "text": '{"summary":"hello"}'},
-                    {"type": "ignored", "text": "should not be used"},
+            jobs_df = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:parse-1",
+                        "title": "Senior Data Scientist",
+                        "company": "ACME",
+                        "description": "Build and deploy LLM systems for enterprise analytics teams.",
+                    }
                 ]
             )
+
+            stored = parser.parse_batch(jobs_df)
+
+            self.assertEqual(stored, 1)
+            status = db.get_parse_status("linkedin:parse-1")
+            self.assertIsNotNone(status)
+            assert status is not None
+            self.assertEqual(status["status"], "success")
+            self.assertEqual(status["attempt_count"], 1)
+
+            with db._get_connection() as conn:  # noqa: SLF001
+                parsed_rows = conn.execute("SELECT COUNT(*) FROM parsed_descriptions").fetchone()[0]
+                attempt_rows = conn.execute(
+                    "SELECT COUNT(*) FROM llm_attempts WHERE task_type = 'parser'"
+                ).fetchone()[0]
+
+            self.assertEqual(parsed_rows, 1)
+            self.assertEqual(attempt_rows, 1)
+
+    def test_parse_batch_failed_attempts_increment_state(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=os.path.join(tmp_dir, "jobs.db"))
+            client = _SequenceStructuredClient(
+                [
+                    StructuredLLMResult(
+                        parsed=None,
+                        telemetry=_telemetry(
+                            status="failed",
+                            error_type="ValueError",
+                            error_message="No parsed structured output returned from LLM.",
+                        ),
+                    ),
+                    StructuredLLMResult(
+                        parsed=None,
+                        telemetry=_telemetry(
+                            status="failed",
+                            error_type="ValueError",
+                            error_message="No parsed structured output returned from LLM.",
+                            retry_count=1,
+                            exhausted_retries=True,
+                        ),
+                    ),
+                ]
+            )
+            parser = DescriptionTools(config=_make_test_config(desc_parser_min_chars=10), db=db, llm_client=client)
+            jobs_df = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:parse-fail",
+                        "title": "Data Scientist",
+                        "company": "ACME",
+                        "description": "This description is long enough to be parsed repeatedly by the test harness.",
+                    }
+                ]
+            )
+
+            self.assertEqual(parser.parse_batch(jobs_df), 0)
+            self.assertEqual(parser.parse_batch(jobs_df), 0)
+
+            status = db.get_parse_status("linkedin:parse-fail")
+            self.assertIsNotNone(status)
+            assert status is not None
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["attempt_count"], 2)
+            self.assertEqual(status["last_error_type"], "ValueError")
+
+            with db._get_connection() as conn:  # noqa: SLF001
+                attempt_rows = conn.execute(
+                    "SELECT COUNT(*) FROM llm_attempts WHERE task_type = 'parser' AND entity_id = ?",
+                    ("linkedin:parse-fail",),
+                ).fetchone()[0]
+            self.assertEqual(attempt_rows, 2)
+
+    def test_successful_retry_clears_previous_error_state(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=os.path.join(tmp_dir, "jobs.db"))
+            client = _SequenceStructuredClient(
+                [
+                    StructuredLLMResult(
+                        parsed=None,
+                        telemetry=_telemetry(
+                            status="failed",
+                            error_type="ValueError",
+                            error_message="Temporary parse failure.",
+                        ),
+                    ),
+                    StructuredLLMResult(
+                        parsed=JobDescriptionStructure.model_validate(
+                            {
+                                "seniority": "mid",
+                                "tools": ["python", "sql"],
+                                "summary": "Recovered parse on retry.",
+                            }
+                        ),
+                        telemetry=_telemetry(status="success", retry_count=1),
+                    ),
+                ]
+            )
+            parser = DescriptionTools(config=_make_test_config(desc_parser_min_chars=10), db=db, llm_client=client)
+            jobs_df = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:parse-retry",
+                        "title": "Data Scientist",
+                        "company": "ACME",
+                        "description": "A long enough description to test failure followed by success on retry handling.",
+                    }
+                ]
+            )
+
+            parser.parse_batch(jobs_df)
+            parser.parse_batch(jobs_df)
+
+            status = db.get_parse_status("linkedin:parse-retry")
+            self.assertIsNotNone(status)
+            assert status is not None
+            self.assertEqual(status["status"], "success")
+            self.assertEqual(status["attempt_count"], 2)
+            self.assertIsNone(status["last_error_type"])
+            self.assertIsNone(status["last_error_message"])
+            self.assertIsNotNone(status["last_success_at"])
+
+    def test_build_db_summary_includes_parser_telemetry(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=os.path.join(tmp_dir, "jobs.db"))
+            parser = DescriptionTools(
+                config=_make_test_config(desc_parser_min_chars=10),
+                db=db,
+                llm_client=_SequenceStructuredClient(
+                    [
+                        StructuredLLMResult(
+                            parsed=JobDescriptionStructure.model_validate({"summary": "One success."}),
+                            telemetry=_telemetry(status="success", input_tokens=11, output_tokens=9),
+                        ),
+                        StructuredLLMResult(
+                            parsed=None,
+                            telemetry=_telemetry(
+                                status="failed",
+                                error_type="RuntimeError",
+                                error_message="Parser exploded.",
+                                input_tokens=7,
+                                output_tokens=0,
+                            ),
+                        ),
+                    ]
+                ),
+            )
+            jobs_df = pd.DataFrame(
+                [
+                    {
+                        "job_id": "linkedin:sum-1",
+                        "title": "Role 1",
+                        "company": "ACME",
+                        "description": "This description is long enough for summary telemetry success path.",
+                    },
+                    {
+                        "job_id": "linkedin:sum-2",
+                        "title": "Role 2",
+                        "company": "ACME",
+                        "description": "This second description is also long enough for the parser failure path.",
+                    },
+                ]
+            )
+
+            parser.parse_batch(jobs_df)
+            summary = build_db_summary(db)
+
+            self.assertIn("parser_telemetry", summary)
+            self.assertEqual(summary["parser_telemetry"]["attempts"], 2)
+            self.assertEqual(summary["parser_telemetry"]["success_count"], 1)
+            self.assertEqual(summary["parser_telemetry"]["failure_count"], 1)
+
+
+class TestAIPurgerResponses(unittest.TestCase):
+    """Tests for purge decisions and telemetry via the shared Responses client."""
+
+    def test_prepare_records_purge_llm_attempts(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=os.path.join(tmp_dir, "jobs.db"))
+            db.put_into_sql(
+                pd.DataFrame(
+                    [
+                        {
+                            "job_id": "linkedin:purge-1",
+                            "title": "Retail Store Associate",
+                            "company": "ACME Retail",
+                            "location": "Berlin",
+                            "source": "LinkedIn",
+                            "url": "https://www.linkedin.com/jobs/view/purge-1/",
+                            "salary": "Not specified",
+                            "description": "",
+                        }
+                    ]
+                ),
+                observed_at="2026-04-04T09:00:00",
+            )
+            client = _SequenceStructuredClient(
+                [
+                    StructuredLLMResult(
+                        parsed=AIPurger_JSON_CLASS(
+                            purge_candidates=[
+                                {
+                                    "id": "1",
+                                    "reason": "Clear irrelevant non-technical retail role",
+                                    "confidence": 0.95,
+                                    "purge": True,
+                                }
+                            ]
+                        ),
+                        telemetry=_telemetry(status="success"),
+                    )
+                ]
+            )
+            purger = AIPurger(
+                config=_make_test_config(),
+                db=db,
+                llm_client=client,
+                process_all=True,
+            )
+
+            result = purger.prepare()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result["job_ids_to_purge"], ["linkedin:purge-1"])
+            with db._get_connection() as conn:  # noqa: SLF001
+                row = conn.execute(
+                    "SELECT task_type, status FROM llm_attempts WHERE task_type = 'purge'"
+                ).fetchone()
+            self.assertEqual(row[0], "purge")
+            self.assertEqual(row[1], "success")
+
+
+class TestOpenAIResponsesClient(unittest.TestCase):
+    """Tests for the shared Responses API structured client."""
+
+    def test_parse_structured_success_extracts_usage_and_preview(self) -> None:
+        client = OpenAIResponsesClient(
+            api_key="test-key",
+            model="gpt-5-mini",
+            timeout_seconds=1,
+            max_retries=0,
+            retry_base_delay=0,
+            retry_max_delay=0,
+            retry_jitter=0,
+        )
+        client._client = _FakeResponsesClient(  # noqa: SLF001
+            [
+                SimpleNamespace(
+                    id="resp_success",
+                    output_parsed=JobDescriptionStructure.model_validate({"summary": "hello"}),
+                    output=[
+                        SimpleNamespace(
+                            content=[SimpleNamespace(type="output_text", text='{"summary":"hello"}')]
+                        )
+                    ],
+                    usage=SimpleNamespace(input_tokens=12, output_tokens=8, total_tokens=20),
+                )
+            ]
         )
 
-        content = llm._extract_message_content(response)
-        self.assertEqual(content, '{"summary":"hello"}')
+        result = client.parse_structured(
+            response_model=JobDescriptionStructure,
+            input="DESCRIPTION: hello",
+        )
+
+        self.assertIsNotNone(result.parsed)
+        self.assertEqual(result.telemetry.status, "success")
+        self.assertEqual(result.telemetry.usage.total_tokens, 20)
+        self.assertEqual(result.telemetry.output_preview, '{"summary":"hello"}')
+
+    def test_parse_structured_handles_refusal(self) -> None:
+        client = OpenAIResponsesClient(
+            api_key="test-key",
+            model="gpt-5-mini",
+            timeout_seconds=1,
+            max_retries=0,
+            retry_base_delay=0,
+            retry_max_delay=0,
+            retry_jitter=0,
+        )
+        client._client = _FakeResponsesClient(  # noqa: SLF001
+            [
+                SimpleNamespace(
+                    id="resp_refusal",
+                    output_parsed=None,
+                    output=[SimpleNamespace(content=[SimpleNamespace(type="refusal", refusal="cannot comply")])],
+                    usage=SimpleNamespace(input_tokens=3, output_tokens=0, total_tokens=3),
+                )
+            ]
+        )
+
+        result = client.parse_structured(
+            response_model=JobDescriptionStructure,
+            input="DESCRIPTION: refuse",
+        )
+
+        self.assertIsNone(result.parsed)
+        self.assertEqual(result.telemetry.status, "refusal")
+        self.assertEqual(result.telemetry.refusal_text, "cannot comply")
+
+    def test_parse_structured_retries_retryable_value_error(self) -> None:
+        client = OpenAIResponsesClient(
+            api_key="test-key",
+            model="gpt-5-mini",
+            timeout_seconds=1,
+            max_retries=1,
+            retry_base_delay=0,
+            retry_max_delay=0,
+            retry_jitter=0,
+        )
+        client._client = _FakeResponsesClient(  # noqa: SLF001
+            [
+                SimpleNamespace(id="resp_empty", output_parsed=None, output=[], usage=None),
+                SimpleNamespace(
+                    id="resp_retry_ok",
+                    output_parsed=JobDescriptionStructure.model_validate({"summary": "after retry"}),
+                    output=[SimpleNamespace(content=[SimpleNamespace(type="output_text", text='{"summary":"after retry"}')])],
+                    usage=SimpleNamespace(input_tokens=5, output_tokens=4, total_tokens=9),
+                ),
+            ]
+        )
+
+        result = client.parse_structured(
+            response_model=JobDescriptionStructure,
+            input="DESCRIPTION: retry",
+        )
+
+        self.assertIsNotNone(result.parsed)
+        self.assertEqual(result.telemetry.status, "success")
+        self.assertEqual(result.telemetry.retry_count, 1)
+        self.assertEqual(client._client.responses.calls, 2)  # noqa: SLF001
+
+    def test_parse_structured_returns_failed_for_non_retryable_error(self) -> None:
+        client = OpenAIResponsesClient(
+            api_key="test-key",
+            model="gpt-5-mini",
+            timeout_seconds=1,
+            max_retries=2,
+            retry_base_delay=0,
+            retry_max_delay=0,
+            retry_jitter=0,
+        )
+        client._client = _FakeResponsesClient([RuntimeError("boom")])  # noqa: SLF001
+
+        result = client.parse_structured(
+            response_model=JobDescriptionStructure,
+            input="DESCRIPTION: fail",
+        )
+
+        self.assertIsNone(result.parsed)
+        self.assertEqual(result.telemetry.status, "failed")
+        self.assertEqual(result.telemetry.error_type, "RuntimeError")
+        self.assertEqual(client._client.responses.calls, 1)  # noqa: SLF001
+
+
+class TestParserApiSurface(unittest.TestCase):
+    """Tests for compact parser status exposure on the job API."""
+
+    def test_get_job_includes_parse_status(self) -> None:
+        import importlib
+
+        api_module = importlib.import_module("backend.api")
+
+        with TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "jobs.db")
+            db = JobDatabase(db_path=db_path)
+            db.put_into_sql(
+                pd.DataFrame(
+                    [
+                        {
+                            "job_id": "linkedin:api-1",
+                            "title": "Data Scientist",
+                            "company": "ACME",
+                            "location": "Berlin",
+                            "source": "LinkedIn",
+                            "url": "https://www.linkedin.com/jobs/view/api-1/",
+                            "salary": "Not specified",
+                            "description": "Long enough description for parse status exposure in the API response.",
+                        }
+                    ]
+                ),
+                observed_at="2026-04-04T09:00:00",
+            )
+            db.upsert_parse_job_state(
+                job_id="linkedin:api-1",
+                desc_hash="hash-api-1",
+                version=1,
+                model="gpt-5-mini",
+                status="failed",
+                last_attempt_at="2026-04-04T10:00:00",
+                last_error_type="RuntimeError",
+                last_error_message="Example parser failure",
+            )
+
+            previous_settings = api_module.APP_SETTINGS
+            previous_job_db = api_module.job_db
+            try:
+                api_module.APP_SETTINGS = api_module.AppSettings(
+                    db_path=db_path,
+                    run_store_db_path=db_path,
+                    api_token="",
+                    max_log_bytes=previous_settings.max_log_bytes,
+                    frontend_dist_dir=previous_settings.frontend_dist_dir,
+                )
+                api_module.job_db = api_module.JobDatabase(db_path)
+
+                job = api_module.get_job(
+                    "linkedin:api-1",
+                    fit_profile_id=api_module.DEFAULT_FIT_PROFILE_ID,
+                    _=True,
+                )
+            finally:
+                api_module.APP_SETTINGS = previous_settings
+                api_module.job_db = previous_job_db
+
+            self.assertIn("parse_status", job)
+            self.assertEqual(job["parse_status"]["status"], "failed")
+            self.assertEqual(job["parse_status"]["last_error_type"], "RuntimeError")
 
 
 if __name__ == "__main__":  # pragma: no cover - module level execution guard
