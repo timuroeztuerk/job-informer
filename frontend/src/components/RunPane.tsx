@@ -4,7 +4,10 @@ import type { CliMode, RunStatus } from "../types";
 
 interface RunPaneProps {
   className?: string;
+  onRunCompleted?: (run: RunStatus) => void;
 }
+
+const ACTIVE_RUN_STORAGE_KEY = "job-informer.active-run";
 
 interface QuickAction {
   mode: CliMode;
@@ -46,7 +49,7 @@ const quickActions: QuickAction[] = [
   },
 ];
 
-const RunPane: React.FC<RunPaneProps> = ({ className }) => {
+const RunPane: React.FC<RunPaneProps> = ({ className, onRunCompleted }) => {
   const [status, setStatus] = useState<RunStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMode, setLoadingMode] = useState<CliMode | null>(null);
@@ -55,6 +58,13 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
   const logTailRef = useRef<HTMLPreElement | null>(null);
   const runIdRef = useRef("");
   const pollErrorStreak = useRef(0);
+  const statusRequestInFlight = useRef(false);
+  const notifiedRunIds = useRef(new Set<string>());
+  const onRunCompletedRef = useRef(onRunCompleted);
+
+  useEffect(() => {
+    onRunCompletedRef.current = onRunCompleted;
+  }, [onRunCompleted]);
 
   const currentRunId = useMemo(() => status?.run_id || "", [status]);
   const isRunActive = useMemo(() => status?.status === "running", [status]);
@@ -80,24 +90,58 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
   const modeClass = (mode: CliMode) => `mode-${mode.replace(/[^a-z]/g, "-")}`;
 
   const stopPolling = () => {
-    if (pollHandle.current) {
+    if (pollHandle.current !== null) {
       window.clearInterval(pollHandle.current);
       pollHandle.current = null;
     }
   };
 
+  const rememberActiveRun = (runId: string) => {
+    try {
+      window.sessionStorage.setItem(ACTIVE_RUN_STORAGE_KEY, runId);
+    } catch {
+      // A disabled storage backend should not stop a CLI run.
+    }
+  };
+
+  const forgetActiveRun = (runId: string) => {
+    try {
+      if (window.sessionStorage.getItem(ACTIVE_RUN_STORAGE_KEY) === runId) {
+        window.sessionStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+      }
+    } catch {
+      // A disabled storage backend should not stop terminal-state handling.
+    }
+  };
+
+  const acceptStatus = (nextStatus: RunStatus) => {
+    runIdRef.current = nextStatus.run_id;
+    setStatus(nextStatus);
+    if (nextStatus.status === "running") {
+      rememberActiveRun(nextStatus.run_id);
+      return;
+    }
+
+    stopPolling();
+    forgetActiveRun(nextStatus.run_id);
+    if (!notifiedRunIds.current.has(nextStatus.run_id)) {
+      notifiedRunIds.current.add(nextStatus.run_id);
+      onRunCompletedRef.current?.(nextStatus);
+    }
+  };
+
   const refreshStatus = async () => {
     const runId = runIdRef.current;
-    if (!runId) return;
+    if (!runId || statusRequestInFlight.current) return;
+    statusRequestInFlight.current = true;
     try {
       const nextStatus = await getRunStatus(runId);
+      if (runIdRef.current !== runId) return;
       pollErrorStreak.current = 0;
       setError(null);
-      setStatus(nextStatus);
-      if (nextStatus.status !== "running") {
-        stopPolling();
-      }
+      acceptStatus(nextStatus);
     } catch (err) {
+      if (runIdRef.current !== runId) return;
       const streak = pollErrorStreak.current + 1;
       pollErrorStreak.current = streak;
       const message = err instanceof Error ? err.message : "Failed to load status.";
@@ -107,6 +151,8 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
       } else {
         setError(`${message} Retrying…`);
       }
+    } finally {
+      statusRequestInFlight.current = false;
     }
   };
 
@@ -126,12 +172,9 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
     setLoadingMode(mode);
     try {
       const nextStatus = await startRun({ mode });
-      runIdRef.current = nextStatus.run_id;
-      setStatus(nextStatus);
+      acceptStatus(nextStatus);
       if (nextStatus.status === "running") {
         startPolling();
-        await refreshStatus();
-      } else {
         await refreshStatus();
       }
     } catch (err) {
@@ -159,10 +202,19 @@ const RunPane: React.FC<RunPaneProps> = ({ className }) => {
   };
 
   useEffect(() => {
-    runIdRef.current = status?.run_id || "";
-  }, [status?.run_id]);
-
-  useEffect(() => () => stopPolling(), []);
+    let activeRunId = "";
+    try {
+      activeRunId = window.sessionStorage.getItem(ACTIVE_RUN_STORAGE_KEY) || "";
+    } catch {
+      activeRunId = "";
+    }
+    if (activeRunId) {
+      runIdRef.current = activeRunId;
+      startPolling();
+      void refreshStatus();
+    }
+    return () => stopPolling();
+  }, []);
 
   const wrapperClassName = ["panel", "run-pane", className].filter(Boolean).join(" ");
 

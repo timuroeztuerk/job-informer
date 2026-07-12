@@ -202,7 +202,7 @@ def _load_jobs_with_dates(db: JobDatabase) -> pd.DataFrame:
     if jobs_df.empty:
         return jobs_df
 
-    jobs_df["observed_at"] = pd.to_datetime(jobs_df["observed_at"], errors="coerce")
+    jobs_df["observed_at"] = pd.to_datetime(jobs_df["observed_at"], errors="coerce", utc=True)
     jobs_df = jobs_df.dropna(subset=["observed_at"]).copy()
     return jobs_df
 
@@ -210,6 +210,8 @@ def _load_jobs_with_dates(db: JobDatabase) -> pd.DataFrame:
 def _load_latest_parsed_rows(db: JobDatabase) -> pd.DataFrame:
     try:
         with db._get_connection() as conn:  # noqa: SLF001
+            if not db._table_exists(conn, "parsed_descriptions"):  # noqa: SLF001
+                return pd.DataFrame()
             parsed_df = pd.read_sql_query(
                 """
                 SELECT
@@ -253,13 +255,157 @@ def _load_latest_parsed_rows(db: JobDatabase) -> pd.DataFrame:
     if parsed_df.empty:
         return parsed_df
 
-    parsed_df["observed_at"] = pd.to_datetime(parsed_df["observed_at"], errors="coerce")
+    parsed_df["observed_at"] = pd.to_datetime(parsed_df["observed_at"], errors="coerce", utc=True)
     return parsed_df.dropna(subset=["observed_at"]).copy()
 
 
 def _week_start(series: pd.Series) -> pd.Series:
-    normalized = pd.to_datetime(series, errors="coerce").dt.normalize()
+    normalized = pd.to_datetime(series, errors="coerce", utc=True).dt.normalize()
     return normalized - pd.to_timedelta(normalized.dt.weekday, unit="D")
+
+
+def _as_utc_timestamp(value: Any | None = None) -> pd.Timestamp:
+    """Return a timezone-aware UTC timestamp for stable date comparisons."""
+    timestamp = pd.Timestamp.now(tz="UTC") if value is None else pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def compute_collection_freshness(db: JobDatabase, *, as_of: Any | None = None) -> dict[str, Any]:
+    """Describe how old the latest actual collected observation is.
+
+    Fresh means no more than two days old, aging means no more than seven days
+    old, and anything older is stale. Scrape-run time is reported separately so
+    an empty recent run cannot make an old collection look current.
+    """
+    reference_time = _as_utc_timestamp(as_of)
+    summary: dict[str, Any] = {
+        "as_of": reference_time.isoformat(),
+        "last_collected_at": None,
+        "latest_observation_at": None,
+        "latest_scrape_at": None,
+        "source": None,
+        "age_days": None,
+        "status": "empty",
+    }
+
+    latest_observation = None
+    latest_job_record = None
+    latest_scrape = None
+    try:
+        with db._get_connection() as conn:  # noqa: SLF001
+            if db._table_exists(conn, "job_observations"):  # noqa: SLF001
+                row = conn.execute(
+                    """
+                    SELECT observed_at
+                    FROM job_observations
+                    ORDER BY datetime(observed_at) DESC, observation_id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                latest_observation = row[0] if row else None
+
+            row = conn.execute(
+                """
+                SELECT COALESCE(last_seen_at, scraped_at, created_at)
+                FROM jobs
+                WHERE archived_at IS NULL
+                ORDER BY datetime(COALESCE(last_seen_at, scraped_at, created_at)) DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            latest_job_record = row[0] if row else None
+
+            if db._table_exists(conn, "scrape_runs"):  # noqa: SLF001
+                row = conn.execute(
+                    """
+                    SELECT observed_at
+                    FROM scrape_runs
+                    ORDER BY datetime(observed_at) DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                latest_scrape = row[0] if row else None
+    except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
+        logger.warning(f"Could not compute collection freshness: {exc}")
+        return summary
+
+    observation_timestamp = (
+        pd.to_datetime(latest_observation, errors="coerce", utc=True) if latest_observation else pd.NaT
+    )
+    job_timestamp = pd.to_datetime(latest_job_record, errors="coerce", utc=True) if latest_job_record else pd.NaT
+    scrape_timestamp = pd.to_datetime(latest_scrape, errors="coerce", utc=True) if latest_scrape else pd.NaT
+
+    if not pd.isna(observation_timestamp):
+        collected_at = observation_timestamp
+        source = "job_observation"
+    elif not pd.isna(job_timestamp):
+        collected_at = job_timestamp
+        source = "job_record"
+    else:
+        collected_at = None
+        source = None
+
+    summary["latest_observation_at"] = (
+        observation_timestamp.isoformat() if not pd.isna(observation_timestamp) else None
+    )
+    summary["latest_scrape_at"] = scrape_timestamp.isoformat() if not pd.isna(scrape_timestamp) else None
+    if collected_at is None:
+        return summary
+
+    age = max(pd.Timedelta(0), reference_time - collected_at)
+    age_days = age.total_seconds() / 86_400
+    status = "fresh" if age_days <= 2 else "aging" if age_days <= 7 else "stale"
+    summary.update(
+        {
+            "last_collected_at": collected_at.isoformat(),
+            "source": source,
+            "age_days": age_days,
+            "status": status,
+        }
+    )
+    return summary
+
+
+def compute_skill_gap_summary(db: JobDatabase, *, limit: int = 8) -> dict[str, Any]:
+    """Aggregate normalized personal skill gaps across active annotated jobs."""
+    summary: dict[str, Any] = {"jobs_with_gaps": 0, "top_gaps": []}
+    try:
+        with db._get_connection() as conn:  # noqa: SLF001
+            rows = conn.execute(
+                """
+                SELECT a.skill_gaps
+                FROM job_annotations a
+                INNER JOIN jobs j ON j.job_id = a.job_id
+                WHERE j.archived_at IS NULL
+                  AND a.skill_gaps IS NOT NULL
+                  AND TRIM(a.skill_gaps) NOT IN ('', '[]')
+                """
+            ).fetchall()
+    except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
+        logger.warning(f"Could not compute annotation skill gaps: {exc}")
+        return summary
+
+    gap_counts: Counter[str] = Counter()
+    jobs_with_gaps = 0
+    for row in rows:
+        raw_gaps = row[0]
+        try:
+            decoded = json.loads(raw_gaps)
+        except (json.JSONDecodeError, TypeError):
+            decoded = [raw_gaps]
+        candidates = decoded if isinstance(decoded, list) else [decoded]
+        normalized = {_normalize_token(candidate) for candidate in candidates}
+        normalized.discard("")
+        if not normalized:
+            continue
+        jobs_with_gaps += 1
+        gap_counts.update(normalized)
+
+    summary["jobs_with_gaps"] = jobs_with_gaps
+    summary["top_gaps"] = _sorted_counter(gap_counts, jobs_with_gaps, limit=max(1, int(limit)))
+    return summary
 
 
 def _rank_momentum(counter_recent: Counter[str], counter_previous: Counter[str], *, limit: int = 5) -> list[dict[str, Any]]:
@@ -551,12 +697,29 @@ def compute_observation_summary(db: JobDatabase) -> dict:
     return summary
 
 
-def compute_trend_summary(db: JobDatabase, *, window_days: int = 30, week_buckets: int = 12) -> dict:
-    """Summarize recent market momentum and weekly job volume."""
+def compute_trend_summary(
+    db: JobDatabase,
+    *,
+    window_days: int = 30,
+    week_buckets: int = 12,
+    as_of: Any | None = None,
+) -> dict:
+    """Summarize market momentum in windows anchored to current UTC."""
+    reference_time = _as_utc_timestamp(as_of)
+    recent_start = reference_time - pd.Timedelta(days=window_days)
+    previous_start = recent_start - pd.Timedelta(days=window_days)
     summary: dict[str, Any] = {
         "window_days": window_days,
-        "recent_window": {"start": None, "end": None, "jobs": 0},
-        "previous_window": {"start": None, "end": None, "jobs": 0},
+        "recent_window": {
+            "start": recent_start.isoformat(),
+            "end": reference_time.isoformat(),
+            "jobs": 0,
+        },
+        "previous_window": {
+            "start": previous_start.isoformat(),
+            "end": recent_start.isoformat(),
+            "jobs": 0,
+        },
         "weekly_job_counts": [],
         "momentum": {
             "skills": [],
@@ -572,18 +735,17 @@ def compute_trend_summary(db: JobDatabase, *, window_days: int = 30, week_bucket
         return summary
 
     parsed_df = _load_latest_parsed_rows(db)
-    latest_observed = jobs_df["observed_at"].max()
-    recent_start = latest_observed - pd.Timedelta(days=window_days)
-    previous_start = recent_start - pd.Timedelta(days=window_days)
 
-    recent_jobs = jobs_df.loc[jobs_df["observed_at"] >= recent_start].copy()
+    recent_jobs = jobs_df.loc[
+        (jobs_df["observed_at"] >= recent_start) & (jobs_df["observed_at"] <= reference_time)
+    ].copy()
     previous_jobs = jobs_df.loc[
         (jobs_df["observed_at"] >= previous_start) & (jobs_df["observed_at"] < recent_start)
     ].copy()
 
     summary["recent_window"] = {
         "start": recent_start.isoformat(),
-        "end": latest_observed.isoformat(),
+        "end": reference_time.isoformat(),
         "jobs": int(recent_jobs["job_id"].nunique()),
     }
     summary["previous_window"] = {
@@ -592,7 +754,7 @@ def compute_trend_summary(db: JobDatabase, *, window_days: int = 30, week_bucket
         "jobs": int(previous_jobs["job_id"].nunique()),
     }
 
-    current_week_start = _week_start(pd.Series([latest_observed])).iloc[0]
+    current_week_start = _week_start(pd.Series([reference_time])).iloc[0]
     week_index = [current_week_start - pd.Timedelta(weeks=offset) for offset in range(week_buckets - 1, -1, -1)]
 
     jobs_weekly = jobs_df.assign(week_start=_week_start(jobs_df["observed_at"]))
@@ -625,7 +787,9 @@ def compute_trend_summary(db: JobDatabase, *, window_days: int = 30, week_bucket
     if parsed_df.empty:
         return summary
 
-    recent_parsed = parsed_df.loc[parsed_df["observed_at"] >= recent_start]
+    recent_parsed = parsed_df.loc[
+        (parsed_df["observed_at"] >= recent_start) & (parsed_df["observed_at"] <= reference_time)
+    ]
     previous_parsed = parsed_df.loc[
         (parsed_df["observed_at"] >= previous_start) & (parsed_df["observed_at"] < recent_start)
     ]
@@ -676,6 +840,8 @@ def build_db_summary(db: JobDatabase) -> dict:
         "top_companies": base.get("top_companies", {}),
         "observation_stats": base.get("observation_stats", {}),
         "observation_summary": compute_observation_summary(db),
+        "collection_freshness": compute_collection_freshness(db),
+        "skill_gap_summary": compute_skill_gap_summary(db),
         "profile_fit_summary": db.get_fit_summary(),
         "parser_telemetry": db.get_parser_telemetry_summary(),
         "parsed_descriptions_stats": base.get("parsed_descriptions_stats", {}),

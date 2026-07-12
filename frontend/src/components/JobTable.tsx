@@ -3,10 +3,11 @@ import React, {
   useEffect,
   useImperativeHandle,
   useMemo,
+  useRef,
   useState,
 } from "react";
-import { fetchJobs } from "../api";
-import type { Job, JobAnnotationPriority, JobAnnotationStatus } from "../types";
+import { fetchJob, fetchJobs } from "../api";
+import type { Job, JobAnnotationPriority, JobAnnotationStatus, JobArchiveFilter } from "../types";
 import { readEnumParam, readPositiveIntegerParam, readTextParam, replaceSearchParams } from "../urlState";
 
 export interface JobTableHandle {
@@ -17,6 +18,7 @@ interface JobTableProps {
   sources: string[];
   companies: string[];
   onSelect: (job: Job | null) => void;
+  refreshToken?: number;
 }
 
 type SortOption =
@@ -26,6 +28,8 @@ type SortOption =
   | "last_seen_asc"
   | "seen_count_desc"
   | "seen_count_asc"
+  | "fit_score_desc"
+  | "fit_score_asc"
   | "title_asc"
   | "title_desc";
 
@@ -41,6 +45,7 @@ const annotationStatusOptions: Array<JobAnnotationStatus | ""> = [
   "archived",
 ];
 const annotationPriorityOptions: Array<JobAnnotationPriority | ""> = ["", "high", "medium", "low"];
+const archiveFilterOptions: JobArchiveFilter[] = ["exclude", "only", "include"];
 const sortOptions: SortOption[] = [
   "scraped_at_desc",
   "scraped_at_asc",
@@ -48,20 +53,27 @@ const sortOptions: SortOption[] = [
   "last_seen_asc",
   "seen_count_desc",
   "seen_count_asc",
+  "fit_score_desc",
+  "fit_score_asc",
   "title_asc",
   "title_desc",
 ];
 
-const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies, onSelect }, ref) => {
+const JobTable = forwardRef<JobTableHandle, JobTableProps>(
+  ({ sources, companies, onSelect, refreshToken = 0 }, ref) => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(() => (readPositiveIntegerParam("page", 1) - 1) * PAGE_SIZE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
   const [search, setSearch] = useState(() => readTextParam("search"));
   const [location, setLocation] = useState(() => readTextParam("location"));
   const [source, setSource] = useState(() => readTextParam("source"));
   const [company, setCompany] = useState(() => readTextParam("company"));
+  const [archiveFilter, setArchiveFilter] = useState<JobArchiveFilter>(
+    () => readEnumParam("archived", archiveFilterOptions) || "exclude"
+  );
   const [annotationStatus, setAnnotationStatus] = useState<JobAnnotationStatus | "">(
     () => readEnumParam("status", annotationStatusOptions)
   );
@@ -73,6 +85,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
   const [sort, setSort] = useState<SortOption>(() => readEnumParam("sort", sortOptions) || "scraped_at_desc");
   const [selectedId, setSelectedId] = useState<string | null>(() => readTextParam("job") || null);
   const [reloadToken, setReloadToken] = useState(0);
+  const lastQuerySignatureRef = useRef<string | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(
     () =>
       !!(
@@ -80,6 +93,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
         readTextParam("location") ||
         readTextParam("source") ||
         readTextParam("company") ||
+        readTextParam("archived") ||
         readTextParam("status") ||
         readTextParam("priority") ||
         readTextParam("from") ||
@@ -93,10 +107,32 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
   const companyOptions = useMemo(() => companies || [], [companies]);
   const activeFilterCount = useMemo(
     () =>
-      [search.trim(), location.trim(), source, company, annotationStatus, annotationPriority, dateFrom, dateTo].filter(Boolean)
-        .length,
-    [annotationPriority, annotationStatus, company, dateFrom, dateTo, location, search, source]
+      [
+        search.trim(),
+        location.trim(),
+        source,
+        company,
+        archiveFilter === "exclude" ? "" : archiveFilter,
+        annotationStatus,
+        annotationPriority,
+        dateFrom,
+        dateTo,
+      ].filter(Boolean).length,
+    [annotationPriority, annotationStatus, archiveFilter, company, dateFrom, dateTo, location, search, source]
   );
+  const querySignature = JSON.stringify([
+    offset,
+    search,
+    location,
+    source,
+    company,
+    archiveFilter,
+    annotationStatus,
+    annotationPriority,
+    dateFrom,
+    dateTo,
+    sort,
+  ]);
 
   useEffect(() => {
     replaceSearchParams({
@@ -104,6 +140,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
       location,
       source,
       company,
+      archived: archiveFilter === "exclude" ? "" : archiveFilter,
       status: annotationStatus,
       priority: annotationPriority,
       from: dateFrom,
@@ -112,14 +149,31 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
       page: pageNumber > 1 ? String(pageNumber) : "",
       job: selectedId || "",
     });
-  }, [annotationPriority, annotationStatus, company, dateFrom, dateTo, location, pageNumber, search, selectedId, sort, source]);
+  }, [
+    annotationPriority,
+    annotationStatus,
+    archiveFilter,
+    company,
+    dateFrom,
+    dateTo,
+    location,
+    pageNumber,
+    search,
+    selectedId,
+    sort,
+    source,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
+    const queryChanged =
+      lastQuerySignatureRef.current !== null && lastQuerySignatureRef.current !== querySignature;
+    lastQuerySignatureRef.current = querySignature;
 
     const load = async () => {
       setLoading(true);
       setError(null);
+      setSelectionError(null);
       try {
         const data = await fetchJobs({
           limit: PAGE_SIZE,
@@ -128,6 +182,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
           location,
           source,
           company,
+          archived: archiveFilter,
           annotationStatus,
           annotationPriority,
           dateFrom,
@@ -139,19 +194,33 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
         setJobs(data.items);
         setTotal(data.total);
 
-        if (!data.items.length) {
-          setSelectedId(null);
-          onSelect(null);
-          return;
-        }
-
         const existing = data.items.find((item) => item.job_id === selectedId);
         if (existing) {
           setSelectedId(existing.job_id);
           onSelect(existing);
-        } else {
+          return;
+        }
+
+        if (selectedId && !queryChanged) {
+          try {
+            const requestedJob = await fetchJob(selectedId);
+            if (cancelled) return;
+            onSelect(requestedJob);
+          } catch (err) {
+            if (cancelled) return;
+            onSelect(null);
+            const message = err instanceof Error ? err.message : "The requested job could not be loaded.";
+            setSelectionError(`Could not open job ${selectedId}: ${message}`);
+          }
+          return;
+        }
+
+        if (data.items.length) {
           setSelectedId(data.items[0].job_id);
           onSelect(data.items[0]);
+        } else {
+          setSelectedId(null);
+          onSelect(null);
         }
       } catch (err) {
         if (cancelled) return;
@@ -167,18 +236,25 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
     return () => {
       cancelled = true;
     };
-  }, [offset, search, location, source, company, annotationStatus, annotationPriority, dateFrom, dateTo, sort, reloadToken]);
+  }, [
+    querySignature,
+    reloadToken,
+    refreshToken,
+  ]);
 
   useImperativeHandle(ref, () => ({
     reload: (reset = true) => {
       if (reset) {
         setOffset(0);
+        setSelectedId(null);
+        onSelect(null);
       }
       setReloadToken((token) => token + 1);
     },
   }));
 
   const selectJob = (job: Job | null) => {
+    setSelectionError(null);
     setSelectedId(job?.job_id || null);
     onSelect(job);
   };
@@ -202,6 +278,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
     setLocation("");
     setSource("");
     setCompany("");
+    setArchiveFilter("exclude");
     setAnnotationStatus("");
     setAnnotationPriority("");
     setDateFrom("");
@@ -213,8 +290,12 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
 
   const formatAnnotationLabel = (value?: string | null) => {
     if (!value) return "";
+    if (value === "archived") return "Set aside (annotation)";
     return value.replace(/_/g, " ");
   };
+
+  const recordLabel =
+    archiveFilter === "only" ? "archived records" : archiveFilter === "include" ? "all records" : "active records";
 
   const handleRowKeyDown = (event: React.KeyboardEvent<HTMLElement>, job: Job) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -228,7 +309,9 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
       <div className="table-header">
         <div>
           <p className="label">Jobs</p>
-          <h3>{total ? total.toLocaleString() : "No"} records</h3>
+          <h3>
+            {total ? total.toLocaleString() : "No"} {recordLabel}
+          </h3>
         </div>
         <label className="tiny sort-control">
           <span>Sort</span>
@@ -247,6 +330,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
             <option value="last_seen_asc">Least recent</option>
             <option value="seen_count_desc">Most recurring</option>
             <option value="seen_count_asc">Least recurring</option>
+            <option value="fit_score_desc">Best profile fit</option>
+            <option value="fit_score_asc">Lowest profile fit</option>
             <option value="title_asc">Title A-Z</option>
             <option value="title_desc">Title Z-A</option>
           </select>
@@ -268,6 +353,21 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
           <span className="filter-menu-badge">{activeFilterCount || "All"}</span>
         </summary>
         <div className="filters inline">
+          <label className="tiny">
+            <span>Job set</span>
+            <select
+              value={archiveFilter}
+              className="input"
+              onChange={(e) => {
+                setArchiveFilter(e.target.value as JobArchiveFilter);
+                setOffset(0);
+              }}
+            >
+              <option value="exclude">Active jobs</option>
+              <option value="only">Archived jobs</option>
+              <option value="include">All jobs</option>
+            </select>
+          </label>
           <label className="tiny">
             <span>Search</span>
             <input
@@ -356,7 +456,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
             />
           </label>
           <label className="tiny">
-            <span>Status</span>
+            <span>Review status</span>
             <select
               value={annotationStatus}
               className="input"
@@ -366,7 +466,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
                 setReloadToken((token) => token + 1);
               }}
             >
-              <option value="">Any status</option>
+              <option value="">Any review status</option>
               {annotationStatusOptions
                 .filter((value) => value)
                 .map((value) => (
@@ -403,6 +503,15 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
         </div>
       </details>
 
+      {selectionError && (
+        <div className="error">
+          <span>{selectionError}</span>
+          <button className="ghost sm" type="button" onClick={() => selectJob(null)}>
+            Clear requested job
+          </button>
+        </div>
+      )}
+
       <div className="table-card">
         {error ? (
           <div className="error">
@@ -420,7 +529,9 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
                 ))}
               </div>
             ) : jobs.length === 0 ? (
-              <div className="empty">No jobs found. Try loosening filters.</div>
+              <div className="empty">
+                {archiveFilter === "only" ? "No archived jobs found." : "No jobs found. Try loosening filters."}
+              </div>
             ) : (
               <div className="list">
                 {jobs.map((job) => (
@@ -446,16 +557,20 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
                           {formatAnnotationLabel(job.annotation.status)}
                         </span>
                       ) : null}
-	                      {job.annotation?.priority ? (
-	                        <span className={`tag soft annotation-priority priority-${job.annotation.priority}`}>
-	                          {formatAnnotationLabel(job.annotation.priority)}
-	                        </span>
-	                      ) : null}
-	                      {job.seen_count && job.seen_count > 1 ? <span className="tag soft">Seen {job.seen_count}x</span> : null}
-	                      {job.last_seen_at ? <span className="tag soft">Last seen {formatDate(job.last_seen_at)}</span> : null}
-	                      {job.salary ? <span className="tag soft">{job.salary}</span> : null}
-	                      <span className="tag soft">{formatDate(job.scraped_at)}</span>
-	                    </div>
+                      {job.archived_at ? (
+                        <span className="tag soft">Archived job · {formatDate(job.archived_at)}</span>
+                      ) : null}
+                      {job.archived_reason ? <span className="tag soft">Reason: {job.archived_reason}</span> : null}
+                      {job.annotation?.priority ? (
+                        <span className={`tag soft annotation-priority priority-${job.annotation.priority}`}>
+                          {formatAnnotationLabel(job.annotation.priority)}
+                        </span>
+                      ) : null}
+                      {job.seen_count && job.seen_count > 1 ? <span className="tag soft">Seen {job.seen_count}x</span> : null}
+                      {job.last_seen_at ? <span className="tag soft">Last seen {formatDate(job.last_seen_at)}</span> : null}
+                      {job.salary ? <span className="tag soft">{job.salary}</span> : null}
+                      <span className="tag soft">{formatDate(job.scraped_at)}</span>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -475,7 +590,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(({ sources, companies
       </div>
     </section>
   );
-});
+  }
+);
 
 JobTable.displayName = "JobTable";
 

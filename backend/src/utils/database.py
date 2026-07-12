@@ -7,12 +7,13 @@ import json
 import os
 import sqlite3
 import pandas as pd
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Iterator
 from datetime import datetime, timedelta
 from loguru import logger
-import numpy as np
 
+from .data_utils import build_job_ids, build_normalized_key, normalize_job_url
 from .profile_fit import (
     DEFAULT_FIT_PROFILE_ID,
     DEFAULT_FIT_PROFILE_NAME,
@@ -21,6 +22,7 @@ from .profile_fit import (
     default_fit_profile,
     normalize_fit_profile,
 )
+from .sqlite_connection import connect_sqlite, open_sqlite
 
 # Default DB relative to backend directory unless overridden by env
 DEFAULT_DB_PATH = os.getenv(
@@ -45,7 +47,7 @@ class JobDatabase:
     
     def _init_db(self):
         """Initialize database with schema"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_id TEXT PRIMARY KEY,
@@ -106,7 +108,9 @@ class JobDatabase:
                     url TEXT,
                     salary TEXT,
                     description_present INTEGER NOT NULL DEFAULT 0,
-                    is_new INTEGER NOT NULL DEFAULT 0
+                    is_new INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+                        ON UPDATE CASCADE ON DELETE RESTRICT
                 )
             """)
 
@@ -210,6 +214,20 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_job ON job_observations(job_id, observed_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_run ON job_observations(scrape_run_id)")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_observations_job_seen ON job_observations(job_id, observed_at)")
+            # Existing installations predate the foreign key above. This
+            # trigger adds the same insert guard without rebuilding the table
+            # or touching any legacy orphan rows.
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_observation_job_exists
+                BEFORE INSERT ON job_observations
+                FOR EACH ROW
+                WHEN NOT EXISTS (SELECT 1 FROM jobs WHERE job_id = NEW.job_id)
+                BEGIN
+                    SELECT RAISE(ABORT, 'job_observations.job_id has no matching job');
+                END
+                """
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fit_scores_band ON job_fit_scores(profile_id, band)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fit_scores_score ON job_fit_scores(profile_id, score DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_filter_decisions_job ON filter_decisions(job_id, decided_at DESC)")
@@ -406,6 +424,39 @@ class JobDatabase:
         if "/" in normalized and "." in normalized.split("/", 1)[0]:
             return f"https://{normalized}"
         return ""
+
+    @staticmethod
+    def _job_identity_aliases(
+        *,
+        job_id: Any,
+        normalized_key: Any,
+        url: Any,
+        source: Any,
+        title: Any,
+        company: Any,
+    ) -> list[str]:
+        """Return canonical aliases for current and pre-canonical identity fields."""
+        aliases: list[str] = []
+
+        def add(value: Any) -> None:
+            normalized = normalize_job_url(value, source)
+            if normalized and normalized not in aliases:
+                aliases.append(normalized)
+
+        # Prefer the key produced by the current canonical path, while also
+        # accepting old raw-URL, scheme-less host/path, and job_id values.
+        add(normalized_key)
+        add(job_id)
+        add(url)
+        add(
+            build_normalized_key(
+                url=url,
+                source=source,
+                title=title,
+                company=company,
+            )
+        )
+        return aliases
 
     @staticmethod
     def _parse_orphaned_payload(payload_json: Any) -> Dict[str, str]:
@@ -692,9 +743,11 @@ class JobDatabase:
         prefix = f"{alias}." if alias else ""
         return f"{prefix}{self.ACTIVE_JOBS_WHERE}"
     
-    def _get_connection(self):
-        """Get database connection"""
-        return sqlite3.connect(self.db_path)
+    @contextmanager
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
+        """Yield a configured connection and deterministically close it."""
+        with open_sqlite(self.db_path) as conn:
+            yield conn
 
     def record_filter_decisions(
         self,
@@ -746,7 +799,7 @@ class JobDatabase:
             return 0
 
         owns_connection = conn is None
-        active_conn = conn or sqlite3.connect(self.db_path)
+        active_conn = conn or connect_sqlite(self.db_path)
         try:
             active_conn.executemany(
                 """
@@ -786,7 +839,7 @@ class JobDatabase:
 
         archived_count = 0
         owns_connection = conn is None
-        active_conn = conn or sqlite3.connect(self.db_path)
+        active_conn = conn or connect_sqlite(self.db_path)
         try:
             normalized_archived_at = self._normalize_timestamp(archived_at) or pd.Timestamp.now().isoformat()
             normalized_reason = archived_reason.strip() or "Archived"
@@ -848,7 +901,7 @@ class JobDatabase:
             if job_id and reason and job_id not in job_reason_map:
                 job_reason_map[job_id] = reason
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             decisions_recorded = self.record_filter_decisions(decisions, conn=conn)
             archived_count = 0
             for reason, grouped_job_ids in self._group_job_ids_by_reason(job_reason_map, default_reason).items():
@@ -869,7 +922,7 @@ class JobDatabase:
         if not normalized_job_id:
             return False
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             row = conn.execute(
                 "SELECT archived_at FROM jobs WHERE job_id = ?",
                 (normalized_job_id,),
@@ -906,7 +959,7 @@ class JobDatabase:
         if not normalized_job_id:
             return []
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
@@ -984,7 +1037,7 @@ class JobDatabase:
         finished_ts = self._normalize_timestamp(finished_at) or started_ts
 
         owns_connection = conn is None
-        active_conn = conn or sqlite3.connect(self.db_path)
+        active_conn = conn or connect_sqlite(self.db_path)
         try:
             cursor = active_conn.execute(
                 """
@@ -1070,7 +1123,7 @@ class JobDatabase:
         success_ts = self._normalize_timestamp(last_success_at)
 
         owns_connection = conn is None
-        active_conn = conn or sqlite3.connect(self.db_path)
+        active_conn = conn or connect_sqlite(self.db_path)
         try:
             active_conn.execute(
                 """
@@ -1144,7 +1197,7 @@ class JobDatabase:
         if not normalized_job_id:
             return None
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
@@ -1232,7 +1285,7 @@ class JobDatabase:
             "jobs_with_current_failed_status": 0,
         }
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             if not self._table_exists(conn, "llm_attempts"):
                 return summary
@@ -1317,7 +1370,7 @@ class JobDatabase:
         run_observed_at = self._normalize_timestamp(observed_at) or pd.Timestamp.now().isoformat()
         scrape_run_id = f"scrape_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO scrape_runs (
@@ -1363,7 +1416,7 @@ class JobDatabase:
             params.append(max(0, int(new_jobs_count)))
 
         params.append(scrape_run_id)
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute(
                 f"UPDATE scrape_runs SET {', '.join(updates)} WHERE scrape_run_id = ?",
                 params,
@@ -1372,7 +1425,7 @@ class JobDatabase:
 
     def get_fit_profile(self, profile_id: str = DEFAULT_FIT_PROFILE_ID) -> Dict[str, Any]:
         """Return the stored fit profile configuration."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
@@ -1413,7 +1466,7 @@ class JobDatabase:
         next_config = normalize_fit_profile(config or existing.get("config"))
         next_version = int(existing.get("version") or DEFAULT_FIT_PROFILE_VERSION) + 1
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO fit_profiles (
@@ -1450,7 +1503,7 @@ class JobDatabase:
         """Compute or refresh fit scores for all or a subset of jobs."""
         normalized_job_ids = [str(job_id).strip() for job_id in (job_ids or []) if str(job_id).strip()]
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             profile_row = conn.execute(
                 """
@@ -1523,7 +1576,7 @@ class JobDatabase:
         if not job_id:
             return None
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
@@ -1570,7 +1623,7 @@ class JobDatabase:
             "top_jobs": [],
         }
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             score_rows = conn.execute(
                 """
@@ -1656,22 +1709,27 @@ class JobDatabase:
         # Prepare data for insertion
         jobs_to_insert = []
         for _, row in jobs_df.iterrows():
-            # Build normalized_key similar to build_normalized_keys for a single row
             url = str(row.get('url', '')).strip()
             source = str(row.get('source', '')).strip()
-            if url:
-                normalized_key = str(url)
-            else:
-                title = str(row.get('title', '')).strip().lower()
-                company = str(row.get('company', '')).strip().lower()
-                normalized_key = f"{source.lower()}|{title}|{company}"
+            title = str(row.get('title', '')).strip()
+            company = str(row.get('company', '')).strip()
+            normalized_key = build_normalized_key(
+                url=row.get('url', ''),
+                source=row.get('source', ''),
+                title=row.get('title', ''),
+                company=row.get('company', ''),
+            )
+            incoming_job_id = normalize_job_url(row.get('job_id', ''), source)
+            if normalized_key.startswith(('linkedin:', 'indeed:')):
+                incoming_job_id = normalized_key
+            incoming_job_id = incoming_job_id or normalized_key
             job_data = {
-                'job_id': str(row['job_id']),
-                'title': str(row['title']),
-                'company': str(row['company']),
+                'job_id': incoming_job_id,
+                'title': title,
+                'company': company,
                 'location': str(row['location']),
-                'source': str(row['source']),
-                'url': str(row.get('url', '')),
+                'source': source,
+                'url': url,
                 'salary': str(row.get('salary', 'Not specified')),
                 'description': str(row.get('description', '')),
                 'normalized_key': normalized_key,
@@ -1683,8 +1741,31 @@ class JobDatabase:
         inserted_count = 0
         observed_count = 0
         affected_job_ids: set[str] = set()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            # Index canonical aliases once per batch. This lets a new
+            # linkedin:<id> sighting find a legacy row whose job_id or
+            # normalized_key was the old raw/tracked URL, without scanning the
+            # table once for every incoming job.
+            existing_identity_index: dict[str, str] = {}
+            for identity_row in cursor.execute(
+                """
+                SELECT job_id, title, company, source, url, normalized_key
+                FROM jobs
+                ORDER BY rowid
+                """
+            ).fetchall():
+                aliases = self._job_identity_aliases(
+                    job_id=identity_row[0],
+                    title=identity_row[1],
+                    company=identity_row[2],
+                    source=identity_row[3],
+                    url=identity_row[4],
+                    normalized_key=identity_row[5],
+                )
+                for alias in aliases:
+                    existing_identity_index.setdefault(alias, str(identity_row[0]))
             
             for job in jobs_to_insert:
                 existing = cursor.execute(
@@ -1704,11 +1785,51 @@ class JobDatabase:
                         seen_count
                     FROM jobs
                     WHERE job_id = ?
-                       OR (normalized_key IS NOT NULL AND normalized_key = ?)
+                       OR (
+                            normalized_key IS NOT NULL
+                            AND normalized_key != ''
+                            AND normalized_key = ?
+                       )
                     LIMIT 1
                     """,
                     (job['job_id'], job['normalized_key']),
                 ).fetchone()
+
+                if existing is None:
+                    legacy_job_id = None
+                    for alias in self._job_identity_aliases(
+                        job_id=job['job_id'],
+                        title=job['title'],
+                        company=job['company'],
+                        source=job['source'],
+                        url=job['url'],
+                        normalized_key=job['normalized_key'],
+                    ):
+                        legacy_job_id = existing_identity_index.get(alias)
+                        if legacy_job_id:
+                            break
+                    if legacy_job_id:
+                        existing = cursor.execute(
+                            """
+                            SELECT
+                                job_id,
+                                title,
+                                company,
+                                location,
+                                source,
+                                url,
+                                salary,
+                                description,
+                                normalized_key,
+                                first_seen_at,
+                                last_seen_at,
+                                seen_count
+                            FROM jobs
+                            WHERE job_id = ?
+                            LIMIT 1
+                            """,
+                            (legacy_job_id,),
+                        ).fetchone()
 
                 canonical_job_id = str(existing[0]) if existing else job['job_id']
                 is_new = existing is None
@@ -1844,6 +1965,15 @@ class JobDatabase:
                 )
                 observed_count += 0 if observation_exists else 1
                 affected_job_ids.add(canonical_job_id)
+                for alias in self._job_identity_aliases(
+                    job_id=canonical_job_id,
+                    title=observed_job_title,
+                    company=observed_company,
+                    source=observed_source,
+                    url=observed_url,
+                    normalized_key=job['normalized_key'],
+                ):
+                    existing_identity_index.setdefault(alias, canonical_job_id)
             
             conn.commit()
 
@@ -1869,7 +1999,7 @@ class JobDatabase:
         """Get jobs from last N days"""
         cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             df = pd.read_sql_query("""
                 SELECT * FROM jobs 
                 WHERE archived_at IS NULL AND scraped_at > ?
@@ -1884,7 +2014,7 @@ class JobDatabase:
     
     def get_jobs_by_company(self, company: str) -> pd.DataFrame:
         """Get all jobs from specific company"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             df = pd.read_sql_query("""
                 SELECT * FROM jobs 
                 WHERE archived_at IS NULL AND company LIKE ?
@@ -1899,7 +2029,7 @@ class JobDatabase:
     
     def get_jobs_by_source(self, source: str) -> pd.DataFrame:
         """Get all jobs from specific source"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             df = pd.read_sql_query("""
                 SELECT * FROM jobs 
                 WHERE archived_at IS NULL AND source = ?
@@ -1914,7 +2044,7 @@ class JobDatabase:
     
     def get_job_summary(self) -> Dict:
         """Get summary statistics from database"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             
             # Total jobs
@@ -2042,12 +2172,68 @@ class JobDatabase:
             'parsed_descriptions_stats': parsed_descriptions_stats
         }
 
+    def get_integrity_report(self, sample_limit: int = 10) -> Dict[str, Any]:
+        """Report database corruption and legacy orphan observations.
+
+        This is deliberately read-only: existing orphan rows are surfaced for
+        an operator to inspect, never silently deleted or rewritten.
+        """
+        normalized_limit = max(0, int(sample_limit))
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            quick_check_rows = conn.execute("PRAGMA quick_check").fetchall()
+            quick_check_messages = [str(row[0]) for row in quick_check_rows]
+
+            orphan_observation_count = 0
+            orphan_observation_job_count = 0
+            orphan_samples: list[Dict[str, Any]] = []
+            if self._table_exists(conn, "job_observations"):
+                counts = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS observation_count,
+                        COUNT(DISTINCT o.job_id) AS job_count
+                    FROM job_observations o
+                    LEFT JOIN jobs j ON j.job_id = o.job_id
+                    WHERE j.job_id IS NULL
+                    """
+                ).fetchone()
+                orphan_observation_count = int(counts["observation_count"] or 0)
+                orphan_observation_job_count = int(counts["job_count"] or 0)
+
+                if normalized_limit:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            o.job_id,
+                            COUNT(*) AS observation_count,
+                            MIN(o.observed_at) AS first_observed_at,
+                            MAX(o.observed_at) AS last_observed_at
+                        FROM job_observations o
+                        LEFT JOIN jobs j ON j.job_id = o.job_id
+                        WHERE j.job_id IS NULL
+                        GROUP BY o.job_id
+                        ORDER BY observation_count DESC, o.job_id
+                        LIMIT ?
+                        """,
+                        (normalized_limit,),
+                    ).fetchall()
+                    orphan_samples = [dict(row) for row in rows]
+
+        return {
+            "sqlite_ok": quick_check_messages == ["ok"],
+            "sqlite_messages": quick_check_messages,
+            "orphan_observation_count": orphan_observation_count,
+            "orphan_observation_job_count": orphan_observation_job_count,
+            "orphan_observation_samples": orphan_samples,
+        }
+
     def get_job_observations(self, job_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         """Return recent observation rows for a specific job."""
         if not job_id:
             return []
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
@@ -2098,7 +2284,7 @@ class JobDatabase:
         
         filepath = f"data/{filename}"
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             df = pd.read_sql_query("SELECT * FROM jobs WHERE archived_at IS NULL ORDER BY scraped_at DESC", conn)
         
         if not df.empty and 'scraped_at' in df.columns:
@@ -2114,7 +2300,7 @@ class JobDatabase:
     def get_jobs_missing_descriptions(self, limit: int = 100, exclude_failed: bool = True) -> pd.DataFrame:
         """Return jobs that have empty or NULL description, newest first.
         If exclude_failed=True, skip jobs marked as failed (description = 'FETCH_FAILED')."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             if exclude_failed:
                 df = pd.read_sql_query(
                     """
@@ -2146,7 +2332,7 @@ class JobDatabase:
 
     def get_jobs_with_masked_titles(self, limit: int = 200) -> pd.DataFrame:
         """Return jobs whose title/company/location looks masked (e.g., asterisks or empty)."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             df = pd.read_sql_query(
                 """
                 SELECT job_id, url, source, title, company, location, scraped_at, created_at
@@ -2165,7 +2351,7 @@ class JobDatabase:
 
     def reset_failed_descriptions(self) -> int:
         """Reset jobs marked as FETCH_FAILED back to empty string to allow retrying."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cur = conn.cursor()
             try:
                 cur.execute("UPDATE jobs SET description = '' WHERE archived_at IS NULL AND description = 'FETCH_FAILED'")
@@ -2180,7 +2366,7 @@ class JobDatabase:
 
     def get_failed_description_count(self) -> int:
         """Get count of jobs marked as FETCH_FAILED."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cur = conn.execute("SELECT COUNT(*) FROM jobs WHERE archived_at IS NULL AND description = 'FETCH_FAILED'")
             return cur.fetchone()[0] or 0
 
@@ -2188,7 +2374,7 @@ class JobDatabase:
         """Mark jobs as having failed description fetch to avoid retrying them."""
         if not job_ids:
             return 0
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cur = conn.cursor()
             try:
                 cur.executemany(
@@ -2205,7 +2391,7 @@ class JobDatabase:
         """Batch update job descriptions. Each item: {'job_id': ..., 'description': ...}."""
         if not updates:
             return 0
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cur = conn.cursor()
             try:
                 cur.executemany(
@@ -2222,7 +2408,7 @@ class JobDatabase:
         """Batch update job titles/companies/locations. Each item requires job_id, title, company, location, normalized_key."""
         if not updates:
             return 0
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cur = conn.cursor()
             try:
                 cur.executemany(
@@ -2243,20 +2429,11 @@ class JobDatabase:
                 return 0
 
     def _ensure_job_ids(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure DataFrame contains a vectorized job_id column"""
+        """Ensure a DataFrame uses the same canonical IDs as database upserts."""
         if df.empty:
             df['job_id'] = pd.Series(dtype='string')
             return df
-        df_clean = df.copy()
-        for col in ['url', 'title', 'company', 'location', 'source']:
-            if col in df_clean.columns:
-                df_clean[col] = df_clean[col].astype(str).str.strip().str.lower()
-            else:
-                df_clean[col] = ''
-        url_available = df_clean['url'].str.len() > 0
-        fallback_id = (df_clean['title'] + '|' + df_clean['company'] + '|' + df_clean['location'] + '|' + df_clean['source'])
-        job_ids = np.where(url_available, df_clean['url'], fallback_id)
-        df['job_id'] = pd.Series(job_ids, index=df.index)
+        df['job_id'] = build_job_ids(df)
         return df
 
     # ======================
@@ -2265,7 +2442,7 @@ class JobDatabase:
     def get_parsed_count(self, version: Optional[int] = None) -> int:
         """Return count of parsed description records, optionally filtered by version."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 cur = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='parsed_descriptions'")
                 exists = int(cur.fetchone()[0]) > 0
                 if not exists:

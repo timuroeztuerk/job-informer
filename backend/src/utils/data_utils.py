@@ -4,8 +4,8 @@ Helper functions for processing job data
 """
 
 import pandas as pd
-from typing import Dict, List, Optional
-from urllib.parse import urlparse, parse_qs
+from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, unquote, urlparse
 import re
 from datetime import datetime
 from .filtering import should_filter_by_keywords, should_filter_by_company, should_filter_study_title
@@ -252,35 +252,87 @@ def export_jobs_to_formats(jobs_df: pd.DataFrame, base_filename: str) -> List[st
 # Job identity utilities
 # -----------------------
 
-def normalize_job_url(url: str, source: str) -> str:
+_MISSING_IDENTITY_VALUES = {"", "<na>", "nan", "nat", "none", "null"}
+
+
+def _clean_identity_value(value: Any) -> str:
+    """Return a trimmed scalar string, treating pandas-style missing values as empty."""
+    if value is None:
+        return ""
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        # Identity fields are expected to be scalar. If a non-scalar slips
+        # through, converting it to text is still safer than raising here.
+        pass
+    clean = str(value).strip()
+    return "" if clean.casefold() in _MISSING_IDENTITY_VALUES else clean
+
+
+def _is_hostname(hostname: str, domain: str) -> bool:
+    return hostname == domain or hostname.endswith(f".{domain}")
+
+
+def _parse_identity_url(value: str):
+    """Parse absolute URLs and legacy scheme-less ``host/path`` values."""
+    candidate = value
+    if "://" not in candidate and re.match(
+        r"^(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]|$)",
+        candidate,
+        flags=re.IGNORECASE,
+    ):
+        candidate = f"//{candidate}"
+    return urlparse(candidate)
+
+
+def normalize_job_url(url: Any, source: Any = "") -> str:
     """Normalize a job URL to a stable identifier-like form.
     Removes tracking params; for known sources extracts canonical IDs.
     Returns empty string if url is falsy.
     """
-    if not url:
+    value = _clean_identity_value(url)
+    if not value:
         return ''
+
+    # Already-canonical keys should remain stable when they pass through the
+    # database boundary again. Provider identifiers can contain dashes (for
+    # example synthetic test data), so only the prefix is normalized here.
+    canonical_match = re.fullmatch(r"(linkedin|indeed):([^/?#\s]+)", value, re.IGNORECASE)
+    if canonical_match:
+        return f"{canonical_match.group(1).lower()}:{canonical_match.group(2)}"
+
     try:
-        parsed = urlparse(str(url))
+        parsed = _parse_identity_url(value)
+        hostname = (parsed.hostname or '').lower()
         netloc = parsed.netloc.lower()
-        path = parsed.path
+        path = unquote(parsed.path or '')
         query = parse_qs(parsed.query)
 
-        # LinkedIn: prefer /jobs/view/<id>
-        if 'linkedin.' in netloc:
-            # Extract numeric id from /jobs/view/<id>
-            if '/jobs/view/' in path:
-                parts = path.split('/jobs/view/')[-1].split('/')
-                if parts and parts[0].isdigit():
-                    return f"linkedin:{parts[0]}"
+        # LinkedIn public links use both /jobs/view/<id> and
+        # /jobs/view/<title-and-company-slug>-<id>. The numeric suffix is the
+        # durable posting identity; the preceding slug can change.
+        if _is_hostname(hostname, 'linkedin.com'):
+            path_match = re.search(r"/jobs/view/([^/]+)", path, re.IGNORECASE)
+            if path_match:
+                slug = path_match.group(1).strip()
+                id_match = re.fullmatch(r"(\d+)", slug) or re.search(r"-(\d{6,})$", slug)
+                if id_match:
+                    return f"linkedin:{id_match.group(1)}"
+
             # Fallback: try currentJobId param
-            job_ids = query.get('currentJobId') or query.get('jobId') or []
-            if job_ids:
-                return f"linkedin:{job_ids[0]}"
+            normalized_query = {key.casefold(): values for key, values in query.items()}
+            job_ids = normalized_query.get('currentjobid') or normalized_query.get('jobid') or []
+            for job_id in job_ids:
+                clean_job_id = _clean_identity_value(job_id)
+                if clean_job_id.isdigit():
+                    return f"linkedin:{clean_job_id}"
+
             # Generic fallback: scheme://host/path without query/fragment
             return f"{netloc}{path}".rstrip('/')
 
         # Indeed: prefer viewjob `jk` parameter
-        if 'indeed.' in netloc:
+        if _is_hostname(hostname, 'indeed.com'):
             job_ids = query.get('jk')
             if job_ids:
                 return f"indeed:{job_ids[0]}"
@@ -292,7 +344,29 @@ def normalize_job_url(url: str, source: str) -> str:
         # Generic: host + path without query/fragment
         return f"{netloc}{path}".rstrip('/')
     except Exception:
-        return str(url).strip()
+        return value
+
+
+def build_normalized_key(
+    *,
+    url: Any = "",
+    source: Any = "",
+    title: Any = "",
+    company: Any = "",
+) -> str:
+    """Build the canonical scalar key used for job identity and deduplication."""
+    normalized_url = normalize_job_url(url, source)
+    if normalized_url:
+        return normalized_url
+
+    fallback_parts = [
+        _clean_identity_value(source).casefold(),
+        _clean_identity_value(title).casefold(),
+        _clean_identity_value(company).casefold(),
+    ]
+    if not any(fallback_parts):
+        return ""
+    return "|".join(fallback_parts)
 
 
 def build_job_ids(df: pd.DataFrame) -> pd.Series:
@@ -301,23 +375,7 @@ def build_job_ids(df: pd.DataFrame) -> pd.Series:
     """
     if df.empty:
         return pd.Series(dtype='string')
-    clean = df.copy()
-    for col in ['url', 'title', 'company', 'location', 'source']:
-        if col in clean.columns:
-            clean[col] = clean[col].astype(str).str.strip()
-        else:
-            clean[col] = ''
-
-    # Compute normalized URL ids
-    norm_urls = clean.apply(lambda r: normalize_job_url(r.get('url', ''), r.get('source', '')), axis=1)
-    title_norm = clean['title'].str.lower()
-    company_norm = clean['company'].str.lower()
-    source_norm = clean['source'].str.lower()
-
-    fallback_ids = source_norm + '|' + title_norm + '|' + company_norm
-    use_url_mask = norm_urls.str.len() > 0
-    job_ids = norm_urls.where(use_url_mask, fallback_ids)
-    return pd.Series(job_ids.values, index=df.index)
+    return build_normalized_keys(df)
 
 
 def build_normalized_keys(df: pd.DataFrame) -> pd.Series:
@@ -326,17 +384,13 @@ def build_normalized_keys(df: pd.DataFrame) -> pd.Series:
     """
     if df.empty:
         return pd.Series(dtype='string')
-    clean = df.copy()
-    for col in ['url', 'title', 'company', 'source']:
-        if col in clean.columns:
-            clean[col] = clean[col].astype(str).str.strip()
-        else:
-            clean[col] = ''
-    norm_urls = clean.apply(lambda r: normalize_job_url(r.get('url', ''), r.get('source', '')), axis=1)
-    title_norm = clean['title'].str.lower()
-    company_norm = clean['company'].str.lower()
-    source_norm = clean['source'].str.lower()
-    fallback = source_norm + '|' + title_norm + '|' + company_norm
-    use_url_mask = norm_urls.str.len() > 0
-    keys = norm_urls.where(use_url_mask, fallback)
+    keys = df.apply(
+        lambda row: build_normalized_key(
+            url=row.get('url', ''),
+            source=row.get('source', ''),
+            title=row.get('title', ''),
+            company=row.get('company', ''),
+        ),
+        axis=1,
+    )
     return pd.Series(keys.values, index=df.index)

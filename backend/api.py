@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 from src.utils.database import JobDatabase  # noqa: E402
 from src.utils.db_summary import build_db_summary  # noqa: E402
 from src.utils.profile_fit import DEFAULT_FIT_PROFILE_ID, default_fit_profile  # noqa: E402
+from src.utils.sqlite_connection import open_sqlite  # noqa: E402
 
 
 DEFAULT_DB = ROOT / "data" / "jobs.db"
@@ -91,8 +92,7 @@ APP_SETTINGS = AppSettings(
 
 @contextmanager
 def open_jobs_db() -> Iterator[sqlite3.Connection]:
-    with sqlite3.connect(APP_SETTINGS.db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with open_sqlite(APP_SETTINGS.db_path, row_factory=sqlite3.Row) as conn:
         yield conn
 
 
@@ -250,8 +250,8 @@ class RunStore:
         self.db_path = db_path
         self._ensure_table()
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path, timeout=30)
+    def _connect(self):
+        return open_sqlite(self.db_path)
 
     def _ensure_table(self) -> None:
         with self._connect() as conn:

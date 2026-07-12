@@ -2,6 +2,7 @@ import type {
   DbSummary,
   Job,
   JobAnnotation,
+  JobArchiveFilter,
   JobAnnotationPriority,
   JobAnnotationStatus,
   JobStats,
@@ -61,6 +62,7 @@ export interface JobsQuery {
   location?: string;
   source?: string;
   company?: string;
+  archived?: JobArchiveFilter;
   annotationStatus?: JobAnnotationStatus | "";
   annotationPriority?: JobAnnotationPriority | "";
   dateFrom?: string;
@@ -72,6 +74,8 @@ export interface JobsQuery {
     | "last_seen_asc"
     | "seen_count_desc"
     | "seen_count_asc"
+    | "fit_score_desc"
+    | "fit_score_asc"
     | "title_asc"
     | "title_desc";
 }
@@ -95,6 +99,7 @@ export async function fetchJobs(query: JobsQuery = {}): Promise<JobsResponse> {
       location: query.location,
       source: query.source,
       company: query.company,
+      archived: query.archived,
       annotation_status: query.annotationStatus,
       annotation_priority: query.annotationPriority,
       date_from: normalizeDateStart(query.dateFrom),
@@ -111,14 +116,25 @@ export async function fetchJob(jobId: string): Promise<Job> {
   return handleJson<Job>(res);
 }
 
-export async function deleteJob(jobId: string): Promise<void> {
+export async function archiveJob(jobId: string): Promise<void> {
   const res = await fetch(buildUrl(`jobs/${encodeURIComponent(jobId)}`), {
     method: "DELETE",
     headers: authHeaders(),
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `Delete failed with status ${res.status}`);
+    throw new Error(text || `Archive failed with status ${res.status}`);
+  }
+}
+
+export async function restoreJob(jobId: string): Promise<void> {
+  const res = await fetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/restore`), {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Restore failed with status ${res.status}`);
   }
 }
 

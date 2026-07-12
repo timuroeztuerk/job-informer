@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..config.settings import Config
 from ..utils.database import JobDatabase
+from ..utils.sqlite_connection import connect_sqlite
 from ..utils.openai_responses_client import (
     LLMCallTelemetry,
     LLMUsage,
@@ -336,7 +337,7 @@ class DescriptionTools:
 
     def _ensure_table(self) -> None:
         """Create parsed_descriptions table if it doesn't exist (separate from jobs)."""
-        with sqlite3.connect(self.db.db_path) as conn:
+        with self.db._get_connection() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS parsed_descriptions (
@@ -356,6 +357,15 @@ class DescriptionTools:
     @staticmethod
     def _hash_description(text: str) -> str:
         return hashlib.sha256((text or '').encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _is_dry_run_placeholder(payload_json: str) -> bool:
+        """Identify legacy dry-run rows that are not real parser results."""
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and payload.get("dry_run") is True
 
     @staticmethod
     def _normalize_description_text(text: str) -> str:
@@ -451,7 +461,7 @@ class DescriptionTools:
             pass
 
     def _find_cached(self, job_id: str, desc_hash: str, version: int) -> Optional[ParsedDescription]:
-        with sqlite3.connect(self.db.db_path) as conn:
+        with self.db._get_connection() as conn:
             cur = conn.execute(
                 "SELECT job_id, desc_hash, version, model, payload_json, created_at FROM parsed_descriptions WHERE job_id = ? AND desc_hash = ? AND version = ?",
                 (job_id, desc_hash, version),
@@ -459,19 +469,57 @@ class DescriptionTools:
             row = cur.fetchone()
             if not row:
                 return None
-            return ParsedDescription(*row)
+            cached = ParsedDescription(*row)
+            if self._is_dry_run_placeholder(cached.payload_json):
+                logger.info(f"Job {job_id}: Ignoring legacy dry-run cache placeholder")
+                return None
+            return cached
 
     def _store(self, record: ParsedDescription, *, conn: Optional[sqlite3.Connection] = None) -> None:
         owns_connection = conn is None
-        active_conn = conn or sqlite3.connect(self.db.db_path)
+        active_conn = conn or connect_sqlite(self.db.db_path)
         try:
-            active_conn.execute(
+            existing = active_conn.execute(
                 """
-                INSERT OR IGNORE INTO parsed_descriptions(job_id, desc_hash, version, model, payload_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                SELECT payload_json
+                FROM parsed_descriptions
+                WHERE job_id = ? AND desc_hash = ? AND version = ?
                 """,
-                (record.job_id, record.desc_hash, record.version, record.model, record.payload_json, record.created_at),
-            )
+                (record.job_id, record.desc_hash, record.version),
+            ).fetchone()
+            placeholder_replaced = False
+            if existing and self._is_dry_run_placeholder(existing[0]):
+                # Replace only the placeholder value we inspected. The extra
+                # predicate prevents overwriting a real result written by a
+                # concurrent parser between this read and update.
+                cursor = active_conn.execute(
+                    """
+                    UPDATE parsed_descriptions
+                    SET model = ?, payload_json = ?, created_at = ?
+                    WHERE job_id = ? AND desc_hash = ? AND version = ?
+                      AND payload_json = ?
+                    """,
+                    (
+                        record.model,
+                        record.payload_json,
+                        record.created_at,
+                        record.job_id,
+                        record.desc_hash,
+                        record.version,
+                        existing[0],
+                    ),
+                )
+                placeholder_replaced = cursor.rowcount > 0
+            if not placeholder_replaced:
+                # If a concurrent writer changed or removed the placeholder,
+                # keep any real result it wrote or fill the now-empty slot.
+                active_conn.execute(
+                    """
+                    INSERT OR IGNORE INTO parsed_descriptions(job_id, desc_hash, version, model, payload_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (record.job_id, record.desc_hash, record.version, record.model, record.payload_json, record.created_at),
+                )
             if owns_connection:
                 active_conn.commit()
         finally:
@@ -672,39 +720,20 @@ class DescriptionTools:
                 'desc_hash': h,
             })
 
-        # If dry-run, bypass LLM and just store placeholders synchronously
+        # A dry run is a read-only preview of work that a real run would send.
+        # In particular, it must not populate either the canonical cache or a
+        # successful parse state, because that would suppress the real run.
         if dry:
-            with sqlite3.connect(self.db.db_path) as conn:
-                for item in jobs_to_process:
-                    rec = ParsedDescription(
-                        job_id=item['job_id'],
-                        desc_hash=item['desc_hash'],
-                        version=version,
-                        model=self.llm.model,
-                        payload_json=json.dumps({"dry_run": True}),
-                        created_at=created_ts,
-                    )
-                    try:
-                        self._store(rec, conn=conn)
-                        self.db.upsert_parse_job_state(
-                            job_id=item["job_id"],
-                            desc_hash=item["desc_hash"],
-                            version=version,
-                            model=self.llm.model,
-                            status="success",
-                            last_attempt_at=created_ts,
-                            last_success_at=created_ts,
-                            output_preview='{"dry_run": true}',
-                            conn=conn,
-                        )
-                        new_count += 1
-                    except Exception as e:
-                        logger.error(f"Job {item['job_id']}: Failed to store parsed description (dry-run): {e}")
-                    finally:
-                        completed_items += 1
-                        self._update_progress(batch_num, total_batches, completed_items, total_items,
-                                              status=f"Dry-run stored {item['title'][:30]}...")
-                conn.commit()
+            for item in jobs_to_process:
+                logger.info(f"Job {item['job_id']}: Dry-run eligible for parsing")
+                completed_items += 1
+                self._update_progress(
+                    batch_num,
+                    total_batches,
+                    completed_items,
+                    total_items,
+                    status=f"Dry-run eligible: {item['title'][:30]}...",
+                )
         else:
             if jobs_to_process:
                 status_msg = f"Dispatching {len(jobs_to_process)} LLM calls (concurrency={concurrency})"
@@ -722,7 +751,7 @@ class DescriptionTools:
             )
             completed_items = total_items
 
-            with sqlite3.connect(self.db.db_path) as conn:
+            with self.db._get_connection() as conn:
                 for result in results:
                     job_id = result["job_id"]
                     telemetry = result["result"].telemetry
@@ -872,16 +901,19 @@ class DescriptionTools:
         working = working.copy()
         working["desc_hash"] = working["description"].astype(str).apply(self._hash_description)
 
-        with sqlite3.connect(self.db.db_path) as conn:
+        with self.db._get_connection() as conn:
             existing_df = pd.read_sql_query(
-                "SELECT job_id, desc_hash FROM parsed_descriptions WHERE version = ?",
+                "SELECT job_id, desc_hash, payload_json FROM parsed_descriptions WHERE version = ?",
                 conn,
                 params=[version],
             )
 
         existing_set = set()
         if not existing_df.empty:
-            existing_set = set(zip(existing_df["job_id"].astype(str), existing_df["desc_hash"].astype(str)))
+            canonical_df = existing_df[
+                ~existing_df["payload_json"].apply(self._is_dry_run_placeholder)
+            ]
+            existing_set = set(zip(canonical_df["job_id"].astype(str), canonical_df["desc_hash"].astype(str)))
 
         to_parse_mask = [
             (str(row["job_id"]), str(row["desc_hash"])) not in existing_set
@@ -937,7 +969,7 @@ class DescriptionTools:
         """Find jobs with descriptions and without cached parse.
         Processes at most max_batches batches of batch_size each.
         """
-        with sqlite3.connect(self.db.db_path) as conn:
+        with self.db._get_connection() as conn:
             all_jobs_df = pd.read_sql_query(
                 """
                 SELECT job_id, description, title, company
@@ -981,8 +1013,11 @@ class DescriptionTools:
         max_batches: Optional[int] = None,
     ) -> bool:
         """Fetch and fill descriptions for jobs in DB missing descriptions.
-        Processes the missing-description backlog in batches with gentle pacing and rate-limit awareness.
-        Jobs that fail to fetch descriptions are marked to avoid retrying.
+
+        ``max_batches=None`` drains the backlog until the first empty query.
+        A finite value processes at most that many non-empty batches; values at
+        or below zero are a successful no-op. Jobs that fail to fetch a
+        description are marked to avoid retrying.
         """
         try:
             if batch_size is None:
@@ -992,21 +1027,20 @@ class DescriptionTools:
             if batch_size <= 0:
                 batch_size = 50
 
+            if max_batches is not None:
+                max_batches = int(max_batches)
+                if max_batches <= 0:
+                    logger.info("Description backfill batch limit is non-positive; nothing to process")
+                    return True
+
             total_updated = 0
             total_failed = 0
             batches_processed = 0
-            consecutive_empty_batches = 0
-            
+
             while max_batches is None or batches_processed < max_batches:
                 to_fill = scraper.db.get_jobs_missing_descriptions(limit=batch_size, exclude_failed=True)
                 if to_fill.empty:
-                    consecutive_empty_batches += 1
-                    if consecutive_empty_batches >= 2:
-                        break
-                    time.sleep(1.0)  # Brief pause before checking again
-                    continue
-                else:
-                    consecutive_empty_batches = 0
+                    break
 
                 logger.info(f"Backfill batch {batches_processed+1}: processing {len(to_fill)} jobs without descriptions")
 
@@ -1055,7 +1089,7 @@ class DescriptionTools:
                 batches_processed += 1
 
                 # brief pause between batches with feedback
-                if batches_processed < max_batches:
+                if max_batches is None or batches_processed < max_batches:
                     time.sleep(1.0)
 
             logger.success(f"Updated: {total_updated}, Failed/skipped: {total_failed}")

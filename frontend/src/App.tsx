@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import JobDetail from "./components/JobDetail";
 import JobTable, { JobTableHandle } from "./components/JobTable";
 import RecentRuns from "./components/RecentRuns";
 import RunPane from "./components/RunPane";
 import SummaryPage from "./components/SummaryPage";
 import { API_BASE, fetchStats } from "./api";
-import type { Job, JobStats } from "./types";
+import type { Job, JobStats, RunStatus } from "./types";
 import { readTextParam, replaceSearchParams } from "./urlState";
 
 type ViewMode = "dashboard" | "summary";
@@ -15,8 +15,10 @@ const App: React.FC = () => {
   const [statsError, setStatsError] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(() => (readTextParam("view") === "dashboard" ? "dashboard" : "summary"));
+  const [dataRefreshToken, setDataRefreshToken] = useState(0);
   const [now, setNow] = useState(new Date());
   const tableRef = useRef<JobTableHandle | null>(null);
+  const completedRunIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
     replaceSearchParams({ view: viewMode });
@@ -48,21 +50,38 @@ const App: React.FC = () => {
       window.clearInterval(nowTimer);
       window.clearInterval(statsTimer);
     };
-  }, []);
+  }, [dataRefreshToken]);
 
   const formattedNow = useMemo(
     () => new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(now),
     [now]
   );
 
-  const handleDeleted = () => {
-    setSelectedJob(null);
-    tableRef.current?.reload?.(true);
+  const handleArchiveChanged = (clearSelection = true) => {
+    if (clearSelection) {
+      setSelectedJob(null);
+    }
+    tableRef.current?.reload?.(clearSelection);
   };
 
   const handleAnnotationSaved = () => {
     tableRef.current?.reload?.(false);
   };
+
+  const handleRunCompleted = useCallback((run: RunStatus) => {
+    if (completedRunIdsRef.current.has(run.run_id)) {
+      return;
+    }
+    completedRunIdsRef.current.add(run.run_id);
+    setDataRefreshToken((token) => token + 1);
+  }, []);
+
+  const handleOpenDashboard = useCallback(() => {
+    // Intelligence is calculated from active jobs. Do not let an archived-only
+    // filter from an earlier dashboard session trap any of its drill-downs.
+    replaceSearchParams({ archived: "" });
+    setViewMode("dashboard");
+  }, []);
 
   return (
     <div className="page">
@@ -107,24 +126,36 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {viewMode === "dashboard" ? (
-        <main className="layout">
-          <div className="main">
-            <RunPane className="highlight" />
-            <div className="jobs">
-              <JobTable
-                ref={tableRef}
-                onSelect={setSelectedJob}
-                sources={stats?.sources_list || []}
-                companies={stats?.companies_list || []}
-              />
-              <JobDetail job={selectedJob} onDeleted={handleDeleted} onAnnotationSaved={handleAnnotationSaved} />
-            </div>
-            <RecentRuns />
-          </div>
-        </main>
-      ) : (
-        <SummaryPage className="summary-shell" onOpenDashboard={() => setViewMode("dashboard")} />
+      <main className="layout" hidden={viewMode !== "dashboard"}>
+        <div className="main">
+          <RunPane className="highlight" onRunCompleted={handleRunCompleted} />
+          {viewMode === "dashboard" && (
+            <>
+              <div className="jobs">
+                <JobTable
+                  ref={tableRef}
+                  onSelect={setSelectedJob}
+                  sources={stats?.sources_list || []}
+                  companies={stats?.companies_list || []}
+                  refreshToken={dataRefreshToken}
+                />
+                <JobDetail
+                  job={selectedJob}
+                  onArchiveChanged={handleArchiveChanged}
+                  onAnnotationSaved={handleAnnotationSaved}
+                />
+              </div>
+            </>
+          )}
+          <RecentRuns refreshToken={dataRefreshToken} />
+        </div>
+      </main>
+      {viewMode === "summary" && (
+        <SummaryPage
+          key={`summary-${dataRefreshToken}`}
+          className="summary-shell"
+          onOpenDashboard={handleOpenDashboard}
+        />
       )}
     </div>
   );

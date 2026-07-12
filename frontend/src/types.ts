@@ -9,6 +9,8 @@ export type JobAnnotationStatus =
 
 export type JobAnnotationPriority = "low" | "medium" | "high";
 
+export type JobArchiveFilter = "exclude" | "include" | "only";
+
 export interface JobAnnotation {
   status: JobAnnotationStatus;
   priority: JobAnnotationPriority;
@@ -32,6 +34,8 @@ export interface Job {
   description?: string;
   scraped_at?: string;
   created_at?: string;
+  archived_at?: string | null;
+  archived_reason?: string | null;
   first_seen_at?: string;
   last_seen_at?: string;
   seen_count?: number;
@@ -196,6 +200,53 @@ export interface TrendSummary {
   };
 }
 
+export interface CollectionFreshness {
+  as_of: string;
+  last_collected_at: string | null;
+  latest_observation_at: string | null;
+  latest_scrape_at: string | null;
+  source: "job_observation" | "job_record" | null;
+  age_days: number | null;
+  status: "fresh" | "aging" | "stale" | "empty";
+}
+
+export interface FitSummaryJob {
+  job_id: string;
+  title: string;
+  company: string;
+  score: number;
+  band: string;
+  reasons: string[];
+}
+
+export interface ProfileFitSummary {
+  profile_id: string;
+  profile_name: string;
+  profile_version: number;
+  total_scored: number;
+  average_score: number | null;
+  band_counts: Record<string, number>;
+  top_jobs: FitSummaryJob[];
+}
+
+export interface ParserTelemetrySummary {
+  attempts: number;
+  success_count: number;
+  failure_count: number;
+  refusal_count: number;
+  recent_window_days: number;
+  recent_attempts: number;
+  recent_success_rate: number | null;
+  average_latency_ms: number | null;
+  exhausted_retries: number;
+  jobs_with_current_failed_status: number;
+}
+
+export interface SkillGapSummary {
+  jobs_with_gaps: number;
+  top_gaps: CountStat[];
+}
+
 export interface ObservationStats {
   total_observations: number;
   repeat_jobs: number;
@@ -235,6 +286,10 @@ export interface DbSummary {
   top_companies: Record<string, number>;
   observation_stats?: ObservationStats;
   observation_summary?: ObservationSummary;
+  collection_freshness?: CollectionFreshness;
+  profile_fit_summary?: ProfileFitSummary;
+  parser_telemetry?: ParserTelemetrySummary;
+  skill_gap_summary?: SkillGapSummary;
   parsed_descriptions_stats?: Record<string, number>;
   parsed_insights: ParsedInsights;
   city_summary: CitySummary;

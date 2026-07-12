@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import json
-import sqlite3
 from datetime import datetime
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -245,7 +244,7 @@ class AIPurger:
         # Get jobs from database, starting with the latest added jobs that haven't been analyzed yet
         try:
             limit_clause = "" if self.process_all else f" LIMIT {self.batch_size}"
-            with sqlite3.connect(self.db.db_path) as conn:
+            with self.db._get_connection() as conn:
                 # Use COALESCE to handle cases where created_at might be NULL, fallback to scraped_at
                 # Only analyze jobs that haven't been analyzed yet (analyzed = 0 or NULL)
                 # This ensures we always start with the most recently added jobs to the database
@@ -432,7 +431,7 @@ class AIPurger:
             return
             
         try:
-            with sqlite3.connect(self.db.db_path) as conn:
+            with self.db._get_connection() as conn:
                 cursor = conn.cursor()
                 
                 # Update analyzed flag to 1 for the given job IDs
@@ -458,7 +457,7 @@ class AIPurger:
             Number of jobs reset
         """
         try:
-            with sqlite3.connect(self.db.db_path) as conn:
+            with self.db._get_connection() as conn:
                 cursor = conn.cursor()
                 
                 if all_jobs:
@@ -484,7 +483,7 @@ class AIPurger:
             Dictionary with analyzed, unanalyzed, and total counts
         """
         try:
-            with sqlite3.connect(self.db.db_path) as conn:
+            with self.db._get_connection() as conn:
                 cursor = conn.cursor()
                 
                 # Get analyzed count

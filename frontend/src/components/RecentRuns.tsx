@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { listRuns } from "../api";
 import type { CliMode, RunSummary } from "../types";
 
 interface RecentRunsProps {
   className?: string;
+  refreshToken?: number;
 }
 
 const modeLabel = (mode: CliMode) => {
@@ -32,26 +33,38 @@ const formatDate = (value?: string | null) => {
   return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 };
 
-const RecentRuns: React.FC<RecentRunsProps> = ({ className }) => {
+const RecentRuns: React.FC<RecentRunsProps> = ({ className, refreshToken = 0 }) => {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loadRequestRef = useRef(0);
 
   const load = async () => {
+    const requestId = ++loadRequestRef.current;
     setLoading(true);
     setError(null);
     try {
-      setRuns(await listRuns(5));
+      const nextRuns = await listRuns(5);
+      if (loadRequestRef.current === requestId) {
+        setRuns(nextRuns);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load runs.");
+      if (loadRequestRef.current === requestId) {
+        setError(err instanceof Error ? err.message : "Failed to load runs.");
+      }
     } finally {
-      setLoading(false);
+      if (loadRequestRef.current === requestId) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    load();
-  }, []);
+    void load();
+    return () => {
+      loadRequestRef.current += 1;
+    };
+  }, [refreshToken]);
 
   const wrapperClassName = ["panel", "recent-runs", className].filter(Boolean).join(" ");
 
