@@ -87,7 +87,6 @@ class LLMStructuredClient(Protocol):
         response_model: Type[StructuredModel],
         input: str | list[dict[str, Any]],
         instructions: str | None = None,
-        max_output_tokens: int = 2048,
         temperature: float | None = None,
     ) -> StructuredLLMResult[StructuredModel]:
         """Return a structured result backed by the OpenAI Responses API."""
@@ -146,7 +145,6 @@ class OpenAIResponsesClient:
         response_model: Type[StructuredModel],
         input: str | list[dict[str, Any]],
         instructions: str | None = None,
-        max_output_tokens: int = 2048,
         temperature: float | None = None,
     ) -> StructuredLLMResult[StructuredModel]:
         """Call the Responses API and parse directly into a Pydantic model."""
@@ -176,7 +174,6 @@ class OpenAIResponsesClient:
                     "model": self.model,
                     "input": input,
                     "text_format": response_model,
-                    "max_output_tokens": max_output_tokens,
                     "store": False,
                 }
                 if instructions:
@@ -210,7 +207,28 @@ class OpenAIResponsesClient:
 
                 parsed = getattr(response, "output_parsed", None)
                 if parsed is None:
-                    raise ValueError("No parsed structured output returned from LLM.")
+                    parsed = self._parse_output_text(response, response_model)
+                if parsed is None:
+                    error = ValueError(self._describe_missing_structured_output(response))
+                    self._record_failure(error, elapsed_ms)
+                    logger.error("Responses API returned no structured output: {}", error)
+                    return StructuredLLMResult(
+                        parsed=None,
+                        telemetry=LLMCallTelemetry(
+                            model=self.model,
+                            status="failed",
+                            started_at=started_at.isoformat(),
+                            finished_at=datetime.now(UTC).isoformat(),
+                            latency_ms=max(0.0, elapsed_ms),
+                            response_id=response_id,
+                            retry_count=attempt - 1,
+                            exhausted_retries=False,
+                            error_type=type(error).__name__,
+                            error_message=str(error),
+                            output_preview=self._truncate_text(self._extract_output_text(response)),
+                            usage=usage,
+                        ),
+                    )
 
                 telemetry = LLMCallTelemetry(
                     model=self.model,
@@ -273,7 +291,6 @@ class OpenAIResponsesClient:
         response_model: Type[StructuredModel],
         input: str | list[dict[str, Any]],
         instructions: str | None = None,
-        max_output_tokens: int = 2048,
         temperature: float | None = None,
     ) -> StructuredLLMResult[StructuredModel]:
         """Sync wrapper for non-async call sites."""
@@ -285,7 +302,6 @@ class OpenAIResponsesClient:
                     response_model=response_model,
                     input=input,
                     instructions=instructions,
-                    max_output_tokens=max_output_tokens,
                     temperature=temperature,
                 )
             )
@@ -314,8 +330,6 @@ class OpenAIResponsesClient:
 
         msg = (str(error) or "").lower()
         if "timeout" in msg or "connection" in msg:
-            return True
-        if "no parsed structured output returned from llm" in msg:
             return True
         return False
 
@@ -389,6 +403,48 @@ class OpenAIResponsesClient:
                 if text:
                     return str(text).strip() or None
         return None
+
+    @classmethod
+    def _parse_output_text(
+        cls,
+        response: Any,
+        response_model: Type[StructuredModel],
+    ) -> StructuredModel | None:
+        """Validate a JSON response when an SDK variant did not populate output_parsed."""
+        output_text = cls._extract_output_text(response)
+        if not output_text:
+            return None
+
+        try:
+            return response_model.model_validate_json(output_text)
+        except Exception:
+            return None
+
+    @classmethod
+    def _describe_missing_structured_output(cls, response: Any) -> str:
+        """Return compact diagnostics for completed Responses API calls with no final output."""
+        details: list[str] = []
+        status = cls._read_attr(response, "status")
+        if status:
+            details.append(f"status={status}")
+
+        incomplete_details = cls._read_attr(response, "incomplete_details")
+        incomplete_reason = cls._read_attr(incomplete_details, "reason")
+        if incomplete_reason:
+            details.append(f"incomplete_reason={incomplete_reason}")
+
+        output_items = cls._read_attr(response, "output") or []
+        if not isinstance(output_items, list):
+            output_items = [output_items]
+        output_types = [str(cls._read_attr(item, "type") or "unknown") for item in output_items]
+        details.append(f"output_types={','.join(output_types) or 'none'}")
+
+        output_text = cls._extract_output_text(response)
+        if output_text:
+            details.append("output_text_present=true")
+
+        suffix = f" ({'; '.join(details)})" if details else ""
+        return f"No parsed structured output returned from LLM.{suffix}"
 
     def _build_output_preview(self, parsed: BaseModel, response: Any) -> str | None:
         text = self._extract_output_text(response)

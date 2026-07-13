@@ -145,6 +145,18 @@ export interface JobStats {
     interval_hours: number;
     last_successful_run_at: string | null;
   };
+  database?: {
+    status: "ready" | "not_ready";
+    instance_name: string;
+    db_path: string;
+    schema_ok: boolean;
+    missing_tables: string[];
+    total_jobs: number;
+    active_jobs: number;
+    db_size_bytes: number;
+    db_modified_at: string | null;
+    error?: string;
+  };
 }
 
 export interface CountStat {

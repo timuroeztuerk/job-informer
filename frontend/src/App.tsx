@@ -136,6 +136,16 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {stats?.database?.total_jobs === 0 && (
+        <div className="stat warning" role="alert">
+          <p className="label">Database</p>
+          <p className="value">Connected to an empty database.</p>
+          <p className="muted small">
+            Instance {stats.database.instance_name} is using {stats.database.db_path}. Check the Docker data mount before collecting new jobs.
+          </p>
+        </div>
+      )}
+
       {stats && viewMode === "dashboard" && (
         <section
           className={`collection-freshness app-freshness ${freshness?.status || "empty"}`}

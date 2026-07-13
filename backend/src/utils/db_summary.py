@@ -310,44 +310,40 @@ def compute_collection_freshness(
     try:
         with db._get_connection() as conn:  # noqa: SLF001
             if db._table_exists(conn, "job_observations"):  # noqa: SLF001
-                row = conn.execute(
-                    """
-                    SELECT observed_at
-                    FROM job_observations
-                    ORDER BY datetime(observed_at, 'utc') DESC, observation_id DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-                latest_observation = row[0] if row else None
+                rows = conn.execute("SELECT observed_at FROM job_observations").fetchall()
+                timestamps = [as_utc_timestamp(row[0]) for row in rows]
+                latest_observation = max(
+                    (timestamp for timestamp in timestamps if not pd.isna(timestamp)),
+                    default=None,
+                )
 
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT COALESCE(last_seen_at, scraped_at, created_at)
                 FROM jobs
                 WHERE archived_at IS NULL
-                ORDER BY datetime(COALESCE(last_seen_at, scraped_at, created_at), 'utc') DESC
-                LIMIT 1
                 """
-            ).fetchone()
-            latest_job_record = row[0] if row else None
+            ).fetchall()
+            timestamps = [as_utc_timestamp(row[0]) for row in rows]
+            latest_job_record = max(
+                (timestamp for timestamp in timestamps if not pd.isna(timestamp)),
+                default=None,
+            )
 
             if db._table_exists(conn, "scrape_runs"):  # noqa: SLF001
-                row = conn.execute(
-                    """
-                    SELECT observed_at
-                    FROM scrape_runs
-                    ORDER BY datetime(observed_at, 'utc') DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-                latest_scrape = row[0] if row else None
+                rows = conn.execute("SELECT observed_at FROM scrape_runs").fetchall()
+                timestamps = [as_utc_timestamp(row[0]) for row in rows]
+                latest_scrape = max(
+                    (timestamp for timestamp in timestamps if not pd.isna(timestamp)),
+                    default=None,
+                )
     except Exception as exc:  # pragma: no cover - defensive for runtime diagnostics
         logger.warning(f"Could not compute collection freshness: {exc}")
         return summary
 
-    observation_timestamp = as_utc_timestamp(latest_observation) if latest_observation else pd.NaT
-    job_timestamp = as_utc_timestamp(latest_job_record) if latest_job_record else pd.NaT
-    scrape_timestamp = as_utc_timestamp(latest_scrape) if latest_scrape else pd.NaT
+    observation_timestamp = latest_observation if latest_observation is not None else pd.NaT
+    job_timestamp = latest_job_record if latest_job_record is not None else pd.NaT
+    scrape_timestamp = latest_scrape if latest_scrape is not None else pd.NaT
 
     if not pd.isna(observation_timestamp):
         collected_at = observation_timestamp

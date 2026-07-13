@@ -206,6 +206,18 @@ class JobDatabase:
             """)
 
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS parsed_descriptions (
+                    job_id TEXT NOT NULL,
+                    desc_hash TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    model TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+                    PRIMARY KEY (job_id, desc_hash, version)
+                )
+            """)
+
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS filter_decisions (
                     decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL,
@@ -269,6 +281,7 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_attempts_entity ON llm_attempts(task_type, entity_id, finished_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_job_states_status ON parse_job_states(status, last_attempt_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_parse_job_states_job ON parse_job_states(job_id, last_attempt_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pd_job ON parsed_descriptions(job_id)")
 
             self._ensure_default_fit_profile(conn)
             conn.commit()

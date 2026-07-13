@@ -541,7 +541,6 @@ class _SequenceStructuredClient:
         response_model,
         input,
         instructions=None,
-        max_output_tokens=2048,
         temperature=None,
     ):
         self.calls.append(
@@ -550,7 +549,6 @@ class _SequenceStructuredClient:
                 "response_model": response_model,
                 "input": input,
                 "instructions": instructions,
-                "max_output_tokens": max_output_tokens,
                 "temperature": temperature,
             }
         )
@@ -562,7 +560,6 @@ class _SequenceStructuredClient:
         response_model,
         input,
         instructions=None,
-        max_output_tokens=2048,
         temperature=None,
     ):
         self.calls.append(
@@ -571,7 +568,6 @@ class _SequenceStructuredClient:
                 "response_model": response_model,
                 "input": input,
                 "instructions": instructions,
-                "max_output_tokens": max_output_tokens,
                 "temperature": temperature,
             }
         )
@@ -585,9 +581,11 @@ class _FakeResponsesAPI:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
         self.calls = 0
+        self.requests = []
 
     async def parse(self, **kwargs):
         self.calls += 1
+        self.requests.append(kwargs)
         if not self.outcomes:
             raise AssertionError("No fake Responses API outcomes left")
         outcome = self.outcomes.pop(0)
@@ -921,6 +919,7 @@ class TestOpenAIResponsesClient(unittest.TestCase):
         self.assertEqual(result.telemetry.status, "success")
         self.assertEqual(result.telemetry.usage.total_tokens, 20)
         self.assertEqual(result.telemetry.output_preview, '{"summary":"hello"}')
+        self.assertNotIn("max_output_tokens", client._client.responses.requests[0])  # noqa: SLF001
 
     def test_parse_structured_handles_refusal(self) -> None:
         client = OpenAIResponsesClient(
@@ -952,7 +951,7 @@ class TestOpenAIResponsesClient(unittest.TestCase):
         self.assertEqual(result.telemetry.status, "refusal")
         self.assertEqual(result.telemetry.refusal_text, "cannot comply")
 
-    def test_parse_structured_retries_retryable_value_error(self) -> None:
+    def test_parse_structured_uses_valid_json_when_sdk_omits_output_parsed(self) -> None:
         client = OpenAIResponsesClient(
             api_key="test-key",
             model="gpt-5-mini",
@@ -964,11 +963,10 @@ class TestOpenAIResponsesClient(unittest.TestCase):
         )
         client._client = _FakeResponsesClient(  # noqa: SLF001
             [
-                SimpleNamespace(id="resp_empty", output_parsed=None, output=[], usage=None),
                 SimpleNamespace(
-                    id="resp_retry_ok",
-                    output_parsed=JobDescriptionStructure.model_validate({"summary": "after retry"}),
-                    output=[SimpleNamespace(content=[SimpleNamespace(type="output_text", text='{"summary":"after retry"}')])],
+                    id="resp_json_fallback",
+                    output_parsed=None,
+                    output=[SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text='{"summary":"from JSON"}')])],
                     usage=SimpleNamespace(input_tokens=5, output_tokens=4, total_tokens=9),
                 ),
             ]
@@ -976,13 +974,49 @@ class TestOpenAIResponsesClient(unittest.TestCase):
 
         result = client.parse_structured(
             response_model=JobDescriptionStructure,
-            input="DESCRIPTION: retry",
+            input="DESCRIPTION: JSON fallback",
         )
 
         self.assertIsNotNone(result.parsed)
         self.assertEqual(result.telemetry.status, "success")
-        self.assertEqual(result.telemetry.retry_count, 1)
-        self.assertEqual(client._client.responses.calls, 2)  # noqa: SLF001
+        self.assertEqual(result.parsed.summary, "from JSON")
+        self.assertEqual(client._client.responses.calls, 1)  # noqa: SLF001
+
+    def test_parse_structured_does_not_retry_completed_response_without_output(self) -> None:
+        client = OpenAIResponsesClient(
+            api_key="test-key",
+            model="gpt-5-mini",
+            timeout_seconds=1,
+            max_retries=3,
+            retry_base_delay=0,
+            retry_max_delay=0,
+            retry_jitter=0,
+        )
+        client._client = _FakeResponsesClient(  # noqa: SLF001
+            [
+                SimpleNamespace(
+                    id="resp_incomplete",
+                    status="incomplete",
+                    incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                    output=[],
+                    output_parsed=None,
+                    usage=SimpleNamespace(input_tokens=5, output_tokens=4, total_tokens=9),
+                )
+            ]
+        )
+
+        result = client.parse_structured(
+            response_model=JobDescriptionStructure,
+            input="DESCRIPTION: incomplete",
+        )
+
+        self.assertIsNone(result.parsed)
+        self.assertEqual(result.telemetry.status, "failed")
+        self.assertEqual(result.telemetry.response_id, "resp_incomplete")
+        self.assertEqual(result.telemetry.usage.total_tokens, 9)
+        self.assertIn("status=incomplete", result.telemetry.error_message or "")
+        self.assertIn("incomplete_reason=max_output_tokens", result.telemetry.error_message or "")
+        self.assertEqual(client._client.responses.calls, 1)  # noqa: SLF001
 
     def test_parse_structured_returns_failed_for_non_retryable_error(self) -> None:
         client = OpenAIResponsesClient(

@@ -310,7 +310,6 @@ class DescriptionTools:
     ):
         self.config: Config = config
         self.db: JobDatabase = db or JobDatabase()
-        self._ensure_table()
         self.desc_min_chars = max(0, int(getattr(self.config, 'desc_parser_min_chars', 80)))
         self.desc_max_chars = max(0, int(getattr(self.config, 'desc_parser_max_chars', 12000)))
         if self.desc_max_chars < self.desc_min_chars:
@@ -330,29 +329,9 @@ class DescriptionTools:
             retry_jitter=float(getattr(self.config, 'llm_retry_jitter', 0.2)),
         )
         self.prompt: str = getattr(self.config, 'desc_parser_prompt', '')
-        self.max_output_tokens: int = 2048
         # Track how many characters the last progress update used so we can
         # properly clear the line on the next update.
         self._progress_line_length: int = 0
-
-    def _ensure_table(self) -> None:
-        """Create parsed_descriptions table if it doesn't exist (separate from jobs)."""
-        with self.db._get_connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS parsed_descriptions (
-                    job_id TEXT NOT NULL,
-                    desc_hash TEXT NOT NULL,
-                    version INTEGER NOT NULL,
-                    model TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
-                    PRIMARY KEY (job_id, desc_hash, version)
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_pd_job ON parsed_descriptions(job_id)")
-            conn.commit()
 
     @staticmethod
     def _hash_description(text: str) -> str:
@@ -578,7 +557,6 @@ class DescriptionTools:
             response_model=JobDescriptionStructure,
             input=self._build_parser_input(description_text, title=title, company=company),
             instructions=self._build_parser_instructions(),
-            max_output_tokens=self.max_output_tokens,
         )
 
     def _call_llm(
@@ -599,7 +577,6 @@ class DescriptionTools:
                 response_model=JobDescriptionStructure,
                 input=self._build_parser_input(description_text, title=title, company=company),
                 instructions=self._build_parser_instructions(),
-                max_output_tokens=self.max_output_tokens,
             )
         except Exception as e:
             logger.error(f"Job {job_id}: LLM structured request error: {e}")

@@ -22,6 +22,7 @@ from typing import Any, AsyncGenerator, Iterator, Literal, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from loguru import logger
 from starlette.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -55,22 +56,17 @@ def _as_float_env(name: str, default: float) -> float:
 
 
 def _resolve_db_path(env_name: str, fallback: Path) -> str:
-    candidates: list[Path] = []
     env_path = os.getenv(env_name)
-    if env_path:
-        candidates.append(Path(env_path))
-    candidates.extend([fallback, ROOT / "data" / "jobs.db", Path.cwd() / "backend" / "data" / "jobs.db"])
-    last_error: Exception | None = None
-
-    for candidate in candidates:
-        try:
-            resolved = candidate.expanduser().resolve()
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            return str(resolved)
-        except OSError as exc:
-            last_error = exc
-
-    raise RuntimeError(f"Unable to initialize DB directory for {env_name}: {last_error}") from last_error
+    candidate = Path(env_path) if env_path else fallback
+    try:
+        resolved = candidate.expanduser().resolve()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
+    except OSError as exc:
+        source = "configured" if env_path else "default"
+        raise RuntimeError(
+            f"Unable to initialize {source} database path for {env_name}: {candidate}: {exc}"
+        ) from exc
 
 
 DB_PATH = _resolve_db_path("JOBS_DB_PATH", DEFAULT_DB)
@@ -78,8 +74,23 @@ RUN_STORE_DB_PATH = _resolve_db_path("RUN_STORE_DB_PATH", Path(DB_PATH))
 API_TOKEN = os.getenv("API_TOKEN", "")
 MAX_LOG_BYTES = _as_int_env("MAX_LOG_BYTES", 30000)  # Avoid sending huge logs to the frontend
 AUTO_COLLECTION_INTERVAL_HOURS = max(0.0, _as_float_env("AUTO_COLLECTION_INTERVAL_HOURS", 0.0))
+APP_INSTANCE_NAME = os.getenv("APP_INSTANCE_NAME", "job-informer-local").strip() or "job-informer-local"
 
 FRONTEND_DIST_DIR = ROOT / "frontend" / "dist"
+REQUIRED_DB_TABLES = frozenset(
+    {
+        "filter_decisions",
+        "fit_profiles",
+        "job_annotations",
+        "job_fit_scores",
+        "job_observations",
+        "jobs",
+        "llm_attempts",
+        "parse_job_states",
+        "parsed_descriptions",
+        "scrape_runs",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,7 @@ class AppSettings:
     max_log_bytes: int
     frontend_dist_dir: Path
     auto_collection_interval_hours: float = 0.0
+    instance_name: str = "job-informer-local"
 
 
 APP_SETTINGS = AppSettings(
@@ -99,6 +111,7 @@ APP_SETTINGS = AppSettings(
     max_log_bytes=MAX_LOG_BYTES,
     frontend_dist_dir=FRONTEND_DIST_DIR,
     auto_collection_interval_hours=AUTO_COLLECTION_INTERVAL_HOURS,
+    instance_name=APP_INSTANCE_NAME,
 )
 
 
@@ -108,11 +121,73 @@ def open_jobs_db() -> Iterator[sqlite3.Connection]:
         yield conn
 
 
+def database_readiness(
+    db_path: str | Path | None = None,
+    *,
+    instance_name: str | None = None,
+) -> dict[str, Any]:
+    """Return database identity and schema diagnostics without mutating schema."""
+    resolved_path = Path(db_path or APP_SETTINGS.db_path).expanduser().resolve()
+    result: dict[str, Any] = {
+        "status": "not_ready",
+        "instance_name": instance_name or APP_SETTINGS.instance_name,
+        "db_path": str(resolved_path),
+        "schema_ok": False,
+        "missing_tables": sorted(REQUIRED_DB_TABLES),
+        "total_jobs": 0,
+        "active_jobs": 0,
+        "db_size_bytes": resolved_path.stat().st_size if resolved_path.is_file() else 0,
+        "db_modified_at": (
+            datetime.fromtimestamp(resolved_path.stat().st_mtime, tz=UTC).isoformat()
+            if resolved_path.is_file()
+            else None
+        ),
+    }
+    if not resolved_path.is_file():
+        result["error"] = "Database file does not exist."
+        return result
+    try:
+        with open_sqlite(resolved_path, row_factory=sqlite3.Row) as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            missing_tables = sorted(REQUIRED_DB_TABLES - tables)
+            result["missing_tables"] = missing_tables
+            result["schema_ok"] = not missing_tables
+            if "jobs" in tables:
+                counts = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_jobs,
+                        SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END) AS active_jobs
+                    FROM jobs
+                    """
+                ).fetchone()
+                result["total_jobs"] = int(counts["total_jobs"] or 0)
+                result["active_jobs"] = int(counts["active_jobs"] or 0)
+            if result["schema_ok"]:
+                result["status"] = "ready"
+    except (OSError, sqlite3.Error) as exc:
+        result["error"] = str(exc)
+    return result
+
+
 @asynccontextmanager
 async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     global job_db, run_store, scheduler_task
     job_db = JobDatabase(APP_SETTINGS.db_path)
     run_store = RunStore(APP_SETTINGS.run_store_db_path)
+    readiness = database_readiness()
+    logger.info(
+        "Database {} at {}: {} total jobs, {} active jobs",
+        readiness["status"],
+        readiness["db_path"],
+        readiness["total_jobs"],
+        readiness["active_jobs"],
+    )
     run_store.interrupt_unfinished()
     scheduler_task = None
     if APP_SETTINGS.auto_collection_interval_hours > 0:
@@ -151,8 +226,16 @@ app.add_middleware(
 def health_check() -> dict:
     return {
         "status": "ok",
-        "db_path": APP_SETTINGS.db_path,
+        "instance_name": APP_SETTINGS.instance_name,
     }
+
+
+@app.get("/ready")
+def readiness_check(response: Response) -> dict:
+    readiness = database_readiness()
+    if readiness["status"] != "ready":
+        response.status_code = 503
+    return readiness
 
 job_db: Optional[JobDatabase] = None
 run_store: Optional["RunStore"] = None
@@ -1087,6 +1170,7 @@ def job_stats(_: bool = Depends(require_token)) -> dict:
             "interval_hours": APP_SETTINGS.auto_collection_interval_hours,
             "last_successful_run_at": latest_success.get("finished_at") if latest_success else None,
         }
+        summary["database"] = database_readiness()
         return summary
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to build stats: {exc}") from exc

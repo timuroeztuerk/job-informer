@@ -27,19 +27,20 @@ ENV PYTHONUNBUFFERED=1 \
     JOBS_DB_PATH=/app/data/jobs.db
 
 # Install dependencies
-COPY --chown=app:app backend/requirements.txt .
+COPY --chown=app:app backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r /app/backend/requirements.txt
 
-# Copy application code
-COPY --chown=app:app backend .
+# Preserve the backend package layout used by local execution and tests.
+COPY --chown=app:app backend /app/backend
 # Copy frontend build output
-COPY --chown=app:app --from=frontend-build /frontend/dist /app/frontend/dist
+COPY --chown=app:app --from=frontend-build /frontend/dist /app/backend/frontend/dist
 
-RUN mkdir -p /app/data /app/logs
+RUN mkdir -p /app/data /app/backend/logs \
+    && chown -R app:app /app/data /app/backend/logs
 
 USER app
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -56,7 +56,6 @@ class LLMConnection:
         *,
         system: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 2048,
     ):
         if response_model is None:
             raise ValueError("response_model is required for the compatibility wrapper.")
@@ -64,7 +63,6 @@ class LLMConnection:
             response_model=response_model,
             input=prompt,
             instructions=system,
-            max_output_tokens=max_tokens,
             temperature=temperature,
         )
         return result.parsed

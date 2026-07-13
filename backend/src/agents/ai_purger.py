@@ -21,7 +21,7 @@ class JobEntry:
 class AIPurgeCandidate(BaseModel):
     """Single structured AI purge decision."""
     id: str
-    reason: str = Field(default="No reason provided")
+    reason: str = Field(default="No reason provided", max_length=160)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     purge: bool = Field(default=True)
 
@@ -30,7 +30,7 @@ class AIPurger_JSON_CLASS(BaseModel):
     """Structured response model for AI purger."""
     purge_candidates: List[AIPurgeCandidate] = Field(default_factory=list)
     job_ids_to_purge: List[str] = Field(default_factory=list)
-    notes: str = Field(default="")
+    notes: str = Field(default="", max_length=240)
 
 class AIPurger:
     """
@@ -60,7 +60,6 @@ class AIPurger:
         self.process_all = process_all  # If True, processes all jobs; if False, processes only default batch size
         self.db = db or JobDatabase()
         self.parser = DescriptionTools(config=self.config, db=self.db)
-        self.parser._ensure_table()
         purge_model = getattr(self.config, 'openai_model', 'gpt-5-mini')
         purge_api_key = getattr(self.config, 'openai_api_key', '').strip() or None
         self.llm = llm_client or OpenAIResponsesClient(
@@ -102,6 +101,8 @@ class AIPurger:
           "notes": "Optional short note"
         }
         Use the same ID format, and include both a reason and confidence for each candidate.
+        Return candidates only for jobs that should be purged. Keep each reason to 12 words or fewer
+        and keep notes to one short sentence.
         """
         self.json_structure = AIPurger_JSON_CLASS
 
@@ -316,7 +317,6 @@ class AIPurger:
                     response_model=AIPurger_JSON_CLASS,
                     input=f"JOBS DATA:\n{json.dumps(jobs_data, ensure_ascii=False, indent=2)}",
                     instructions=self.purge_prompt.strip(),
-                    max_output_tokens=1024,
                 )
                 telemetry = result.telemetry
                 self.db.record_llm_attempt(
