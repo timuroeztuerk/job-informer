@@ -26,6 +26,8 @@ STUDY_ROLE_PATTERNS = [
     r"\bhiwi\b",
 ]
 
+SUBSTRING_KEYWORDS = {"entwickl", "informatik"}
+
 
 def normalize_text(text: str) -> str:
     """Normalize text for consistent matching (handles unicode, case, whitespace)."""
@@ -50,7 +52,10 @@ def match_keyword_filter(title: str, unwanted_keywords: List[str]) -> Optional[s
         if not keyword_clean:
             continue
 
-        if ' ' in keyword_clean:
+        if keyword_clean in SUBSTRING_KEYWORDS:
+            if keyword_clean in title_normalized:
+                return keyword_clean
+        elif ' ' in keyword_clean:
             if keyword_clean in title_normalized:
                 return keyword_clean
         else:

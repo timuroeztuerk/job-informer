@@ -29,6 +29,7 @@ from src.agents.ai_purger import AIPurger
 from src.utils.logging_utils import setup_logging
 from src.utils.database import JobDatabase
 from src.utils.db_summary import build_db_summary
+from src.utils.run_progress import update_api_run_progress
 
 def create_data_directory():
     """Create data directory if it doesn't exist"""
@@ -190,11 +191,22 @@ def main():
             sys.exit(1)
             
     except Exception as e:
+        update_api_run_progress(
+            stage="failed",
+            label="Run stopped with an error",
+            event=f"Run failed: {e}",
+            event_level="error",
+        )
         logger.error(f"Application error: {e}")
         sys.exit(1)
 
 def run_job_search_once(config: Config):
     """Run the Job Scraper"""
+    update_api_run_progress(
+        stage="preparing",
+        label="Preparing collection settings",
+        event="Collection settings loaded",
+    )
     scraper = JobScraper(config)
     summary = scraper.get_search_summary()
     keywords_str = ', '.join(summary['keywords'])
@@ -205,10 +217,30 @@ def run_job_search_once(config: Config):
     
     success = scraper.execute_job_search()
     if success:
+        update_api_run_progress(
+            stage="completed",
+            label="Collection completed",
+            event="Collection completed",
+        )
         logger.success("=== Job Search Done ===")
+    elif getattr(scraper, "last_run_failed", False):
+        logger.error("=== Job Search Failed ===")
+        sys.exit(1)
     elif getattr(scraper, 'last_run_threshold_hit', False):
+        update_api_run_progress(
+            stage="completed",
+            label="Collection completed without enough new jobs",
+            event="Collection completed below the new-job threshold",
+            event_level="warning",
+        )
         logger.warning("=== Job Search skipped: below MIN_NEW_JOBS_TO_CONTINUE threshold ===")
     else:
+        update_api_run_progress(
+            stage="completed",
+            label="Collection completed without eligible results",
+            event="Collection completed without eligible results",
+            event_level="warning",
+        )
         logger.warning("=== No Jobs Found ===")
 
 def run_all_tests(config: Config):

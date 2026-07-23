@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { fetchDbSummary } from "../api";
+import { fetchDbSummary, getApiErrorMessage } from "../api";
 import type { CountStat, DbSummary, TrendDelta } from "../types";
 import { replaceSearchParams } from "../urlState";
 
@@ -202,7 +202,7 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className, onOpenDashboard })
       const data = await fetchDbSummary();
       setSummary(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load summary.");
+      setError(getApiErrorMessage(err, "Could not load intelligence from the API."));
     } finally {
       setLoading(false);
     }
@@ -277,38 +277,38 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className, onOpenDashboard })
           </div>
         </div>
 
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" role="alert">{error}</div>}
         {!error && loading && !summary && <div className="muted">Loading intelligence...</div>}
       </section>
 
-      {summary && (
-        <section
-          className={`collection-freshness ${freshness?.status || "empty"}`}
-          role={freshness?.status === "stale" ? "alert" : "status"}
-        >
-          <div>
-            <p className="label">Collection freshness</p>
-            <h3>
-              {freshness?.status === "fresh" && "Collection is current"}
-              {freshness?.status === "aging" && "Collection is getting old"}
-              {freshness?.status === "stale" && "Collection is stale"}
-              {(!freshness || freshness.status === "empty") && "No collected observations yet"}
-            </h3>
-            <p className="small">
-              {freshness?.last_collected_at
-                ? `Latest actual observation: ${formatDate(freshness.last_collected_at, true)} (${formatAge(freshness.age_days)}).`
-                : "Run a collection before treating market signals as current."}
-              {freshness?.status === "stale" && " Current trend windows stay anchored to today, so the archive cannot masquerade as live activity."}
-            </p>
-          </div>
-          <div className="freshness-meta">
-            <span className={`freshness-state ${freshness?.status || "empty"}`}>{freshness?.status || "empty"}</span>
-            {freshness?.latest_scrape_at && (
-              <span className="muted tiny">Latest scrape started {formatDate(freshness.latest_scrape_at, true)}</span>
-            )}
-          </div>
-        </section>
-      )}
+      {!summary ? null : (
+        <>
+          <section
+            className={`collection-freshness ${freshness?.status || "empty"}`}
+            role={freshness?.status === "stale" ? "alert" : "status"}
+          >
+            <div>
+              <p className="label">Collection freshness</p>
+              <h3>
+                {freshness?.status === "fresh" && "Collection is current"}
+                {freshness?.status === "aging" && "Collection is getting old"}
+                {freshness?.status === "stale" && "Collection is stale"}
+                {(!freshness || freshness.status === "empty") && "No collected observations yet"}
+              </h3>
+              <p className="small">
+                {freshness?.last_collected_at
+                  ? `Latest actual observation: ${formatDate(freshness.last_collected_at, true)} (${formatAge(freshness.age_days)}).`
+                  : "Run a collection before treating market signals as current."}
+                {freshness?.status === "stale" && " Current trend windows stay anchored to today, so the archive cannot masquerade as live activity."}
+              </p>
+            </div>
+            <div className="freshness-meta">
+              <span className={`freshness-state ${freshness?.status || "empty"}`}>{freshness?.status || "empty"}</span>
+              {freshness?.latest_scrape_at && (
+                <span className="muted tiny">Latest scrape started {formatDate(freshness.latest_scrape_at, true)}</span>
+              )}
+            </div>
+          </section>
 
       <section className="panel intelligence-section">
         <div className="section-head">
@@ -673,6 +673,8 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className, onOpenDashboard })
           )}
         </section>
       </section>
+        </>
+      )}
     </div>
   );
 };

@@ -23,6 +23,7 @@ from ..utils.database import JobDatabase
 from ..utils.data_utils import build_job_ids, build_normalized_keys, normalize_job_url, remove_historical_duplicates
 from ..utils.time_utils import utc_now, utc_now_iso
 from ..utils.terminal_utils import _sleep_with_feedback, _print_progress, _progress_bar, _sleep_quiet
+from ..utils.run_progress import update_api_run_progress
 from ..utils.filtering import (
     match_company_filter,
     match_keyword_filter,
@@ -44,6 +45,23 @@ TIME_RANGE_TO_DAYS = {
     "week": 7,
     "month": 30,
 }
+
+
+def _collection_progress_metrics(
+    observed: int,
+    *,
+    new: int = 0,
+    archived: int = 0,
+    descriptions_fetched: int = 0,
+    parsed: int = 0,
+) -> dict[str, int]:
+    return {
+        "observed": observed,
+        "new": new,
+        "archived": archived,
+        "descriptions_fetched": descriptions_fetched,
+        "parsed": parsed,
+    }
 
 
 @dataclass
@@ -1383,6 +1401,25 @@ class JobScraper:
         """
         all_jobs: List[Dict] = []
         stop_collecting = False
+        enabled_source_count = int(bool(self.config.enable_linkedin)) + int(bool(self.config.enable_indeed))
+        total_sources = len(keywords) * len(locations) * enabled_source_count
+        completed_sources = 0
+
+        if total_sources:
+            update_api_run_progress(
+                stage="collecting",
+                label="Searching configured sources",
+                completed_sources=completed_sources,
+                total_sources=total_sources,
+                event="Starting source collection",
+            )
+        else:
+            update_api_run_progress(
+                stage="collecting",
+                label="No collection sources are enabled",
+                event="No collection sources are enabled",
+                event_level="warning",
+            )
 
         for keyword in keywords:
             if stop_collecting:
@@ -1392,9 +1429,21 @@ class JobScraper:
                 time.sleep(self.config.request_delay)
 
                 if self.config.enable_linkedin:
+                    source_label = f"LinkedIn · {keyword} in {location}"
+                    update_api_run_progress(
+                        stage="collecting",
+                        label="Searching configured sources",
+                        current_source=source_label,
+                        completed_sources=completed_sources,
+                        total_sources=total_sources,
+                        metrics=_collection_progress_metrics(len(all_jobs)),
+                        event=f"Searching {source_label}",
+                    )
                     linkedin_jobs = self.scrape_linkedin(keyword, location)
                     if limit_per_source is not None and limit_per_source > 0:
                         linkedin_jobs = linkedin_jobs[:limit_per_source]
+
+                    completed_sources += 1
 
                     if self.max_total_jobs:
                         remaining_slots = self.max_total_jobs - len(all_jobs)
@@ -1405,6 +1454,14 @@ class JobScraper:
                             linkedin_jobs = linkedin_jobs[:remaining_slots]
                             stop_collecting = True
                     all_jobs.extend(linkedin_jobs)
+                    update_api_run_progress(
+                        stage="collecting",
+                        label="Searching configured sources",
+                        current_source=source_label,
+                        completed_sources=completed_sources,
+                        total_sources=total_sources,
+                        metrics=_collection_progress_metrics(len(all_jobs)),
+                    )
                     if self.max_total_jobs and len(all_jobs) >= self.max_total_jobs:
                         stop_collecting = True
                         logger.debug(
@@ -1414,9 +1471,21 @@ class JobScraper:
                         break
 
                 if self.config.enable_indeed:
+                    source_label = f"Indeed · {keyword} in {location}"
+                    update_api_run_progress(
+                        stage="collecting",
+                        label="Searching configured sources",
+                        current_source=source_label,
+                        completed_sources=completed_sources,
+                        total_sources=total_sources,
+                        metrics=_collection_progress_metrics(len(all_jobs)),
+                        event=f"Searching {source_label}",
+                    )
                     indeed_jobs = self.scrape_indeed(keyword, location)
                     if limit_per_source is not None and limit_per_source > 0:
                         indeed_jobs = indeed_jobs[:limit_per_source]
+
+                    completed_sources += 1
 
                     if self.max_total_jobs:
                         remaining_slots = self.max_total_jobs - len(all_jobs)
@@ -1427,6 +1496,14 @@ class JobScraper:
                             indeed_jobs = indeed_jobs[:remaining_slots]
                             stop_collecting = True
                     all_jobs.extend(indeed_jobs)
+                    update_api_run_progress(
+                        stage="collecting",
+                        label="Searching configured sources",
+                        current_source=source_label,
+                        completed_sources=completed_sources,
+                        total_sources=total_sources,
+                        metrics=_collection_progress_metrics(len(all_jobs)),
+                    )
                     if self.max_total_jobs and len(all_jobs) >= self.max_total_jobs:
                         stop_collecting = True
                         logger.debug(
@@ -1449,6 +1526,16 @@ class JobScraper:
             df = df.drop_duplicates(subset=['job_id'], keep='first')
         else:
             logger.warning("No jobs found")
+
+        update_api_run_progress(
+            stage="storing",
+            label=f"Preparing {len(df)} observed jobs for storage",
+            current_source="",
+            completed_sources=completed_sources,
+            total_sources=total_sources,
+            metrics=_collection_progress_metrics(len(df)),
+            event=f"Source collection finished with {len(df)} observed jobs",
+        )
             
         return df
     
@@ -1547,10 +1634,23 @@ class JobScraper:
         from ..agents.email_sender import EmailSender
 
         self.last_run_threshold_hit = False
+        self.last_run_failed = False
+        progress_metrics = {
+            "observed": 0,
+            "new": 0,
+            "archived": 0,
+            "descriptions_fetched": 0,
+            "parsed": 0,
+        }
 
         try:
             # Run automatic purge before scraping to clean up unwanted jobs (if enabled)
             if getattr(self.config, 'auto_purge_before_scraping', True):
+                update_api_run_progress(
+                    stage="cleaning",
+                    label="Cleaning previously collected jobs",
+                    event="Starting automatic database cleanup",
+                )
                 logger.info("Running automatic database cleanup before scraping...")
                 try:
                     purge_success = self.purge_unwanted_jobs()
@@ -1572,8 +1672,16 @@ class JobScraper:
             if not locations:
                 raise ValueError("No valid search locations configured. Set SEARCH_LOCATIONS in .env or pass --locations.")
             jobs_df = self.scrape(keywords, locations)
+            progress_metrics["observed"] = len(jobs_df)
 
             if jobs_df.empty:
+                update_api_run_progress(
+                    stage="finalizing",
+                    label="Finalizing collection with no observed jobs",
+                    metrics=progress_metrics,
+                    event="No jobs were observed during collection",
+                    event_level="warning",
+                )
                 logger.warning("No jobs found in this search.")
                 return False
 
@@ -1586,6 +1694,12 @@ class JobScraper:
                 active_jobs_df = active_jobs_df.head(self.max_total_jobs)
 
             # Store jobs in SQLite database (fast deduplication)
+            update_api_run_progress(
+                stage="storing",
+                label=f"Recording {len(jobs_df)} observed jobs",
+                metrics=progress_metrics,
+                event=f"Recording {len(jobs_df)} observed jobs",
+            )
             run_observed_at = utc_now_iso()
             scrape_run_id = self.db.start_scrape_run(
                 mode="run-once",
@@ -1605,6 +1719,7 @@ class JobScraper:
                     default_reason="Archived by scrape-time rule filter",
                 )
                 archived_count = int(archive_summary.get("archived", 0) or 0)
+                progress_metrics["archived"] = archived_count
                 logger.info(
                     "Archived {} filtered jobs from this scrape and recorded {} filter decisions",
                     archived_count,
@@ -1635,6 +1750,12 @@ class JobScraper:
                     "Draining description backlog with batch_size={} until no missing descriptions remain",
                     fetch_batch_size,
                 )
+                update_api_run_progress(
+                    stage="enriching",
+                    label="Fetching missing job descriptions",
+                    metrics=progress_metrics,
+                    event="Fetching missing job descriptions",
+                )
                 backfill_success = desc.backfill_missing_descriptions(
                     self,
                     batch_size=fetch_batch_size,
@@ -1650,12 +1771,20 @@ class JobScraper:
                         ).fetchone()[0]
                     )
                 descriptions_fetched_count = max(0, descriptions_after - descriptions_before)
+                progress_metrics["descriptions_fetched"] = descriptions_fetched_count
 
                 if bool(getattr(self.config, 'enable_description_parser', False)) and getattr(self.config, 'openai_api_key', '').strip():
+                    update_api_run_progress(
+                        stage="parsing",
+                        label="Parsing fetched job descriptions",
+                        metrics=progress_metrics,
+                        event="Parsing fetched job descriptions",
+                    )
                     parse_success = desc.run_description_parser()
                     if not parse_success:
                         logger.warning("Description parser encountered issues during this scrape run")
                     parsed_jobs_count = max(0, self.db.get_parsed_count() - parsed_before)
+                    progress_metrics["parsed"] = parsed_jobs_count
 
                 self.db.finish_scrape_run(
                     scrape_run_id,
@@ -1678,13 +1807,28 @@ class JobScraper:
                         (scrape_run_id,),
                     ).fetchone()[0]
                 )
+            progress_metrics["new"] = active_new_jobs_count
 
             if active_jobs_df.empty:
+                update_api_run_progress(
+                    stage="finalizing",
+                    label="Finalizing collection with no eligible jobs",
+                    metrics=progress_metrics,
+                    event="All observed jobs were archived by filters",
+                    event_level="warning",
+                )
                 logger.warning("All scraped jobs were archived by filter criteria")
                 return False
 
             if self.min_new_jobs_to_continue and active_new_jobs_count < self.min_new_jobs_to_continue:
                 self.last_run_threshold_hit = True
+                update_api_run_progress(
+                    stage="finalizing",
+                    label="Finalizing collection below the new-job threshold",
+                    metrics=progress_metrics,
+                    event="Collection is below the configured new-job threshold",
+                    event_level="warning",
+                )
                 logger.info(
                     "Found {} new jobs, below MIN_NEW_JOBS_TO_CONTINUE={}; skipping further processing",
                     active_new_jobs_count,
@@ -1693,6 +1837,12 @@ class JobScraper:
                 return False
 
             # Save CSV for backup/auditing unless dry-run
+            update_api_run_progress(
+                stage="finalizing",
+                label="Finalizing collection results",
+                metrics=progress_metrics,
+                event="Finalizing collection results",
+            )
             csv_filename = None
             if not self.config.dry_run:
                 csv_filename = self.save_jobs_to_csv(active_jobs_df)
@@ -1711,6 +1861,14 @@ class JobScraper:
             return True
 
         except Exception as e:
+            self.last_run_failed = True
+            update_api_run_progress(
+                stage="failed",
+                label="Collection stopped with an error",
+                metrics=progress_metrics,
+                event=f"Collection failed: {e}",
+                event_level="error",
+            )
             logger.error(f"Error in job search: {e}")
             # Send error notification
             try:

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import json
+import re
 from datetime import UTC, datetime
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -9,6 +10,9 @@ from ..config.settings import Config
 from ..utils.database import JobDatabase
 from ..utils.openai_responses_client import OpenAIResponsesClient
 from .parser import DescriptionTools
+
+
+ENGINEERING_TITLE_PATTERN = re.compile(r"\bengineer(?:ing)?\b", re.IGNORECASE)
 
 @dataclass
 class JobEntry:
@@ -80,10 +84,11 @@ class AIPurger:
         
         IMPORTANT: Be conservative and only purge jobs that are clearly irrelevant or low-quality.
         Looking at the job titles and companies, you should purge jobs that are:
-        - Clearly IRRELEVANT to data science, data analysis, machine learning, AI, analytics engineering, data/platform engineering, or adjacent technical roles (e.g. sales, retail, manual labor, nursing, accounting, field service).
+        - Any role whose title contains "engineer" or "engineering", including software engineer, data engineer, AI engineer, ML engineer, platform engineer, engineering manager, and engineering lead. This is an explicit purge policy, even when the role is technically adjacent to data or AI.
+        - Clearly IRRELEVANT to data science, data analysis, machine learning, AI, analytics, or adjacent technical roles (e.g. sales, retail, manual labor, nursing, accounting, field service).
         - Study-track or internship-style roles such as internships, working-student jobs, thesis roles, apprenticeships, doctoral student roles, and similar student positions.
         - Obviously spam, duplicate, or very low-quality postings.
-        - Keep adjacent technical roles if they are plausibly relevant to data/AI work. Do NOT purge a role just because it is software engineering, platform, backend, full stack, DevOps, or MLOps-adjacent.
+        - Keep adjacent non-engineering technical roles if they are plausibly relevant to data/AI work.
         - AI consultant jobs can stay, if they are not duplicate.
         
         Each job listing will be labeled with a short numeric ID (e.g., "1", "2").
@@ -105,6 +110,37 @@ class AIPurger:
         and keep notes to one short sentence.
         """
         self.json_structure = AIPurger_JSON_CLASS
+
+    @staticmethod
+    def _is_engineering_title(title: str) -> bool:
+        """Return whether a job title explicitly describes an engineering role."""
+        return bool(ENGINEERING_TITLE_PATTERN.search(str(title or "")))
+
+    def _build_engineering_policy_decisions(self, jobs: List[JobEntry]) -> List[Dict[str, Any]]:
+        """Build strict title-based purge decisions for engineering roles."""
+        decisions: List[Dict[str, Any]] = []
+        for job in jobs:
+            if not self._is_engineering_title(job.title):
+                continue
+            decisions.append(
+                {
+                    "job_id": job.id,
+                    "id": job.id,
+                    "reason": "Archived by AI purge policy: engineering role",
+                    "confidence": 1.0,
+                    "purge": True,
+                    "decision_source": "ai",
+                    "decision_action": "archive",
+                    "filter_name": "ai_engineering_title",
+                    "matched_value": "engineer/engineering",
+                    "details": {
+                        "title": job.title,
+                        "company": job.company,
+                        "policy": "engineering_title",
+                    },
+                }
+            )
+        return decisions
 
     def _extract_id(self, value: Any) -> str:
         """Extract a stable string id from dict/object/string values."""
@@ -266,11 +302,21 @@ class AIPurger:
             logger.error(f"Database error: {e}")
             return None
         
+        # Engineering titles are an explicit purge policy. Keep these decisions
+        # outside the LLM batches so the policy is deterministic and cannot be
+        # dropped by an LLM refusal or by the conservative global AI cap.
+        engineering_decisions = self._build_engineering_policy_decisions(jobs)
+        engineering_job_ids = [decision["job_id"] for decision in engineering_decisions]
+        if engineering_job_ids:
+            self._mark_jobs_as_analyzed(engineering_job_ids)
+
+        llm_jobs = [job for job in jobs if not self._is_engineering_title(job.title)]
+
         # Split into batches and process
-        all_purge_ids = []
-        all_decisions: List[Dict[str, Any]] = []
+        all_purge_ids = [decision["job_id"] for decision in engineering_decisions]
+        all_decisions: List[Dict[str, Any]] = list(engineering_decisions)
         batch_size = self.batch_size
-        batches = [jobs[i:i + batch_size] for i in range(0, len(jobs), batch_size)]
+        batches = [llm_jobs[i:i + batch_size] for i in range(0, len(llm_jobs), batch_size)]
         
         # Limit to first batch if not processing all and not in test mode
         if not self.process_all and not self.test_mode and len(batches) > 1:
@@ -396,25 +442,32 @@ class AIPurger:
                 continue
 
         # Apply conservative global caps after all batches have been analyzed
-        if (self.max_jobs > 0 or self.max_ratio > 0.0) and all_decisions:
-            all_decisions.sort(key=lambda item: item.get("confidence", 0.0), reverse=True)
+        # The explicit engineering policy is not capped: every matching title
+        # must be archived. Apply the normal caps only to LLM-generated choices.
+        model_decisions = [
+            item for item in all_decisions
+            if item.get("filter_name") != "ai_engineering_title"
+        ]
+        if (self.max_jobs > 0 or self.max_ratio > 0.0) and model_decisions:
+            model_decisions.sort(key=lambda item: item.get("confidence", 0.0), reverse=True)
             cap_by_ratio = 0
-            if self.max_ratio > 0 and jobs:
-                cap_by_ratio = max(1, int(len(jobs) * self.max_ratio))
-            cap = cap_by_ratio if cap_by_ratio > 0 else len(all_decisions)
-            cap = min(cap, len(all_decisions))
+            if self.max_ratio > 0 and llm_jobs:
+                cap_by_ratio = max(1, int(len(llm_jobs) * self.max_ratio))
+            cap = cap_by_ratio if cap_by_ratio > 0 else len(model_decisions)
+            cap = min(cap, len(model_decisions))
             if self.max_jobs > 0:
                 cap = min(cap, self.max_jobs)
-            if cap < len(all_decisions):
-                dropped = len(all_decisions) - cap
+            if cap < len(model_decisions):
+                dropped = len(model_decisions) - cap
                 logger.warning(
                     "AI purge cap applied: keeping top {} of {} candidates (dropped {}).",
                     cap,
-                    len(all_decisions),
+                    len(model_decisions),
                     dropped,
                 )
-                all_decisions = all_decisions[:cap]
-                all_purge_ids = [item["job_id"] for item in all_decisions]
+                model_decisions = model_decisions[:cap]
+            all_decisions = engineering_decisions + model_decisions
+            all_purge_ids = [item["job_id"] for item in all_decisions]
         
         return {
             "job_ids_to_purge": all_purge_ids,

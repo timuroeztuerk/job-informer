@@ -825,6 +825,48 @@ class TestDescriptionParserResponses(unittest.TestCase):
 class TestAIPurgerResponses(unittest.TestCase):
     """Tests for purge decisions and telemetry via the shared Responses client."""
 
+    def test_engineering_titles_are_always_purge_candidates(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(db_path=os.path.join(tmp_dir, "jobs.db"))
+            db.put_into_sql(
+                pd.DataFrame(
+                    [
+                        {
+                            "job_id": "linkedin:purge-engineer",
+                            "title": "AI Engineer",
+                            "company": "ACME AI",
+                            "location": "Berlin",
+                            "source": "LinkedIn",
+                            "url": "https://www.linkedin.com/jobs/view/purge-engineer/",
+                            "salary": "Not specified",
+                            "description": "",
+                        }
+                    ]
+                ),
+                observed_at="2026-04-04T09:00:00",
+            )
+            client = _SequenceStructuredClient([])
+            purger = AIPurger(
+                config=_make_test_config(),
+                db=db,
+                llm_client=client,
+                process_all=True,
+            )
+
+            result = purger.run_purge_mode()
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["jobs_to_purge"], 1)
+            self.assertEqual(result["jobs_archived"], 1)
+            self.assertEqual(client.calls, [])
+            with db._get_connection() as conn:  # noqa: SLF001
+                row = conn.execute(
+                    "SELECT archived_at, archived_reason FROM jobs WHERE job_id = ?",
+                    ("linkedin:purge-engineer",),
+                ).fetchone()
+            self.assertIsNotNone(row[0])
+            self.assertIn("engineering role", row[1])
+
     def test_prepare_records_purge_llm_attempts(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             db = JobDatabase(db_path=os.path.join(tmp_dir, "jobs.db"))

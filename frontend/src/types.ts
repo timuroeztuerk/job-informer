@@ -96,6 +96,7 @@ export interface RunStatus {
   trigger?: "manual" | "scheduled";
   pid?: number | null;
   metrics?: RunMetrics | null;
+  progress?: RunProgress | null;
 }
 
 export interface RunMetrics {
@@ -104,6 +105,23 @@ export interface RunMetrics {
   archived: number;
   descriptions_fetched: number;
   parsed: number;
+}
+
+export interface RunProgressEvent {
+  at: string;
+  level: "info" | "warning" | "error";
+  message: string;
+}
+
+export interface RunProgress {
+  stage: string;
+  label: string;
+  current_source?: string | null;
+  completed_sources?: number | null;
+  total_sources?: number | null;
+  metrics?: RunMetrics | null;
+  updated_at: string;
+  events: RunProgressEvent[];
 }
 
 export interface RunRequest {
@@ -126,6 +144,7 @@ export interface RunSummary {
   trigger?: "manual" | "scheduled";
   pid?: number | null;
   metrics?: RunMetrics | null;
+  progress?: RunProgress | null;
 }
 
 export interface JobStats {

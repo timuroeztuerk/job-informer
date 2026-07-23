@@ -20,7 +20,9 @@ DEFAULT_UNWANTED_KEYWORDS = (
     "intern,internship,praktikant,praktikum,werkstudent,working student,"
     "student assistant,student helper,studentenjob,thesis,masterarbeit,masterthesis,"
     "bachelorarbeit,bachelorthesis,dissertation,doctoral,phd student,trainee,traineeship,"
-    "ausbildung,duales studium,research assistant,hiwi"
+    "ausbildung,duales studium,research assistant,hiwi,engineer,engineering,"
+    "fachkraft,fachinformatiker,research,postdoctoral,software,entwickl,"
+    "projektleiter,informatik,backend,frontend"
 )
 
 

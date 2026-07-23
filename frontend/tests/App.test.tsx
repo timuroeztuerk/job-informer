@@ -7,11 +7,16 @@ import type { JobStats } from "../src/types";
 vi.mock("../src/api", () => ({
   API_BASE: "/",
   fetchStats: vi.fn(),
+  getApiErrorMessage: (_error: unknown, fallback: string) => `${fallback} Check VITE_API_BASE.`,
 }));
 vi.mock("../src/components/JobDetail", () => ({ default: () => null }));
 vi.mock("../src/components/JobTable", () => ({ default: () => null }));
 vi.mock("../src/components/RecentRuns", () => ({ default: () => null }));
-vi.mock("../src/components/RunPane", () => ({ default: () => null }));
+vi.mock("../src/components/ReviewHome", () => ({ default: () => null }));
+vi.mock("../src/components/RunPane", async () => {
+  const React = await import("react");
+  return { default: React.forwardRef(() => null) };
+});
 vi.mock("../src/components/SummaryPage", () => ({ default: () => null }));
 
 const emptyStats: JobStats = {
@@ -44,5 +49,18 @@ describe("database diagnostics", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Connected to an empty database");
     expect(screen.getByRole("alert")).toHaveTextContent("job-informer-desktop");
     expect(screen.getByRole("alert")).toHaveTextContent("/app/data/jobs.db");
+    await screen.findByText("API / · connected");
+    expect(screen.getByRole("status")).toHaveTextContent("API / · connected");
+  });
+
+  it("marks the API as disconnected and offers a retry when stats cannot load", async () => {
+    vi.mocked(fetchStats).mockRejectedValue(new TypeError("Failed to fetch"));
+
+    render(<App />);
+
+    await screen.findByText("API / · disconnected");
+    expect(screen.getByRole("status")).toHaveTextContent("API / · disconnected");
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load stats from the API");
+    expect(screen.getByRole("button", { name: "Retry connection" })).toBeEnabled();
   });
 });

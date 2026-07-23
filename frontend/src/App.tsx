@@ -2,22 +2,31 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import JobDetail from "./components/JobDetail";
 import JobTable, { JobTableHandle } from "./components/JobTable";
 import RecentRuns from "./components/RecentRuns";
-import RunPane from "./components/RunPane";
+import ReviewHome, { type ReviewHomeDashboardFilters } from "./components/ReviewHome";
+import RunPane, { type RunPaneHandle } from "./components/RunPane";
 import SummaryPage from "./components/SummaryPage";
-import { API_BASE, fetchStats } from "./api";
+import { API_BASE, fetchStats, getApiErrorMessage } from "./api";
 import type { Job, JobStats, RunStatus } from "./types";
 import { readTextParam, replaceSearchParams } from "./urlState";
 
-type ViewMode = "dashboard" | "summary";
+type ViewMode = "review" | "dashboard" | "summary";
+type ApiConnectionStatus = "checking" | "connected" | "disconnected";
 
 const App: React.FC = () => {
   const [stats, setStats] = useState<JobStats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [apiConnectionStatus, setApiConnectionStatus] = useState<ApiConnectionStatus>("checking");
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>(() => (readTextParam("view") === "dashboard" ? "dashboard" : "summary"));
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    const requestedView = readTextParam("view");
+    return requestedView === "dashboard" || requestedView === "summary" ? requestedView : "review";
+  });
   const [dataRefreshToken, setDataRefreshToken] = useState(0);
+  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [activeRun, setActiveRun] = useState<RunStatus | null>(null);
   const [now, setNow] = useState(new Date());
   const tableRef = useRef<JobTableHandle | null>(null);
+  const runPaneRef = useRef<RunPaneHandle | null>(null);
   const completedRunIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
@@ -33,10 +42,12 @@ const App: React.FC = () => {
         if (!cancelled) {
           setStats(data);
           setStatsError(null);
+          setApiConnectionStatus("connected");
         }
       } catch (err) {
         if (!cancelled) {
-          setStatsError("Could not load stats (check API is up and token matches).");
+          setStatsError(getApiErrorMessage(err, "Could not load stats from the API."));
+          setApiConnectionStatus("disconnected");
         }
       }
     };
@@ -84,6 +95,11 @@ const App: React.FC = () => {
     }
     completedRunIdsRef.current.add(run.run_id);
     setDataRefreshToken((token) => token + 1);
+    setActionFeedback(
+      run.status === "succeeded"
+        ? `Run complete${run.metrics ? ` · ${run.metrics.new} new · ${run.metrics.parsed} parsed` : ""}.`
+        : `Run ${run.status}. Open the run details for its latest output.`
+    );
   }, []);
 
   const handleOpenDashboard = useCallback(() => {
@@ -92,6 +108,31 @@ const App: React.FC = () => {
     replaceSearchParams({ archived: "" });
     setViewMode("dashboard");
   }, []);
+
+  const handleOpenReviewDashboard = useCallback((filters: ReviewHomeDashboardFilters = {}) => {
+    replaceSearchParams({
+      search: "",
+      location: "",
+      source: "",
+      company: "",
+      archived: "",
+      status: filters.annotationStatus || "",
+      priority: "",
+      from: filters.dateFrom || "",
+      to: "",
+      sort: filters.sort || "",
+      job: filters.job || "",
+      page: "",
+    });
+    setViewMode("dashboard");
+  }, []);
+
+  const handleCollectFromReview = useCallback(() => {
+    setViewMode("dashboard");
+    runPaneRef.current?.startCollection();
+  }, []);
+
+  const isCollectionRunning = activeRun?.mode === "run-once" && (activeRun.status === "starting" || activeRun.status === "running");
 
   return (
     <div className="page">
@@ -104,18 +145,26 @@ const App: React.FC = () => {
           </div>
         </div>
         <div className="hero-actions">
-          <div className="badge">
-            <span className="dot" />
-            API {API_BASE}
+          <div className="badge" role="status" aria-live="polite">
+            <span className={`dot ${apiConnectionStatus}`} />
+            API {API_BASE} · {apiConnectionStatus}
           </div>
           <div className="view-toggle">
+            <button
+              type="button"
+              className={viewMode === "review" ? "active" : ""}
+              aria-pressed={viewMode === "review"}
+              onClick={() => setViewMode("review")}
+            >
+              Review
+            </button>
             <button
               type="button"
               className={viewMode === "dashboard" ? "active" : ""}
               aria-pressed={viewMode === "dashboard"}
               onClick={() => setViewMode("dashboard")}
             >
-              Dashboard
+              Jobs
             </button>
             <button
               type="button"
@@ -130,10 +179,43 @@ const App: React.FC = () => {
       </header>
 
       {statsError && (
-        <div className="stat warning">
-          <p className="label">Stats</p>
+        <div className="stat warning" role="alert">
+          <p className="label">API connection</p>
           <p className="value">{statsError}</p>
+          <button
+            className="ghost sm"
+            type="button"
+            onClick={() => {
+              setApiConnectionStatus("checking");
+              setDataRefreshToken((token) => token + 1);
+            }}
+          >
+            Retry connection
+          </button>
         </div>
+      )}
+
+      {actionFeedback && (
+        <div className="app-action-feedback" role="status" aria-live="polite">
+          <span>{actionFeedback}</span>
+          <button className="ghost sm" type="button" onClick={() => setActionFeedback(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {isCollectionRunning && viewMode !== "dashboard" && (
+        <section className="collection-live-banner" role="status" aria-live="polite">
+          <div>
+            <p className="label">Collection in progress</p>
+            <p className="small">
+              {activeRun.status === "starting" ? "Preparing the collection run." : "Collecting jobs and refreshing its live output."}
+            </p>
+          </div>
+          <button className="ghost" type="button" onClick={() => setViewMode("dashboard")}>
+            View live progress
+          </button>
+        </section>
       )}
 
       {stats?.database?.total_jobs === 0 && (
@@ -184,7 +266,12 @@ const App: React.FC = () => {
 
       <main className="layout" hidden={viewMode !== "dashboard"}>
         <div className="main">
-          <RunPane className="highlight" onRunCompleted={handleRunCompleted} />
+          <RunPane
+            ref={runPaneRef}
+            className="highlight"
+            onRunCompleted={handleRunCompleted}
+            onRunStatusChange={setActiveRun}
+          />
           {viewMode === "dashboard" && (
             <>
               <div className="jobs">
@@ -199,6 +286,7 @@ const App: React.FC = () => {
                   job={selectedJob}
                   onArchiveChanged={handleArchiveChanged}
                   onAnnotationSaved={handleAnnotationSaved}
+                  onActionFeedback={setActionFeedback}
                 />
               </div>
             </>
@@ -206,6 +294,14 @@ const App: React.FC = () => {
           <RecentRuns refreshToken={dataRefreshToken} />
         </div>
       </main>
+      {viewMode === "review" && (
+        <ReviewHome
+          className="summary-shell"
+          onCollect={handleCollectFromReview}
+          onOpenDashboard={handleOpenReviewDashboard}
+          refreshToken={dataRefreshToken}
+        />
+      )}
       {viewMode === "summary" && (
         <SummaryPage
           key={`summary-${dataRefreshToken}`}

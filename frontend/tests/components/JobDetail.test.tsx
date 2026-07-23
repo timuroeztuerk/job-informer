@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchJob } from "../../src/api";
+import { archiveJob, fetchJob, restoreJob, updateJobAnnotation } from "../../src/api";
 import type { Job, JobAnnotation } from "../../src/types";
 import JobDetail from "../../src/components/JobDetail";
 
@@ -33,7 +33,14 @@ const job: Job = {
 
 describe("annotation draft recovery", () => {
   beforeEach(() => {
+    window.localStorage.clear();
+    vi.mocked(archiveJob).mockReset().mockResolvedValue(undefined);
     vi.mocked(fetchJob).mockReset().mockResolvedValue(job);
+    vi.mocked(restoreJob).mockReset().mockResolvedValue(undefined);
+    vi.mocked(updateJobAnnotation).mockReset().mockImplementation(async (_jobId, annotation) => ({
+      ...annotation,
+      updated_at: "2026-07-13T08:30:00.000Z",
+    }));
   });
 
   it("restores a valid job-specific local draft over the server annotation", async () => {
@@ -67,5 +74,39 @@ describe("annotation draft recovery", () => {
     expect(screen.getByLabelText(/^Skill gaps/)).toHaveValue("Kubernetes, Go, observability");
     expect(screen.getByLabelText("Notes")).toHaveValue("Recovered locally");
     expect(screen.getByLabelText("Resume version")).toHaveValue("platform-v3");
+  });
+
+  it("announces when notes have been saved", async () => {
+    const user = userEvent.setup();
+
+    render(<JobDetail job={job} onArchiveChanged={vi.fn()} onAnnotationSaved={vi.fn()} />);
+    await screen.findByRole("heading", { name: "Platform Engineer" });
+    await user.click(screen.getByText("Personal notes"));
+    await user.type(screen.getByLabelText("Notes"), "Follow up with the hiring manager");
+    await user.click(screen.getByRole("button", { name: "Save notes" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Notes saved.");
+  });
+
+  it("reports archive completion before the selected job is removed", async () => {
+    const user = userEvent.setup();
+    const onArchiveChanged = vi.fn();
+    const onActionFeedback = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(
+      <JobDetail
+        job={job}
+        onArchiveChanged={onArchiveChanged}
+        onAnnotationSaved={vi.fn()}
+        onActionFeedback={onActionFeedback}
+      />
+    );
+    await screen.findByRole("heading", { name: "Platform Engineer" });
+    await user.click(screen.getByRole("button", { name: "Archive" }));
+
+    expect(archiveJob).toHaveBeenCalledWith("job/draft");
+    expect(onActionFeedback).toHaveBeenCalledWith("Job archived.");
+    expect(onArchiveChanged).toHaveBeenCalledWith(true);
   });
 });

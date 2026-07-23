@@ -6,6 +6,7 @@ interface JobDetailProps {
   job: Job | null;
   onArchiveChanged: (clearSelection?: boolean) => void;
   onAnnotationSaved: () => void;
+  onActionFeedback?: (message: string) => void;
 }
 
 interface AnnotationDraft {
@@ -88,7 +89,7 @@ const clearAnnotationDraft = (jobId: string): void => {
   }
 };
 
-const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotationSaved }) => {
+const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotationSaved, onActionFeedback }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [details, setDetails] = useState<Job | null>(null);
@@ -100,6 +101,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
   const [hasDraft, setHasDraft] = useState(false);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
+  const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
   const activeJobIdRef = useRef(job?.job_id || "");
   const mountedRef = useRef(false);
 
@@ -126,6 +128,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
         setHasDraft(false);
         setDraftSavedAt(null);
         setDraftStorageError(null);
+        setSaveFeedback(null);
         setSavingAnnotation(false);
         setArchiveAction(null);
         return;
@@ -139,6 +142,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
       setHasDraft(false);
       setDraftSavedAt(null);
       setDraftStorageError(null);
+      setSaveFeedback(null);
       setSavingAnnotation(false);
       setArchiveAction(null);
       try {
@@ -243,6 +247,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
   };
 
   const updateAnnotationDraft = (updater: (current: JobAnnotation) => JobAnnotation) => {
+    setSaveFeedback(null);
     setAnnotation((current) => {
       const next = updater(current);
       persistDraft(next, skillGapInput);
@@ -251,6 +256,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
   };
 
   const updateSkillGapDraft = (value: string) => {
+    setSaveFeedback(null);
     setSkillGapInput(value);
     persistDraft(annotation, value);
   };
@@ -287,6 +293,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
         setAnnotation(defaultAnnotation);
         setSkillGapInput("");
       }
+      onActionFeedback?.("Job archived.");
       onArchiveChanged(stillSelected);
     } catch (err) {
       if (isTargetActive(targetJobId)) {
@@ -313,6 +320,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
         setAnnotation(defaultAnnotation);
         setSkillGapInput("");
       }
+      onActionFeedback?.("Job restored to the active queue.");
       onArchiveChanged(stillSelected);
     } catch (err) {
       if (isTargetActive(targetJobId)) {
@@ -351,6 +359,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
       setDraftSavedAt(null);
       setDraftStorageError(null);
       setDetails((current) => (current ? { ...current, annotation: saved } : current));
+      setSaveFeedback("Notes saved.");
     } catch (err) {
       if (isTargetActive(targetJobId)) {
         setError(err instanceof Error ? err.message : "Failed to save annotation.");
@@ -561,6 +570,11 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotati
                     Review: {formatAnnotationStatus(annotation.status)} · Priority: {formatLabel(annotation.priority)}
                   </span>
                 </div>
+                {saveFeedback && (
+                  <div className="action-feedback" role="status" aria-live="polite">
+                    {saveFeedback}
+                  </div>
+                )}
               </details>
 
               {parsed && (

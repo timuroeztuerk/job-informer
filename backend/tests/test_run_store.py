@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 import unittest
 from contextlib import contextmanager
@@ -11,6 +12,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from backend.api import RunStore, RunSummary
+from backend.src.utils.run_progress import update_api_run_progress
 from backend.src.utils.time_utils import as_utc_datetime
 
 
@@ -30,6 +32,50 @@ def _temporary_timezone(name: str):
 
 
 class TestRunStore(unittest.TestCase):
+    def test_progress_writer_persists_structured_activity(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "runs.db"
+            store = RunStore(str(db_path))
+            store.claim_start("progress-run", Path(tmp_dir) / "run.log", "run-once", None, None, None)
+
+            previous_run_id = os.environ.get("JOB_INFORMER_API_RUN_ID")
+            previous_run_store = os.environ.get("RUN_STORE_DB_PATH")
+            os.environ["JOB_INFORMER_API_RUN_ID"] = "progress-run"
+            os.environ["RUN_STORE_DB_PATH"] = str(db_path)
+            try:
+                updated = update_api_run_progress(
+                    stage="collecting",
+                    label="Searching configured sources",
+                    current_source="LinkedIn · Data in Berlin",
+                    completed_sources=1,
+                    total_sources=3,
+                    metrics={"observed": 12, "new": 0, "archived": 0, "descriptions_fetched": 0, "parsed": 0},
+                    event="Searching LinkedIn · Data in Berlin",
+                )
+            finally:
+                if previous_run_id is None:
+                    os.environ.pop("JOB_INFORMER_API_RUN_ID", None)
+                else:
+                    os.environ["JOB_INFORMER_API_RUN_ID"] = previous_run_id
+                if previous_run_store is None:
+                    os.environ.pop("RUN_STORE_DB_PATH", None)
+                else:
+                    os.environ["RUN_STORE_DB_PATH"] = previous_run_store
+
+            self.assertTrue(updated)
+            progress = json.loads(store.get("progress-run")["progress_json"])
+            self.assertEqual(progress["stage"], "collecting")
+            self.assertEqual(progress["current_source"], "LinkedIn · Data in Berlin")
+            self.assertEqual(progress["completed_sources"], 1)
+            self.assertEqual(progress["total_sources"], 3)
+            self.assertEqual(progress["metrics"]["observed"], 12)
+            self.assertEqual(progress["events"][-1]["message"], "Searching LinkedIn · Data in Berlin")
+
+            store.update_status("progress-run", "succeeded", 0, datetime.now(UTC))
+            completed_progress = json.loads(store.get("progress-run")["progress_json"])
+            self.assertEqual(completed_progress["stage"], "completed")
+            self.assertEqual(completed_progress["label"], "Run completed")
+
     def test_only_one_unfinished_run_can_be_claimed(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             store = RunStore(str(Path(tmp_dir) / "runs.db"))

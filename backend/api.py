@@ -296,6 +296,23 @@ class RunRequest(BaseModel):
     time_range: Optional[str] = None
 
 
+class RunProgressEvent(BaseModel):
+    at: datetime
+    level: Literal["info", "warning", "error"] = "info"
+    message: str
+
+
+class RunProgress(BaseModel):
+    stage: str
+    label: str
+    current_source: Optional[str] = None
+    completed_sources: Optional[int] = None
+    total_sources: Optional[int] = None
+    metrics: Optional[dict[str, int]] = None
+    updated_at: datetime
+    events: list[RunProgressEvent] = Field(default_factory=list)
+
+
 class RunStatus(BaseModel):
     run_id: str
     mode: str
@@ -310,6 +327,7 @@ class RunStatus(BaseModel):
     trigger: str = "manual"
     pid: Optional[int] = None
     metrics: Optional[dict[str, int]] = None
+    progress: Optional[RunProgress] = None
 
 
 class RunSummary(BaseModel):
@@ -325,6 +343,7 @@ class RunSummary(BaseModel):
     trigger: str = "manual"
     pid: Optional[int] = None
     metrics: Optional[dict[str, int]] = None
+    progress: Optional[RunProgress] = None
 
 
 class JobAnnotationPayload(BaseModel):
@@ -388,7 +407,9 @@ class RunStore:
                     locations TEXT,
                     time_range TEXT,
                     trigger TEXT NOT NULL DEFAULT 'manual',
-                    pid INTEGER
+                    pid INTEGER,
+                    progress_json TEXT NOT NULL DEFAULT '{}',
+                    progress_updated_at TEXT
                 )
                 """
             )
@@ -400,6 +421,10 @@ class RunStore:
                 conn.execute("ALTER TABLE api_runs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'manual'")
             if "pid" not in columns:
                 conn.execute("ALTER TABLE api_runs ADD COLUMN pid INTEGER")
+            if "progress_json" not in columns:
+                conn.execute("ALTER TABLE api_runs ADD COLUMN progress_json TEXT NOT NULL DEFAULT '{}'")
+            if "progress_updated_at" not in columns:
+                conn.execute("ALTER TABLE api_runs ADD COLUMN progress_updated_at TEXT")
             conn.commit()
 
     def claim_start(
@@ -413,6 +438,23 @@ class RunStore:
         trigger: str = "manual",
         started_at: Optional[datetime] = None,
     ) -> Optional[dict]:
+        start_time = normalize_utc_iso(started_at, naive_policy="utc") or utc_now_iso()
+        initial_progress = {
+            "stage": "starting",
+            "label": "Preparing run",
+            "current_source": None,
+            "completed_sources": None,
+            "total_sources": None,
+            "metrics": None,
+            "updated_at": start_time,
+            "events": [
+                {
+                    "at": start_time,
+                    "level": "info",
+                    "message": "Run queued",
+                }
+            ],
+        }
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.row_factory = sqlite3.Row
@@ -431,8 +473,8 @@ class RunStore:
                 """
                 INSERT OR REPLACE INTO api_runs (
                     run_id, mode, status, return_code, log_path, started_at, finished_at,
-                    keywords, locations, time_range, trigger, pid
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    keywords, locations, time_range, trigger, pid, progress_json, progress_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -440,13 +482,15 @@ class RunStore:
                     "starting",
                     None,
                     str(log_path),
-                    normalize_utc_iso(started_at, naive_policy="utc") or utc_now_iso(),
+                    start_time,
                     None,
                     keywords,
                     locations,
                     time_range,
                     trigger,
                     None,
+                    json.dumps(initial_progress),
+                    start_time,
                 ),
             )
             conn.commit()
@@ -474,20 +518,71 @@ class RunStore:
                     (status, return_code, run_id),
                 )
             else:
+                finished_at_iso = normalize_utc_iso(finished_at, naive_policy="utc")
+                terminal_progress = self._terminal_progress_json(
+                    conn,
+                    run_id,
+                    status,
+                    finished_at_iso or utc_now_iso(),
+                )
                 conn.execute(
                     """
                     UPDATE api_runs
-                    SET status = ?, return_code = ?, finished_at = ?, pid = NULL
+                    SET status = ?, return_code = ?, finished_at = ?, pid = NULL,
+                        progress_json = ?, progress_updated_at = ?
                     WHERE run_id = ?
                     """,
                     (
                         status,
                         return_code,
-                        normalize_utc_iso(finished_at, naive_policy="utc"),
+                        finished_at_iso,
+                        terminal_progress,
+                        finished_at_iso,
                         run_id,
                     ),
                 )
             conn.commit()
+
+    @staticmethod
+    def _terminal_progress_json(
+        conn: sqlite3.Connection,
+        run_id: str,
+        status: str,
+        timestamp: str,
+    ) -> str:
+        row = conn.execute(
+            "SELECT progress_json FROM api_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        try:
+            progress = json.loads(row[0] or "{}") if row else {}
+        except (TypeError, json.JSONDecodeError):
+            progress = {}
+        if not isinstance(progress, dict):
+            progress = {}
+
+        existing_events = progress.get("events")
+        events = existing_events if isinstance(existing_events, list) else []
+        terminal_stage = "completed" if status == "succeeded" else status
+        fallback_label = "Run completed" if status == "succeeded" else f"Run {status}"
+        is_new_terminal_state = progress.get("stage") not in {terminal_stage, status}
+        label = fallback_label if is_new_terminal_state else str(progress.get("label") or fallback_label)
+        if is_new_terminal_state:
+            events.append(
+                {
+                    "at": timestamp,
+                    "level": "info" if status == "succeeded" else "error",
+                    "message": fallback_label,
+                }
+            )
+        progress.update(
+            {
+                "stage": terminal_stage,
+                "label": label,
+                "updated_at": timestamp,
+                "events": events[-8:],
+            }
+        )
+        return json.dumps(progress)
 
     def get(self, run_id: str) -> Optional[dict]:
         with self._connect() as conn:
@@ -509,16 +604,27 @@ class RunStore:
         """Mark runs from a previous API process as interrupted on startup."""
         now = utc_now_iso()
         with self._connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE api_runs
-                SET status = 'interrupted', finished_at = ?, pid = NULL
-                WHERE status IN ('starting', 'running')
-                """,
-                (now,),
-            )
+            rows = conn.execute(
+                "SELECT run_id FROM api_runs WHERE status IN ('starting', 'running')"
+            ).fetchall()
+            for row in rows:
+                run_id = str(row[0])
+                conn.execute(
+                    """
+                    UPDATE api_runs
+                    SET status = 'interrupted', finished_at = ?, pid = NULL,
+                        progress_json = ?, progress_updated_at = ?
+                    WHERE run_id = ?
+                    """,
+                    (
+                        now,
+                        self._terminal_progress_json(conn, run_id, "interrupted", now),
+                        now,
+                        run_id,
+                    ),
+                )
             conn.commit()
-            return max(0, int(cursor.rowcount or 0))
+            return len(rows)
 
     def latest_successful_collection(self) -> Optional[dict]:
         with self._connect() as conn:
@@ -582,6 +688,17 @@ def _metrics_for_api_run(run_id: str) -> Optional[dict[str, int]]:
         return None
 
 
+def _progress_for_run(record: dict[str, Any]) -> Optional[RunProgress]:
+    raw_progress = record.get("progress_json")
+    if not raw_progress:
+        return None
+    try:
+        payload = json.loads(raw_progress)
+        return RunProgress.model_validate(payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 
 class RunRecord:
     """Holds lightweight state for a background run."""
@@ -635,6 +752,7 @@ class RunRecord:
             trigger=self.trigger,
             pid=self.process.pid if code is None else None,
             metrics=_metrics_for_api_run(self.run_id),
+            progress=_progress_for_run(self._run_store.get(self.run_id) or {}),
         )
 
 
@@ -693,6 +811,7 @@ def _launch_run(payload: RunRequest, *, trigger: str) -> RunStatus:
     run_env = os.environ.copy()
     run_env["PYTHONUNBUFFERED"] = "1"
     run_env["JOB_INFORMER_API_RUN_ID"] = run_id
+    run_env["RUN_STORE_DB_PATH"] = _require_run_store().db_path
 
     try:
         with log_path.open("w") as log_file:
@@ -776,6 +895,7 @@ def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
         trigger=stored.get("trigger") or "manual",
         pid=stored.get("pid"),
         metrics=_metrics_for_api_run(run_id),
+        progress=_progress_for_run(stored),
     )
 
 
@@ -802,6 +922,7 @@ def list_runs(limit: int = Query(20, ge=1, le=100), _: bool = Depends(require_to
                 trigger=record.get("trigger") or "manual",
                 pid=record.get("pid"),
                 metrics=_metrics_for_api_run(record["run_id"]),
+                progress=_progress_for_run(record),
             )
         )
     return summaries

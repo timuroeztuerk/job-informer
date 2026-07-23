@@ -52,4 +52,38 @@ describe("API parameter serialization", () => {
     expect(url.searchParams.has("source")).toBe(false);
     expect(url.searchParams.has("annotation_priority")).toBe(false);
   });
+
+  it("turns an HTML fallback response into an actionable API configuration error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("<!doctype html><html><body>Vite app</body></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        })
+      )
+    );
+
+    await expect(fetchJobs()).rejects.toThrow(/returned text\/html instead of JSON.*VITE_API_BASE/);
+  });
+
+  it("reports malformed JSON without exposing the browser parse error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("{not-json", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      )
+    );
+
+    await expect(fetchJobs()).rejects.toThrow(/API returned invalid JSON.*VITE_API_BASE/);
+  });
+
+  it("turns network failures into an actionable connection error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+
+    await expect(fetchJobs()).rejects.toThrow(/Could not connect to the API.*backend is running.*VITE_API_BASE/);
+  });
 });
