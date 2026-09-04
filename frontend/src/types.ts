@@ -1,26 +1,18 @@
-export type JobAnnotationStatus =
-  | "unreviewed"
-  | "interesting"
-  | "applied"
-  | "interviewing"
-  | "offer"
-  | "rejected"
-  | "archived";
-
-export type JobAnnotationPriority = "low" | "medium" | "high";
-
 export type JobArchiveFilter = "exclude" | "include" | "only";
 
-export interface JobAnnotation {
-  status: JobAnnotationStatus;
-  priority: JobAnnotationPriority;
-  notes: string;
-  why_interesting: string;
-  skill_gaps: string[];
-  follow_up_date?: string | null;
-  resume_version: string;
-  created_at?: string | null;
-  updated_at?: string | null;
+export interface QueryGroupOption {
+  key: string;
+  name: string;
+}
+
+export interface JobQueryMatch {
+  query_group_key: string;
+  query_group_name: string;
+  query_text: string;
+  location: string;
+  first_page_offset?: number | null;
+  last_matched_at?: string | null;
+  match_runs?: number;
 }
 
 export interface Job {
@@ -31,7 +23,6 @@ export interface Job {
   source: string;
   url?: string;
   salary?: string;
-  description?: string;
   scraped_at?: string;
   created_at?: string;
   archived_at?: string | null;
@@ -39,8 +30,13 @@ export interface Job {
   first_seen_at?: string;
   last_seen_at?: string;
   seen_count?: number;
-  parsed_description?: ParsedDescription | null;
-  annotation?: JobAnnotation | null;
+  relevance_outcome?: "target" | "excluded" | "unrelated" | "unmatched" | "manual_keep" | "manual_archive" | null;
+  role_family?: string | null;
+  relevance_reason?: string | null;
+  relevance_ruleset_version?: string | null;
+  relevance_evaluated_at?: string | null;
+  query_groups?: string[];
+  query_matches?: JobQueryMatch[];
 }
 
 export interface JobsResponse {
@@ -49,37 +45,61 @@ export interface JobsResponse {
   items: Job[];
 }
 
-export type CliMode =
-  | "run-once"
-  | "purge"
-  | "reset-ai-purge"
-  | "parse-descriptions"
-  | "db-summary"
-  | "test"
-  | "refetch-titles";
+export type CliMode = "run-once";
 
-export interface ParsedPayload {
-  seniority?: string;
-  employment_type?: string;
-  remote?: string;
-  languages?: string[];
-  programming_languages?: string[];
-  tools?: string[];
-  skills?: string[];
-  degree_field?: string;
-  degree_type?: string;
-  years_experience_min?: number | null;
-  location?: string[];
-  salary_eur_range?: { min?: number | null; max?: number | null };
-  "extra benefits"?: string | string[];
-  summary?: string;
+export interface RunMetrics {
+  observed: number;
+  new: number;
+  archived: number;
+  queries?: number;
+  pages_attempted?: number;
+  pages_completed?: number;
+  request_failures?: number;
+  rate_limit_responses?: number;
+  relevance_target?: number;
+  relevance_excluded?: number;
+  relevance_unrelated?: number;
+  relevance_unmatched?: number;
+  relevance_manual_keep?: number;
+  relevance_manual_archive?: number;
+  target_yield_percent?: number;
+  query_contamination_percent?: number;
+  relevance_conflicts?: number;
 }
 
-export interface ParsedDescription {
-  payload?: ParsedPayload | null;
-  version?: number;
-  created_at?: string;
-  raw?: string;
+export interface QueryCoverage {
+  query_group_key: string;
+  display_name?: string | null;
+  query_text: string;
+  location: string;
+  page_offsets: number[];
+  pages_attempted: number;
+  pages_completed: number;
+  raw_cards: number;
+  valid_jobs: number;
+  duplicate_cards: number;
+  request_failures: number;
+  rate_limit_responses: number;
+  stop_reason?: string | null;
+  last_status?: number | null;
+  last_error?: string | null;
+}
+
+export interface RunProgressEvent {
+  at: string;
+  level: "info" | "warning" | "error";
+  message: string;
+}
+
+export interface RunProgress {
+  stage: string;
+  label: string;
+  current_query?: string | null;
+  completed_queries?: number | null;
+  total_queries?: number | null;
+  metrics?: RunMetrics | null;
+  updated_at: string;
+  events: RunProgressEvent[];
 }
 
 export interface RunStatus {
@@ -93,82 +113,45 @@ export interface RunStatus {
   keywords?: string | null;
   locations?: string | null;
   time_range?: string | null;
-  trigger?: "manual" | "scheduled";
+  trigger?: "manual";
   pid?: number | null;
   metrics?: RunMetrics | null;
+  query_coverage?: QueryCoverage[] | null;
   progress?: RunProgress | null;
 }
 
-export interface RunMetrics {
-  observed: number;
-  new: number;
-  archived: number;
-  descriptions_fetched: number;
-  parsed: number;
-  queries?: number;
-  pages_attempted?: number;
-  pages_completed?: number;
-  request_failures?: number;
-  rate_limit_responses?: number;
-}
-
-export interface RunProgressEvent {
-  at: string;
-  level: "info" | "warning" | "error";
-  message: string;
-}
-
-export interface RunProgress {
-  stage: string;
-  label: string;
-  current_source?: string | null;
-  completed_sources?: number | null;
-  total_sources?: number | null;
-  metrics?: RunMetrics | null;
-  updated_at: string;
-  events: RunProgressEvent[];
-}
+export type RunSummary = RunStatus;
 
 export interface RunRequest {
-  mode?: CliMode;
+  mode?: "run-once";
   keywords?: string;
   locations?: string;
   time_range?: string;
 }
 
-export interface RunSummary {
-  run_id: string;
-  mode: CliMode;
-  status: "starting" | "running" | "succeeded" | "failed" | "interrupted";
-  return_code?: number | null;
-  started_at: string;
-  finished_at?: string | null;
-  keywords?: string | null;
-  locations?: string | null;
-  time_range?: string | null;
-  trigger?: "manual" | "scheduled";
-  pid?: number | null;
-  metrics?: RunMetrics | null;
-  progress?: RunProgress | null;
+export interface CollectionFreshness {
+  as_of: string;
+  last_collected_at: string | null;
+  latest_observation_at: string | null;
+  latest_scrape_at: string | null;
+  source: "job_observation" | "job_record" | null;
+  age_days: number | null;
+  status: "fresh" | "aging" | "stale" | "empty";
+  stale_after_days?: number;
 }
 
 export interface JobStats {
   total_jobs: number;
+  archived_jobs?: number;
   jobs_by_source: Record<string, number>;
   top_companies: Record<string, number>;
   recent_jobs_7_days: number;
-  date_range: {
-    earliest: string | null;
-    latest: string | null;
-  };
+  date_range: { earliest: string | null; latest: string | null };
   sources_list?: string[];
   companies_list?: string[];
+  role_families_list?: string[];
+  query_groups_list?: QueryGroupOption[];
   collection_freshness?: CollectionFreshness;
-  collection_scheduler?: {
-    enabled: boolean;
-    interval_hours: number;
-    last_successful_run_at: string | null;
-  };
   database?: {
     status: "ready" | "not_ready";
     instance_name: string;
@@ -189,179 +172,17 @@ export interface CountStat {
   percentage?: number;
 }
 
-export interface NumericRangeStat {
-  count: number;
-  average: number | null;
-  min: number | null;
-  max: number | null;
-}
-
-export interface ParsedInsights {
-  coverage_pct?: number | null;
-  orphaned_jobs?: number;
-  historical_payloads?: number | null;
-  seniority_mix?: {
-    senior: SenioritySlice;
-    non_senior: SenioritySlice;
-  };
-  total_records: number;
-  programming_languages: CountStat[];
-  skills: CountStat[];
-  tools: CountStat[];
-  seniority_levels: CountStat[];
-  employment_types: CountStat[];
-  remote_options: CountStat[];
-  languages: CountStat[];
-  degree_fields: CountStat[];
-  degree_types: CountStat[];
-  experience_years: NumericRangeStat;
-  salary_eur: NumericRangeStat;
-}
-
-export interface CitySummary {
-  total_jobs: number;
-  top_cities: CountStat[];
-}
-
-export interface TrendDelta {
-  name: string;
-  recent_count: number;
-  previous_count: number;
-  delta: number;
-}
-
-export interface WeeklyJobCount {
-  week_start: string;
-  jobs: number;
-  parsed_jobs: number;
-}
-
-export interface TrendWindow {
-  start: string | null;
-  end: string | null;
-  jobs: number;
-}
-
-export interface TrendSummary {
-  window_days: number;
-  recent_window: TrendWindow;
-  previous_window: TrendWindow;
-  weekly_job_counts: WeeklyJobCount[];
-  momentum: {
-    skills: TrendDelta[];
-    tools: TrendDelta[];
-    programming_languages: TrendDelta[];
-    companies: TrendDelta[];
-    cities: TrendDelta[];
-  };
-}
-
-export interface CollectionFreshness {
-  as_of: string;
-  last_collected_at: string | null;
-  latest_observation_at: string | null;
-  latest_scrape_at: string | null;
-  source: "job_observation" | "job_record" | null;
-  age_days: number | null;
-  status: "fresh" | "aging" | "stale" | "empty";
-  stale_after_days?: number;
-}
-
-export interface FitSummaryJob {
-  job_id: string;
-  title: string;
-  company: string;
-  score: number;
-  band: string;
-  reasons: string[];
-}
-
-export interface ProfileFitSummary {
-  profile_id: string;
-  profile_name: string;
-  profile_version: number;
-  total_scored: number;
-  average_score: number | null;
-  band_counts: Record<string, number>;
-  top_jobs: FitSummaryJob[];
-}
-
-export interface ParserTelemetrySummary {
-  attempts: number;
-  success_count: number;
-  failure_count: number;
-  refusal_count: number;
-  recent_window_days: number;
-  recent_attempts: number;
-  recent_success_rate: number | null;
-  average_latency_ms: number | null;
-  exhausted_retries: number;
-  jobs_with_current_failed_status: number;
-}
-
-export interface SkillGapSummary {
-  jobs_with_gaps: number;
-  top_gaps: CountStat[];
-}
-
-export interface ObservationStats {
-  total_observations: number;
-  repeat_jobs: number;
-  average_seen_count: number | null;
-  max_seen_count: number;
-  total_scrape_runs?: number;
-}
-
-export interface RecurringJobSummary {
-  job_id: string;
-  title: string;
-  company: string;
-  seen_count: number;
-  active_days: number;
-  first_seen_at?: string | null;
-  last_seen_at?: string | null;
-}
-
-export interface ObservationSummary {
-  total_observations: number;
-  repeat_jobs: number;
-  average_seen_count: number | null;
-  max_seen_count: number;
-  top_recurring_jobs: RecurringJobSummary[];
-}
-
 export interface DbSummary {
   totals: {
     total_jobs: number;
+    archived_jobs: number;
     recent_jobs_7_days: number;
-    date_range: {
-      earliest: string | null;
-      latest: string | null;
-    };
+    date_range: { earliest: string | null; latest: string | null };
   };
   jobs_by_source: Record<string, number>;
-  top_companies: Record<string, number>;
-  observation_stats?: ObservationStats;
-  observation_summary?: ObservationSummary;
-  collection_freshness?: CollectionFreshness;
-  profile_fit_summary?: ProfileFitSummary;
-  parser_telemetry?: ParserTelemetrySummary;
-  integrity?: {
-    sqlite_ok: boolean;
-    sqlite_messages: string[];
-    orphan_record_count: number;
-    orphan_record_counts: Record<string, number>;
-  };
-  skill_gap_summary?: SkillGapSummary;
-  parsed_descriptions_stats?: Record<string, number>;
-  parsed_insights: ParsedInsights;
-  city_summary: CitySummary;
-  trend_summary: TrendSummary;
-}
-
-export interface SenioritySlice {
-  count: number;
-  percentage?: number;
-  avg_experience?: number | null;
-  avg_salary?: number | null;
+  top_companies: CountStat[];
+  top_locations: CountStat[];
+  role_families?: CountStat[];
+  query_groups?: CountStat[];
+  collection_freshness: CollectionFreshness;
 }

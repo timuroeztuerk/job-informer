@@ -1,0 +1,322 @@
+{
+  "description": "Conservative title-filter contract for ambiguous LinkedIn roles.",
+  "cases": [
+    {
+      "id": "keep-software-engineer-ai-platform",
+      "category": "engineering",
+      "expected": "keep",
+      "title": "Software Engineer, AI Platform",
+      "company": "Product Labs"
+    },
+    {
+      "id": "keep-ai-engineering-manager",
+      "category": "engineering",
+      "expected": "keep",
+      "title": "AI Engineering Manager",
+      "company": "Product Labs"
+    },
+    {
+      "id": "keep-generative-ai-engineering-lead",
+      "category": "engineering",
+      "expected": "keep",
+      "title": "Generative AI Engineering Lead",
+      "company": "Product Labs"
+    },
+    {
+      "id": "keep-machine-learning-engineer",
+      "category": "engineering",
+      "expected": "keep",
+      "title": "Machine Learning Engineer",
+      "company": "Mobility Systems"
+    },
+    {
+      "id": "keep-data-platform-engineer",
+      "category": "engineering",
+      "expected": "keep",
+      "title": "Data Platform Engineer",
+      "company": "Commerce Cloud"
+    },
+    {
+      "id": "keep-applied-research-engineer",
+      "category": "research",
+      "expected": "keep",
+      "title": "Applied Research Engineer",
+      "company": "Robotics GmbH"
+    },
+    {
+      "id": "keep-research-scientist-pharma",
+      "category": "research",
+      "expected": "keep",
+      "title": "Research Scientist, Drug Discovery",
+      "company": "Example Pharma"
+    },
+    {
+      "id": "keep-quantitative-researcher",
+      "category": "research",
+      "expected": "keep",
+      "title": "Quantitative Researcher",
+      "company": "Market Systems"
+    },
+    {
+      "id": "keep-user-researcher",
+      "category": "research",
+      "expected": "keep",
+      "title": "Senior User Researcher",
+      "company": "Design Products"
+    },
+    {
+      "id": "keep-market-research-analyst",
+      "category": "research",
+      "expected": "keep",
+      "title": "Market Research Analyst",
+      "company": "Consumer Insights"
+    },
+    {
+      "id": "keep-analytics-engineer",
+      "category": "analytics",
+      "expected": "keep",
+      "title": "Analytics Engineer",
+      "company": "Retail Data"
+    },
+    {
+      "id": "keep-senior-data-analyst",
+      "category": "analytics",
+      "expected": "keep",
+      "title": "Senior Data Analyst",
+      "company": "Insurance Group"
+    },
+    {
+      "id": "keep-business-intelligence-analyst",
+      "category": "analytics",
+      "expected": "keep",
+      "title": "Business Intelligence Analyst",
+      "company": "Manufacturing SE"
+    },
+    {
+      "id": "keep-technical-project-manager",
+      "category": "project",
+      "expected": "keep",
+      "title": "Technical Project Manager",
+      "company": "Energy Networks"
+    },
+    {
+      "id": "keep-ai-project-lead",
+      "category": "project",
+      "expected": "keep",
+      "title": "AI Project Lead",
+      "company": "Logistics AG"
+    },
+    {
+      "id": "keep-project-engineer",
+      "category": "project",
+      "expected": "keep",
+      "title": "Project Engineer",
+      "company": "Industrial Automation"
+    },
+    {
+      "id": "keep-projektleiter-analytics",
+      "category": "project",
+      "expected": "keep",
+      "title": "Projektleiter Data & Analytics",
+      "company": "Versicherung AG"
+    },
+    {
+      "id": "keep-scientific-software-developer",
+      "category": "software",
+      "expected": "keep",
+      "title": "Scientific Software Developer",
+      "company": "Imaging Systems"
+    },
+    {
+      "id": "keep-graduate-data-analyst",
+      "category": "analytics",
+      "expected": "keep",
+      "title": "Graduate Data Analyst",
+      "company": "Payments Europe"
+    },
+    {
+      "id": "reject-ai-engineer",
+      "category": "ai_engineer",
+      "expected": "reject",
+      "expected_filter": "title_keyword",
+      "title": "AI Engineer",
+      "company": "Example AI"
+    },
+    {
+      "id": "reject-senior-ai-engineer",
+      "category": "ai_engineer",
+      "expected": "reject",
+      "expected_filter": "title_keyword",
+      "title": "Senior AI Engineer",
+      "company": "Example AI"
+    },
+    {
+      "id": "reject-hyphenated-ai-engineer",
+      "category": "ai_engineer",
+      "expected": "reject",
+      "expected_filter": "title_keyword",
+      "title": "AI-Engineer",
+      "company": "Example AI"
+    },
+    {
+      "id": "reject-artificial-intelligence-engineer",
+      "category": "ai_engineer",
+      "expected": "reject",
+      "expected_filter": "title_keyword",
+      "title": "Artificial Intelligence Engineer",
+      "company": "Example AI"
+    },
+    {
+      "id": "reject-generative-ai-engineer",
+      "category": "ai_engineer",
+      "expected": "reject",
+      "expected_filter": "title_keyword",
+      "title": "Generative AI Engineer",
+      "company": "Example AI"
+    },
+    {
+      "id": "reject-genai-engineer",
+      "category": "ai_engineer",
+      "expected": "reject",
+      "expected_filter": "title_keyword",
+      "title": "GenAI Engineer",
+      "company": "Example AI"
+    },
+    {
+      "id": "reject-data-science-intern",
+      "category": "study_track",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Data Science Intern",
+      "company": "Example Bank"
+    },
+    {
+      "id": "reject-business-analytics-internship",
+      "category": "study_track",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Internship – Business Analytics",
+      "company": "Example Bank"
+    },
+    {
+      "id": "reject-praktikant-data-analytics",
+      "category": "study_track",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Praktikant Data Analytics",
+      "company": "Industrie GmbH"
+    },
+    {
+      "id": "reject-werkstudentin-softwareentwicklung",
+      "category": "study_track",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Werkstudentin Softwareentwicklung",
+      "company": "Industrie GmbH"
+    },
+    {
+      "id": "reject-working-student-machine-learning",
+      "category": "study_track",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Working Student – Machine Learning",
+      "company": "Product Labs"
+    },
+    {
+      "id": "reject-student-assistant-data-lab",
+      "category": "study_track",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Student Assistant – Data Lab",
+      "company": "University of Example"
+    },
+    {
+      "id": "reject-master-thesis-ai",
+      "category": "study_track",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Master Thesis in AI",
+      "company": "Industrial Research"
+    },
+    {
+      "id": "reject-bachelorarbeit-data-engineering",
+      "category": "study_track",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Bachelorarbeit Data Engineering",
+      "company": "Industrial Research"
+    },
+    {
+      "id": "reject-phd-student-computer-science",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "PhD Student in Computer Science",
+      "company": "Technical University"
+    },
+    {
+      "id": "reject-doctoral-researcher",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "study_title",
+      "title": "Doctoral Researcher in Data Systems",
+      "company": "Technical University"
+    },
+    {
+      "id": "reject-postdoctoral-researcher",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "academic_title",
+      "title": "Postdoctoral Researcher in Computer Vision",
+      "company": "Technical University"
+    },
+    {
+      "id": "reject-professorin-datenbanken",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "academic_title",
+      "title": "Professorin für Datenbanken",
+      "company": "Universität Beispiel"
+    },
+    {
+      "id": "reject-juniorprofessor-data-science",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "academic_title",
+      "title": "Juniorprofessor Data Science",
+      "company": "Universität Beispiel"
+    },
+    {
+      "id": "reject-lecturer-business-analytics",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "academic_title",
+      "title": "Lecturer in Business Analytics",
+      "company": "Business School"
+    },
+    {
+      "id": "reject-academic-researcher",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "academic_title",
+      "title": "Academic Researcher in Machine Learning",
+      "company": "Research University"
+    },
+    {
+      "id": "reject-research-fellow",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "academic_title",
+      "title": "Research Fellow – Applied Statistics",
+      "company": "Research University"
+    },
+    {
+      "id": "reject-wissenschaftliche-mitarbeiterin",
+      "category": "academia",
+      "expected": "reject",
+      "expected_filter": "academic_title",
+      "title": "Wissenschaftliche Mitarbeiterin Data Science",
+      "company": "Universität Beispiel"
+    }
+  ]
+}

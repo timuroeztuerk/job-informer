@@ -35,6 +35,22 @@ def _page(start: int, count: int) -> bytes:
     return "".join(cards).encode()
 
 
+def _tracked_page(job_ids: list[int], tracking_id: str) -> bytes:
+    cards = []
+    for position, job_id in enumerate(job_ids):
+        cards.append(
+            f"""
+            <div class="job-search-card">
+              <h3 class="base-search-card__title">Data Scientist {job_id}</h3>
+              <h4 class="base-search-card__subtitle">Company {job_id}</h4>
+              <span class="job-search-card__location">Berlin</span>
+              <a class="base-card__full-link" href="https://de.linkedin.com/jobs/view/{job_id}/?position={position}&amp;trackingId={tracking_id}"></a>
+            </div>
+            """
+        )
+    return "".join(cards).encode()
+
+
 class _Response:
     def __init__(self, status_code: int, content: bytes = b"") -> None:
         self.status_code = status_code
@@ -54,31 +70,63 @@ class _Session:
 
 class TestLinkedInCollection(unittest.TestCase):
     def test_collects_and_records_more_than_one_page(self) -> None:
-        session = _Session([_Response(200, _page(0, 25)), _Response(200, _page(25, 3))])
+        session = _Session([_Response(200, _page(0, 10)), _Response(200, _page(10, 3))])
         source = LinkedInSource(session, _config())
 
         with patch("backend.src.agents.job_scraper.time.sleep", return_value=None):
             jobs = source.scrape_jobs("Data Scientist", "Berlin", 86400, max_pages=4)
 
         offsets = [int(parse_qs(urlparse(url).query)["start"][0]) for url in session.urls]
-        self.assertEqual(offsets, [0, 25])
-        self.assertEqual(len(jobs), 28)
+        self.assertEqual(offsets, [0, 10])
+        self.assertTrue(all("/jobs-guest/jobs/api/seeMoreJobPostings/search" in url for url in session.urls))
+        self.assertEqual(len(jobs), 13)
         self.assertEqual(source.last_query_report["pages_attempted"], 2)
         self.assertEqual(source.last_query_report["pages_completed"], 2)
-        self.assertEqual(source.last_query_report["page_offsets"], [0, 25])
+        self.assertEqual(source.last_query_report["page_offsets"], [0, 10])
         self.assertEqual(source.last_query_report["stop_reason"], "short_page")
 
     def test_stops_when_linkedin_repeats_the_same_page(self) -> None:
-        repeated_page = _page(0, 25)
+        repeated_page = _page(0, 10)
         session = _Session([_Response(200, repeated_page), _Response(200, repeated_page)])
         source = LinkedInSource(session, _config())
 
         with patch("backend.src.agents.job_scraper.time.sleep", return_value=None):
             jobs = source.scrape_jobs("Data Scientist", "Berlin", 86400, max_pages=4)
 
-        self.assertEqual(len(jobs), 25)
+        self.assertEqual(len(jobs), 10)
         self.assertEqual(source.last_query_report["stop_reason"], "repeated_page")
-        self.assertEqual(source.last_query_report["duplicate_cards"], 25)
+        self.assertEqual(source.last_query_report["duplicate_cards"], 10)
+
+    def test_tracking_variants_and_reordered_cards_are_one_repeated_page(self) -> None:
+        job_ids = list(range(100000, 100010))
+        session = _Session(
+            [
+                _Response(200, _tracked_page(job_ids, "first-page-token")),
+                _Response(200, _tracked_page(list(reversed(job_ids)), "second-page-token")),
+            ]
+        )
+        source = LinkedInSource(session, _config())
+
+        with patch("backend.src.agents.job_scraper.time.sleep", return_value=None):
+            jobs = source.scrape_jobs("Data Scientist", "Berlin", 86400, max_pages=4)
+
+        self.assertEqual(len(jobs), 10)
+        self.assertEqual(
+            jobs[0]["url"],
+            "https://www.linkedin.com/jobs/view/100000/",
+        )
+        self.assertEqual(source.last_query_report["pages_attempted"], 2)
+        self.assertEqual(source.last_query_report["stop_reason"], "repeated_page")
+        self.assertEqual(source.last_query_report["duplicate_cards"], 10)
+
+    def test_normalizes_linkedin_job_url_before_deduplication(self) -> None:
+        self.assertEqual(
+            LinkedInSource._normalize_url(
+                "https://de.linkedin.com/jobs/view/data-scientist-at-example-4242424242"
+                "?position=1&trackingId=changing-token"
+            ),
+            "https://www.linkedin.com/jobs/view/4242424242/",
+        )
 
     def test_rate_limit_waits_and_retries_the_same_request(self) -> None:
         session = _Session([_Response(429, b"rate limited"), _Response(200, _page(0, 1))])
@@ -105,15 +153,12 @@ class TestLinkedInCollection(unittest.TestCase):
             "url": "https://www.linkedin.com/jobs/view/123456789/",
         }
 
-        observed, fresh, skipped, existing = scraper._collect_observed_jobs(
+        observed, existing = scraper._collect_observed_jobs(
             [candidate],
-            "LinkedIn",
             set(),
         )
 
         self.assertEqual(observed, [candidate])
-        self.assertEqual(fresh, [candidate])
-        self.assertEqual(skipped, 0)
         self.assertEqual(existing, 0)
 
 

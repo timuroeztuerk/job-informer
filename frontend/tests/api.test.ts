@@ -23,11 +23,9 @@ describe("API parameter serialization", () => {
       source: "",
       company: "ACME/Tools",
       archived: "exclude",
-      annotationStatus: "unreviewed",
-      annotationPriority: "",
       dateFrom: "2026-07-01",
       dateTo: "2026-07-12",
-      sort: "fit_score_desc",
+      sort: "last_seen_desc",
     });
 
     const [requestUrl] = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -44,13 +42,11 @@ describe("API parameter serialization", () => {
       location: "Berlin",
       company: "ACME/Tools",
       archived: "exclude",
-      annotation_status: "unreviewed",
       date_from: "2026-07-01T00:00:00",
       date_to: "2026-07-12T23:59:59",
-      sort: "fit_score_desc",
+      sort: "last_seen_desc",
     });
     expect(url.searchParams.has("source")).toBe(false);
-    expect(url.searchParams.has("annotation_priority")).toBe(false);
   });
 
   it("turns an HTML fallback response into an actionable API configuration error", async () => {

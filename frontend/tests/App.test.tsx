@@ -10,9 +10,10 @@ vi.mock("../src/api", () => ({
   getApiErrorMessage: (_error: unknown, fallback: string) => `${fallback} Check VITE_API_BASE.`,
 }));
 vi.mock("../src/components/JobDetail", () => ({ default: () => null }));
-vi.mock("../src/components/JobTable", () => ({ default: () => null }));
-vi.mock("../src/components/RecentRuns", () => ({ default: () => null }));
-vi.mock("../src/components/ReviewHome", () => ({ default: () => null }));
+vi.mock("../src/components/JobTable", async () => {
+  const React = await import("react");
+  return { default: React.forwardRef(() => null) };
+});
 vi.mock("../src/components/RunPane", async () => {
   const React = await import("react");
   return { default: React.forwardRef(() => null) };
@@ -40,6 +41,7 @@ const emptyStats: JobStats = {
 
 describe("database diagnostics", () => {
   beforeEach(() => {
+    window.history.replaceState({}, "", "/");
     vi.mocked(fetchStats).mockReset().mockResolvedValue(emptyStats);
   });
 
@@ -49,8 +51,8 @@ describe("database diagnostics", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Connected to an empty database");
     expect(screen.getByRole("alert")).toHaveTextContent("job-informer-desktop");
     expect(screen.getByRole("alert")).toHaveTextContent("/app/data/jobs.db");
-    await screen.findByText("API / · connected");
-    expect(screen.getByRole("status")).toHaveTextContent("API / · connected");
+    expect(await screen.findByText("API connected")).toBeInTheDocument();
+    expect(screen.getByText("LinkedIn not collected yet")).toBeInTheDocument();
   });
 
   it("marks the API as disconnected and offers a retry when stats cannot load", async () => {
@@ -58,9 +60,36 @@ describe("database diagnostics", () => {
 
     render(<App />);
 
-    await screen.findByText("API / · disconnected");
-    expect(screen.getByRole("status")).toHaveTextContent("API / · disconnected");
+    expect(await screen.findByText("API disconnected")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Could not load stats from the API");
     expect(screen.getByRole("button", { name: "Retry connection" })).toBeEnabled();
+  });
+
+  it("uses the single jobs view without a separate review home", async () => {
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Jobs" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "Review" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Intelligence" })).toBeInTheDocument();
+  });
+
+  it("keeps collection freshness in the compact API line", async () => {
+    vi.mocked(fetchStats).mockResolvedValue({
+      ...emptyStats,
+      collection_freshness: {
+        as_of: new Date().toISOString(),
+        last_collected_at: new Date().toISOString(),
+        latest_observation_at: new Date().toISOString(),
+        latest_scrape_at: new Date().toISOString(),
+        source: "job_observation",
+        age_days: 0.1,
+        status: "fresh",
+      },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("LinkedIn updated 2h ago")).toBeInTheDocument();
+    expect(screen.queryByText("Collection freshness")).not.toBeInTheDocument();
   });
 });

@@ -43,9 +43,9 @@ def update_api_run_progress(
     *,
     stage: str,
     label: str,
-    current_source: str | None = None,
-    completed_sources: int | None = None,
-    total_sources: int | None = None,
+    current_query: str | None = None,
+    completed_queries: int | None = None,
+    total_queries: int | None = None,
     metrics: Mapping[str, int] | None = None,
     event: str | None = None,
     event_level: str = "info",
@@ -84,12 +84,12 @@ def update_api_run_progress(
             progress["stage"] = stage
             progress["label"] = label
             progress["updated_at"] = now
-            if current_source is not None:
-                progress["current_source"] = current_source
-            if completed_sources is not None:
-                progress["completed_sources"] = max(0, int(completed_sources))
-            if total_sources is not None:
-                progress["total_sources"] = max(0, int(total_sources))
+            if current_query is not None:
+                progress["current_query"] = current_query
+            if completed_queries is not None:
+                progress["completed_queries"] = max(0, int(completed_queries))
+            if total_queries is not None:
+                progress["total_queries"] = max(0, int(total_queries))
             safe_metrics = _safe_metrics(metrics)
             if safe_metrics is not None:
                 progress["metrics"] = safe_metrics

@@ -1,10 +1,7 @@
 import type {
   DbSummary,
   Job,
-  JobAnnotation,
   JobArchiveFilter,
-  JobAnnotationPriority,
-  JobAnnotationStatus,
   JobStats,
   JobsResponse,
   RunRequest,
@@ -118,9 +115,9 @@ export interface JobsQuery {
   location?: string;
   source?: string;
   company?: string;
+  roleFamily?: string;
+  queryGroup?: string;
   archived?: JobArchiveFilter;
-  annotationStatus?: JobAnnotationStatus | "";
-  annotationPriority?: JobAnnotationPriority | "";
   dateFrom?: string;
   dateTo?: string;
   sort?:
@@ -130,8 +127,6 @@ export interface JobsQuery {
     | "last_seen_asc"
     | "seen_count_desc"
     | "seen_count_asc"
-    | "fit_score_desc"
-    | "fit_score_asc"
     | "title_asc"
     | "title_desc";
 }
@@ -155,9 +150,9 @@ export async function fetchJobs(query: JobsQuery = {}): Promise<JobsResponse> {
       location: query.location,
       source: query.source,
       company: query.company,
+      role_family: query.roleFamily,
+      query_group: query.queryGroup,
       archived: query.archived,
-      annotation_status: query.annotationStatus,
-      annotation_priority: query.annotationPriority,
       date_from: normalizeDateStart(query.dateFrom),
       date_to: normalizeDateEnd(query.dateTo),
       sort: query.sort,
@@ -190,15 +185,6 @@ export async function restoreJob(jobId: string): Promise<void> {
   if (!res.ok) {
     throw await responseError(res);
   }
-}
-
-export async function updateJobAnnotation(jobId: string, payload: JobAnnotation): Promise<JobAnnotation> {
-  const res = await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/annotation`), {
-    method: "PUT",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
-  });
-  return handleJson<JobAnnotation>(res);
 }
 
 export async function fetchStats(): Promise<JobStats> {

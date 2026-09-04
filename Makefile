@@ -1,21 +1,32 @@
-PYTHON ?= python
-
-.PHONY: up doctor test test-image
+.PHONY: up doctor test backup relevance-preview relevance-apply restore
 
 up:
 	docker compose up -d --build
-	$(PYTHON) scripts/doctor.py
+	python3 backend/maintenance.py doctor
 
 doctor:
-	$(PYTHON) scripts/doctor.py
+	python3 backend/maintenance.py doctor
 
 test:
-	$(PYTHON) -m unittest discover -s backend/tests -t .
-	cd frontend && npm test -- --run
-
-test-image:
 	docker compose build backend
 	docker compose run --rm --no-deps \
 		-e JOBS_DB_PATH=/tmp/job-informer-tests.db \
 		-e RUN_STORE_DB_PATH=/tmp/job-informer-tests.db \
 		backend python -m unittest discover -s backend/tests -t .
+	docker build --target frontend-build -t job-informer-frontend-test -f backend/Dockerfile .
+	docker run --rm job-informer-frontend-test npm test -- --run
+
+backup:
+	docker compose exec backend python backend/maintenance.py backup
+
+relevance-preview:
+	docker compose exec backend python backend/maintenance.py relevance-preview
+
+relevance-apply:
+	@test "$(CONFIRM)" = "yes" || (echo "Run with CONFIRM=yes after reviewing relevance-preview"; exit 1)
+	docker compose exec backend python backend/maintenance.py relevance-apply --confirm $(if $(ARCHIVE_UNMATCHED),--include-unmatched,)
+
+restore:
+	@test -n "$(BACKUP)" || (echo "Run with BACKUP=/app/data/backups/<file>.db"; exit 1)
+	@test "$(CONFIRM)" = "yes" || (echo "Run with CONFIRM=yes after stopping writes"; exit 1)
+	docker compose exec backend python backend/maintenance.py restore "$(BACKUP)" --confirm

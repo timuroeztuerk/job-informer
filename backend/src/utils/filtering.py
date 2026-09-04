@@ -8,21 +8,27 @@ from typing import List, Optional
 STUDY_ROLE_PATTERNS = [
     r"\bintern(?:ship)?\b",
     r"\bpraktik(?:ant|um)?\b",
-    r"\bwerkstudent(?:in)?\b",
+    r"\bwerks?student\w*\b",
+    r"\bwerkstudier\w*\b",
     r"\bworking student\b",
     r"\bstudent(?:ische| assistant| helper)?\b",
     r"\bstudentenjob\b",
     r"\bthesis\b",
     r"\bmaster(?:arbeit|thesis)\b",
     r"\bbachelor(?:arbeit|thesis)\b",
+    r"\bbachelorand\w*\b",
     r"\bdissertation\b",
     r"\bdoctoral\b",
     r"\bphd(?: student)?\b",
     r"\btrainee(?:ship)?\b",
     r"\bausbildung\b",
     r"\bduales?(?: studium)?\b",
+    r"\bstudium\b",
+    r"\babschlussarbeit\b",
+    r"\bvolontariat\b",
+    r"\b(?:graduate|it)[-/ ]programme?\b",
+    r"\blehre\b",
     r"\bstudien[-/ ]?abschlussarbeit\b",
-    r"\bresearch assistant\b",
     r"\bhiwi\b",
 ]
 
@@ -35,6 +41,9 @@ ACADEMIC_ROLE_PATTERNS = [
     r"\bresearch fellow\b",
     r"\bdoktorand(?:in)?\b",
     r"\bwissenschaftlich\w*\*?n?\s+mitarbeiter\w*\b",
+    r"\bwiss\.?\s+(?:ma|mitarbeit\w*)\b",
+    r"\bwissenschaftlich\w*\s+(?:position|postition)\w*\b",
+    r"\bforschungsassistenz\w*\b",
 ]
 
 SUBSTRING_KEYWORDS = {"entwickl", "informatik"}
@@ -46,7 +55,7 @@ def normalize_text(text: str) -> str:
         return ""
     # Normalize unicode characters (handles accents, special characters)
     normalized = unicodedata.normalize('NFD', str(text)).encode('ascii', 'ignore').decode('ascii')
-    return normalized.lower().strip()
+    return re.sub(r"\s+", " ", normalized.lower()).strip()
 
 
 def match_keyword_filter(title: str, unwanted_keywords: List[str]) -> Optional[str]:
@@ -67,7 +76,12 @@ def match_keyword_filter(title: str, unwanted_keywords: List[str]) -> Optional[s
             if keyword_clean in title_normalized:
                 return keyword_clean
         elif ' ' in keyword_clean:
-            if keyword_clean in title_normalized:
+            # Match complete phrase tokens, allowing common title separators. A
+            # substring check would incorrectly treat "AI Engineering Manager"
+            # as an "AI Engineer" role.
+            tokens = [re.escape(token) for token in keyword_clean.split()]
+            pattern = r'(?<!\w)' + r'[\s/-]+'.join(tokens) + r'(?!\w)'
+            if re.search(pattern, title_normalized):
                 return keyword_clean
         else:
             pattern = r'\b' + re.escape(keyword_clean) + r'\b'
@@ -119,7 +133,7 @@ def should_filter_study_title(title: str) -> bool:
     return match_study_title_pattern(title) is not None
 
 
-def match_academic_title_pattern(title: str) -> Optional[str]:
+def match_academic_title_pattern(title: str, company: str = "") -> Optional[str]:
     """Return the matched pattern when a title clearly describes an academic role."""
     if not title:
         return None
@@ -128,9 +142,15 @@ def match_academic_title_pattern(title: str) -> Optional[str]:
     for pattern in ACADEMIC_ROLE_PATTERNS:
         if re.search(pattern, title_normalized):
             return pattern
+    company_normalized = normalize_text(company)
+    if re.search(r"\bresearch[\s/-]+(?:assistant|associate)\b", title_normalized) and re.search(
+        r"\b(?:\w*universitat|\w*universitaet|university|hochschule|college|faculty|unsw)\b",
+        company_normalized,
+    ):
+        return "academic_company:research_assistant"
     return None
 
 
-def should_filter_academic_title(title: str) -> bool:
+def should_filter_academic_title(title: str, company: str = "") -> bool:
     """Return True when the title clearly describes an academic role."""
-    return match_academic_title_pattern(title) is not None
+    return match_academic_title_pattern(title, company) is not None

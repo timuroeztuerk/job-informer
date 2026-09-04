@@ -45,11 +45,11 @@ class TestRunStore(unittest.TestCase):
             try:
                 updated = update_api_run_progress(
                     stage="collecting",
-                    label="Searching configured sources",
-                    current_source="LinkedIn · Data in Berlin",
-                    completed_sources=1,
-                    total_sources=3,
-                    metrics={"observed": 12, "new": 0, "archived": 0, "descriptions_fetched": 0, "parsed": 0},
+                    label="Searching LinkedIn",
+                    current_query="LinkedIn · Data in Berlin",
+                    completed_queries=1,
+                    total_queries=3,
+                    metrics={"observed": 12, "new": 0, "archived": 0},
                     event="Searching LinkedIn · Data in Berlin",
                 )
             finally:
@@ -65,9 +65,9 @@ class TestRunStore(unittest.TestCase):
             self.assertTrue(updated)
             progress = json.loads(store.get("progress-run")["progress_json"])
             self.assertEqual(progress["stage"], "collecting")
-            self.assertEqual(progress["current_source"], "LinkedIn · Data in Berlin")
-            self.assertEqual(progress["completed_sources"], 1)
-            self.assertEqual(progress["total_sources"], 3)
+            self.assertEqual(progress["current_query"], "LinkedIn · Data in Berlin")
+            self.assertEqual(progress["completed_queries"], 1)
+            self.assertEqual(progress["total_queries"], 3)
             self.assertEqual(progress["metrics"]["observed"], 12)
             self.assertEqual(progress["events"][-1]["message"], "Searching LinkedIn · Data in Berlin")
 
@@ -82,7 +82,7 @@ class TestRunStore(unittest.TestCase):
             log_path = Path(tmp_dir) / "run.log"
 
             active = store.claim_start("first", log_path, "run-once", None, None, None)
-            conflict = store.claim_start("second", log_path, "purge", None, None, None)
+            conflict = store.claim_start("second", log_path, "run-once", None, None, None)
 
             self.assertIsNone(active)
             self.assertEqual(conflict["run_id"], "first")

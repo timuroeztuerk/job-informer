@@ -5,7 +5,6 @@ Minimal HTTP API so the Vue frontend can trigger scrapes and read jobs.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sqlite3
@@ -13,9 +12,9 @@ import subprocess
 import sys
 import uuid
 import re
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Iterator, Literal, Optional
 
@@ -32,7 +31,6 @@ sys.path.insert(0, str(ROOT))
 
 from src.utils.database import JobDatabase  # noqa: E402
 from src.utils.db_summary import build_db_summary, compute_collection_freshness  # noqa: E402
-from src.utils.profile_fit import DEFAULT_FIT_PROFILE_ID, default_fit_profile  # noqa: E402
 from src.utils.sqlite_connection import open_sqlite  # noqa: E402
 from src.utils.time_utils import as_utc_datetime, normalize_utc_iso, utc_now, utc_now_iso  # noqa: E402
 
@@ -44,13 +42,6 @@ ANSI_ESCAPE_RE = re.compile(r"(?:\x1B[@-Z\\-_]|\x1B\[[0-?]*[ -/]*[@-~])")
 def _as_int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
-
-
-def _as_float_env(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
     except ValueError:
         return default
 
@@ -73,21 +64,19 @@ DB_PATH = _resolve_db_path("JOBS_DB_PATH", DEFAULT_DB)
 RUN_STORE_DB_PATH = _resolve_db_path("RUN_STORE_DB_PATH", Path(DB_PATH))
 API_TOKEN = os.getenv("API_TOKEN", "")
 MAX_LOG_BYTES = _as_int_env("MAX_LOG_BYTES", 30000)  # Avoid sending huge logs to the frontend
-AUTO_COLLECTION_INTERVAL_HOURS = max(0.0, _as_float_env("AUTO_COLLECTION_INTERVAL_HOURS", 0.0))
 APP_INSTANCE_NAME = os.getenv("APP_INSTANCE_NAME", "job-informer-local").strip() or "job-informer-local"
 
 FRONTEND_DIST_DIR = ROOT / "frontend" / "dist"
 REQUIRED_DB_TABLES = frozenset(
     {
+        "collection_queries",
         "filter_decisions",
-        "fit_profiles",
-        "job_annotations",
-        "job_fit_scores",
         "job_observations",
+        "job_query_matches",
         "jobs",
-        "llm_attempts",
-        "parse_job_states",
-        "parsed_descriptions",
+        "query_groups",
+        "query_terms",
+        "relevance_validation_labels",
         "scrape_runs",
     }
 )
@@ -100,7 +89,6 @@ class AppSettings:
     api_token: str
     max_log_bytes: int
     frontend_dist_dir: Path
-    auto_collection_interval_hours: float = 0.0
     instance_name: str = "job-informer-local"
 
 
@@ -110,7 +98,6 @@ APP_SETTINGS = AppSettings(
     api_token=API_TOKEN,
     max_log_bytes=MAX_LOG_BYTES,
     frontend_dist_dir=FRONTEND_DIST_DIR,
-    auto_collection_interval_hours=AUTO_COLLECTION_INTERVAL_HOURS,
     instance_name=APP_INSTANCE_NAME,
 )
 
@@ -177,7 +164,7 @@ def database_readiness(
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    global job_db, run_store, scheduler_task
+    global job_db, run_store
     job_db = JobDatabase(APP_SETTINGS.db_path)
     run_store = RunStore(APP_SETTINGS.run_store_db_path)
     readiness = database_readiness()
@@ -189,26 +176,18 @@ async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         readiness["active_jobs"],
     )
     run_store.interrupt_unfinished()
-    scheduler_task = None
-    if APP_SETTINGS.auto_collection_interval_hours > 0:
-        scheduler_task = asyncio.create_task(_collection_scheduler())
     try:
         yield
     finally:
-        if scheduler_task is not None:
-            scheduler_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await scheduler_task
         for record in list(RUNS.values()):
             if record.process.poll() is None:
                 record.process.terminate()
                 try:
-                    await asyncio.to_thread(record.process.wait, 5)
+                    record.process.wait(5)
                 except subprocess.TimeoutExpired:
                     record.process.kill()
                 run_store.update_status(record.run_id, "interrupted", None, utc_now())
         RUNS.clear()
-        scheduler_task = None
         job_db = None
         run_store = None
 
@@ -239,7 +218,6 @@ def readiness_check(response: Response) -> dict:
 
 job_db: Optional[JobDatabase] = None
 run_store: Optional["RunStore"] = None
-scheduler_task: Optional[asyncio.Task] = None
 
 
 def _require_job_db() -> JobDatabase:
@@ -261,36 +239,11 @@ def require_token(x_api_token: str | None = Header(default=None)):
     return True
 
 
-CLI_MODES: dict[str, list[str]] = {
-    "run-once": ["--run-once"],
-    "purge": ["--purge"],
-    "reset-ai-purge": ["--reset-ai-purge"],
-    "parse-descriptions": ["--parse-descriptions"],
-    "db-summary": ["--db-summary"],
-    "test": ["--test"],
-    "refetch-titles": ["--refetch-titles"],
-}
-
 DEFAULT_MODE = "run-once"
-CANONICAL_MODES: dict[str, str] = {}
-ANNOTATION_DEFAULT_STATUS = "unreviewed"
-ANNOTATION_DEFAULT_PRIORITY = "medium"
-
-
-def _canonical_mode(mode: str) -> str:
-    return CANONICAL_MODES.get(mode, mode)
 
 
 class RunRequest(BaseModel):
-    mode: Literal[
-        "run-once",
-        "purge",
-        "reset-ai-purge",
-        "parse-descriptions",
-        "db-summary",
-        "test",
-        "refetch-titles",
-    ] = DEFAULT_MODE
+    mode: Literal["run-once"] = DEFAULT_MODE
     keywords: Optional[str] = None
     locations: Optional[str] = None
     time_range: Optional[str] = None
@@ -305,9 +258,9 @@ class RunProgressEvent(BaseModel):
 class RunProgress(BaseModel):
     stage: str
     label: str
-    current_source: Optional[str] = None
-    completed_sources: Optional[int] = None
-    total_sources: Optional[int] = None
+    current_query: Optional[str] = None
+    completed_queries: Optional[int] = None
+    total_queries: Optional[int] = None
     metrics: Optional[dict[str, int]] = None
     updated_at: datetime
     events: list[RunProgressEvent] = Field(default_factory=list)
@@ -327,6 +280,7 @@ class RunStatus(BaseModel):
     trigger: str = "manual"
     pid: Optional[int] = None
     metrics: Optional[dict[str, int]] = None
+    query_coverage: Optional[list[dict[str, Any]]] = None
     progress: Optional[RunProgress] = None
 
 
@@ -343,42 +297,8 @@ class RunSummary(BaseModel):
     trigger: str = "manual"
     pid: Optional[int] = None
     metrics: Optional[dict[str, int]] = None
+    query_coverage: Optional[list[dict[str, Any]]] = None
     progress: Optional[RunProgress] = None
-
-
-class JobAnnotationPayload(BaseModel):
-    status: Literal[
-        "unreviewed",
-        "interesting",
-        "applied",
-        "interviewing",
-        "offer",
-        "rejected",
-        "archived",
-    ] = ANNOTATION_DEFAULT_STATUS
-    priority: Literal["low", "medium", "high"] = ANNOTATION_DEFAULT_PRIORITY
-    notes: str = ""
-    why_interesting: str = ""
-    skill_gaps: list[str] = Field(default_factory=list)
-    follow_up_date: Optional[str] = None
-    resume_version: str = ""
-
-
-class JobAnnotationResponse(JobAnnotationPayload):
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-
-
-class FitProfilePayload(BaseModel):
-    name: str = default_fit_profile()["name"]
-    config: dict[str, Any] = Field(default_factory=lambda: default_fit_profile()["config"])
-
-
-class FitProfileResponse(FitProfilePayload):
-    profile_id: str = DEFAULT_FIT_PROFILE_ID
-    version: int = 1
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
 
 
 class RunStore:
@@ -442,9 +362,9 @@ class RunStore:
         initial_progress = {
             "stage": "starting",
             "label": "Preparing run",
-            "current_source": None,
-            "completed_sources": None,
-            "total_sources": None,
+            "current_query": None,
+            "completed_queries": None,
+            "total_queries": None,
             "metrics": None,
             "updated_at": start_time,
             "events": [
@@ -667,8 +587,6 @@ def _metrics_for_api_run(run_id: str) -> Optional[dict[str, int]]:
                     COALESCE(SUM(observed_jobs_count), 0),
                     COALESCE(SUM(new_jobs_count), 0),
                     COALESCE(SUM(archived_jobs_count), 0),
-                    COALESCE(SUM(descriptions_fetched_count), 0),
-                    COALESCE(SUM(parsed_jobs_count), 0),
                     COUNT(*)
                 FROM scrape_runs
                 WHERE api_run_id = ?
@@ -683,14 +601,20 @@ def _metrics_for_api_run(run_id: str) -> Optional[dict[str, int]]:
                 if "coverage_json" in columns
                 else []
             )
-        if not row or int(row[5] or 0) == 0:
+            relevance_rows = (
+                conn.execute(
+                    "SELECT relevance_json FROM scrape_runs WHERE api_run_id = ?",
+                    (run_id,),
+                ).fetchall()
+                if "relevance_json" in columns
+                else []
+            )
+        if not row or int(row[3] or 0) == 0:
             return None
         metrics = {
             "observed": int(row[0] or 0),
             "new": int(row[1] or 0),
             "archived": int(row[2] or 0),
-            "descriptions_fetched": int(row[3] or 0),
-            "parsed": int(row[4] or 0),
         }
         reports: list[dict[str, Any]] = []
         for coverage_row in coverage_rows:
@@ -710,9 +634,66 @@ def _metrics_for_api_run(run_id: str) -> Optional[dict[str, int]]:
                     "rate_limit_responses": sum(int(report.get("rate_limit_responses", 0) or 0) for report in reports),
                 }
             )
+        for relevance_row in relevance_rows:
+            try:
+                relevance_metrics = json.loads(relevance_row[0] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                relevance_metrics = {}
+            if isinstance(relevance_metrics, dict):
+                for key, value in relevance_metrics.items():
+                    try:
+                        metrics[str(key)] = metrics.get(str(key), 0) + int(value)
+                    except (TypeError, ValueError):
+                        continue
         return metrics
     except sqlite3.Error:
         return None
+
+
+def _query_coverage_for_api_run(run_id: str) -> list[dict[str, Any]]:
+    """Return exact normalized query diagnostics for one API-launched run."""
+    if not run_id:
+        return []
+    try:
+        with open_jobs_db() as conn:
+            if not {
+                "collection_queries",
+                "scrape_runs",
+            }.issubset(
+                {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+            ):
+                return []
+            rows = conn.execute(
+                """
+                SELECT cq.query_group_key, qg.display_name, cq.query_text, cq.location,
+                       cq.page_offsets_json, cq.pages_attempted, cq.pages_completed,
+                       cq.raw_cards, cq.valid_jobs, cq.duplicate_cards,
+                       cq.request_failures, cq.rate_limit_responses,
+                       cq.stop_reason, cq.last_status, cq.last_error
+                FROM collection_queries cq
+                INNER JOIN scrape_runs sr ON sr.scrape_run_id = cq.scrape_run_id
+                LEFT JOIN query_groups qg ON qg.query_group_key = cq.query_group_key
+                WHERE sr.api_run_id = ?
+                ORDER BY cq.collection_query_id
+                """,
+                (run_id,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            try:
+                item["page_offsets"] = json.loads(item.pop("page_offsets_json") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                item["page_offsets"] = []
+            result.append(item)
+        return result
+    except sqlite3.Error:
+        return []
 
 
 def _progress_for_run(record: dict[str, Any]) -> Optional[RunProgress]:
@@ -779,6 +760,7 @@ class RunRecord:
             trigger=self.trigger,
             pid=self.process.pid if code is None else None,
             metrics=_metrics_for_api_run(self.run_id),
+            query_coverage=_query_coverage_for_api_run(self.run_id),
             progress=_progress_for_run(self._run_store.get(self.run_id) or {}),
         )
 
@@ -805,11 +787,7 @@ def _launch_run(payload: RunRequest, *, trigger: str) -> RunStatus:
     log_path = ROOT / "logs" / f"api_run_{run_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    requested_mode = payload.mode or DEFAULT_MODE
-    if requested_mode not in CLI_MODES:
-        raise HTTPException(status_code=400, detail=f"Unsupported mode: {requested_mode}")
-
-    mode = _canonical_mode(requested_mode)
+    mode = DEFAULT_MODE
     started_at = utc_now()
     active = _require_run_store().claim_start(
         run_id,
@@ -827,7 +805,7 @@ def _launch_run(payload: RunRequest, *, trigger: str) -> RunStatus:
             detail=f"Run {active['run_id']} is already {active['status']}; wait for it to finish.",
         )
 
-    cmd = [sys.executable, "-u", str(ROOT / "main.py"), *CLI_MODES[requested_mode]]
+    cmd = [sys.executable, "-u", str(ROOT / "main.py"), "--run-once"]
     if payload.keywords:
         cmd += ["--keywords", payload.keywords]
     if payload.locations:
@@ -867,34 +845,6 @@ def _launch_run(payload: RunRequest, *, trigger: str) -> RunStatus:
     return RUNS[run_id].status()
 
 
-async def _collection_scheduler() -> None:
-    """Launch the normal collection pipeline at an opt-in fixed interval."""
-    interval = timedelta(hours=APP_SETTINGS.auto_collection_interval_hours)
-    while True:
-        latest = _require_run_store().latest_collection_attempt()
-        reference_times: list[datetime] = []
-        if latest and latest.get("started_at"):
-            with suppress(ValueError):
-                timestamp = as_utc_datetime(latest["started_at"], naive_policy="utc")
-                if timestamp is not None:
-                    reference_times.append(timestamp)
-        freshness = compute_collection_freshness(_require_job_db())
-        if freshness.get("last_collected_at"):
-            with suppress(ValueError):
-                timestamp = as_utc_datetime(freshness["last_collected_at"])
-                if timestamp is not None:
-                    reference_times.append(timestamp)
-        last_activity = max(reference_times) if reference_times else None
-        due = last_activity is None or datetime.now(UTC) - last_activity >= interval
-        if due:
-            try:
-                _launch_run(RunRequest(mode="run-once"), trigger="scheduled")
-            except HTTPException as exc:
-                if exc.status_code != 409:
-                    raise
-        await asyncio.sleep(60)
-
-
 @app.get("/runs/{run_id}", response_model=RunStatus)
 def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
     """Return current status and recent log output for a run."""
@@ -910,7 +860,7 @@ def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
     started = as_utc_datetime(stored.get("started_at"), naive_policy="utc") or utc_now()
     return RunStatus(
         run_id=stored["run_id"],
-        mode=_canonical_mode(stored.get("mode") or DEFAULT_MODE),
+        mode=DEFAULT_MODE,
         status=stored["status"],
         return_code=stored["return_code"],
         log_tail=_read_log_tail(Path(stored["log_path"])),
@@ -922,6 +872,7 @@ def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
         trigger=stored.get("trigger") or "manual",
         pid=stored.get("pid"),
         metrics=_metrics_for_api_run(run_id),
+        query_coverage=_query_coverage_for_api_run(run_id),
         progress=_progress_for_run(stored),
     )
 
@@ -938,7 +889,7 @@ def list_runs(limit: int = Query(20, ge=1, le=100), _: bool = Depends(require_to
         summaries.append(
             RunSummary(
                 run_id=record["run_id"],
-                mode=_canonical_mode(record.get("mode") or DEFAULT_MODE),
+                mode=DEFAULT_MODE,
                 status=record["status"],
                 return_code=record["return_code"],
                 started_at=as_utc_datetime(record["started_at"], naive_policy="utc") or utc_now(),
@@ -949,6 +900,7 @@ def list_runs(limit: int = Query(20, ge=1, le=100), _: bool = Depends(require_to
                 trigger=record.get("trigger") or "manual",
                 pid=record.get("pid"),
                 metrics=_metrics_for_api_run(record["run_id"]),
+                query_coverage=_query_coverage_for_api_run(record["run_id"]),
                 progress=_progress_for_run(record),
             )
         )
@@ -963,24 +915,20 @@ def list_jobs(
     location: Optional[str] = None,
     source: Optional[str] = None,
     company: Optional[str] = None,
-    fit_profile_id: str = Query(default=DEFAULT_FIT_PROFILE_ID),
-    fit_band: Optional[str] = None,
-    min_fit_score: Optional[float] = Query(default=None, ge=0, le=100),
-    annotation_status: Optional[str] = None,
-    annotation_priority: Optional[str] = None,
+    role_family: Optional[str] = None,
+    query_group: Optional[str] = None,
     archived: Literal["exclude", "include", "only"] = Query(default="exclude"),
     date_from: Optional[str] = Query(default=None, description="ISO date/time lower bound"),
     date_to: Optional[str] = Query(default=None, description="ISO date/time upper bound"),
     sort: str = Query(
         default="scraped_at_desc",
-        description="scraped_at_desc|scraped_at_asc|last_seen_desc|last_seen_asc|seen_count_desc|seen_count_asc|fit_score_desc|fit_score_asc|title_asc|title_desc",
+        description="scraped_at_desc|scraped_at_asc|last_seen_desc|last_seen_asc|seen_count_desc|seen_count_asc|title_asc|title_desc",
     ),
     _: bool = Depends(require_token),
 ) -> dict:
     """Return a simple paginated job list with optional filters."""
-    clauses = ["1=1"]
+    clauses = ["LOWER(j.source) = 'linkedin'"]
     params: list[str] = []
-    join_params: list[Any] = [fit_profile_id]
 
     if archived == "exclude":
         clauses.append("j.archived_at IS NULL")
@@ -1000,18 +948,23 @@ def list_jobs(
     if company:
         clauses.append("j.company LIKE ?")
         params.append(f"%{company}%")
-    if fit_band:
-        clauses.append("COALESCE(f.band, 'unscored') = ?")
-        params.append(fit_band)
-    if min_fit_score is not None:
-        clauses.append("COALESCE(f.score, 0) >= ?")
-        params.append(float(min_fit_score))
-    if annotation_status:
-        clauses.append(f"COALESCE(a.status, '{ANNOTATION_DEFAULT_STATUS}') = ?")
-        params.append(annotation_status)
-    if annotation_priority:
-        clauses.append(f"COALESCE(a.priority, '{ANNOTATION_DEFAULT_PRIORITY}') = ?")
-        params.append(annotation_priority)
+    if role_family:
+        clauses.append("j.role_family = ?")
+        params.append(role_family)
+    if query_group:
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM job_query_matches jqm_filter
+                INNER JOIN collection_queries cq_filter
+                    ON cq_filter.collection_query_id = jqm_filter.collection_query_id
+                WHERE jqm_filter.job_id = j.job_id
+                  AND cq_filter.query_group_key = ?
+            )
+            """
+        )
+        params.append(query_group)
     if date_from:
         clauses.append("datetime(COALESCE(j.scraped_at, j.created_at)) >= datetime(?)")
         params.append(date_from)
@@ -1026,8 +979,6 @@ def list_jobs(
         "last_seen_asc": "datetime(COALESCE(j.last_seen_at, j.scraped_at, j.created_at)) ASC",
         "seen_count_desc": "COALESCE(j.seen_count, 1) DESC, datetime(COALESCE(j.last_seen_at, j.scraped_at, j.created_at)) DESC",
         "seen_count_asc": "COALESCE(j.seen_count, 1) ASC, datetime(COALESCE(j.last_seen_at, j.scraped_at, j.created_at)) ASC",
-        "fit_score_desc": "COALESCE(f.score, 0) DESC, datetime(COALESCE(j.last_seen_at, j.scraped_at, j.created_at)) DESC",
-        "fit_score_asc": "COALESCE(f.score, 0) ASC, datetime(COALESCE(j.last_seen_at, j.scraped_at, j.created_at)) DESC",
         "title_asc": "j.title COLLATE NOCASE ASC",
         "title_desc": "j.title COLLATE NOCASE DESC",
     }
@@ -1051,38 +1002,31 @@ def list_jobs(
                     j.first_seen_at,
                     j.last_seen_at,
                     j.seen_count,
-                    f.score AS fit_score,
-                    f.band AS fit_band,
-                    f.reasons_json AS fit_reasons_json,
-                    f.signals_json AS fit_signals_json,
-                    f.computed_at AS fit_computed_at,
-                    f.profile_version AS fit_profile_version,
-                    a.status AS annotation_status,
-                    a.priority AS annotation_priority,
-                    a.notes AS annotation_notes,
-                    a.why_interesting AS annotation_why_interesting,
-                    a.skill_gaps AS annotation_skill_gaps,
-                    a.follow_up_date AS annotation_follow_up_date,
-                    a.resume_version AS annotation_resume_version,
-                    a.created_at AS annotation_created_at,
-                    a.updated_at AS annotation_updated_at
+                    j.relevance_outcome,
+                    j.role_family,
+                    j.relevance_reason,
+                    j.relevance_ruleset_version,
+                    j.relevance_evaluated_at,
+                    (
+                        SELECT GROUP_CONCAT(DISTINCT cq.query_group_key)
+                        FROM job_query_matches jqm
+                        INNER JOIN collection_queries cq
+                            ON cq.collection_query_id = jqm.collection_query_id
+                        WHERE jqm.job_id = j.job_id
+                    ) AS query_groups_csv
                 FROM jobs j
-                LEFT JOIN job_fit_scores f ON f.job_id = j.job_id AND f.profile_id = ?
-                LEFT JOIN job_annotations a ON a.job_id = j.job_id
                 WHERE {where_clause}
                 ORDER BY {order_by}
                 LIMIT ? OFFSET ?
             """
-            rows = conn.execute(query, [*join_params, *params, limit, offset]).fetchall()
+            rows = conn.execute(query, [*params, limit, offset]).fetchall()
 
             count_query = f"""
                 SELECT COUNT(*)
                 FROM jobs j
-                LEFT JOIN job_fit_scores f ON f.job_id = j.job_id AND f.profile_id = ?
-                LEFT JOIN job_annotations a ON a.job_id = j.job_id
                 WHERE {where_clause}
             """
-            total = conn.execute(count_query, [*join_params, *params]).fetchone()[0]
+            total = conn.execute(count_query, params).fetchone()[0]
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Database error: {exc}") from exc
 
@@ -1096,147 +1040,46 @@ def list_jobs(
 @app.get("/jobs/{job_id:path}")
 def get_job(
     job_id: str,
-    fit_profile_id: str = Query(default=DEFAULT_FIT_PROFILE_ID),
     _: bool = Depends(require_token),
 ) -> dict:
     """Return a single job by id."""
     try:
         with open_jobs_db() as conn:
-            row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
-            parsed = _latest_parsed_description(conn, job_id)
-            annotation = _job_annotation_for_job(conn, job_id)
-            observations = _job_observations_for_job(conn, job_id)
-            fit = _job_fit_for_job(conn, job_id, fit_profile_id)
-            filter_decisions = _require_job_db().get_filter_decisions(job_id)
-            parse_status = _require_job_db().get_parse_status(job_id)
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE job_id = ? AND LOWER(source) = 'linkedin'",
+                (job_id,),
+            ).fetchone()
+            query_matches = conn.execute(
+                """
+                SELECT
+                    cq.query_group_key,
+                    COALESCE(qg.display_name, cq.query_group_key) AS query_group_name,
+                    cq.query_text,
+                    cq.location,
+                    MIN(jqm.first_page_offset) AS first_page_offset,
+                    MAX(sr.observed_at) AS last_matched_at,
+                    COUNT(DISTINCT cq.scrape_run_id) AS match_runs
+                FROM job_query_matches jqm
+                INNER JOIN collection_queries cq
+                    ON cq.collection_query_id = jqm.collection_query_id
+                INNER JOIN scrape_runs sr ON sr.scrape_run_id = cq.scrape_run_id
+                LEFT JOIN query_groups qg ON qg.query_group_key = cq.query_group_key
+                WHERE jqm.job_id = ?
+                GROUP BY cq.query_group_key, qg.display_name, cq.query_text, cq.location
+                ORDER BY datetime(MAX(sr.observed_at)) DESC, cq.query_group_key, cq.query_text
+                LIMIT 50
+                """,
+                (job_id,),
+            ).fetchall()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Database error: {exc}") from exc
 
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
     job = _row_to_dict(row)
-    if parsed:
-        job["parsed_description"] = parsed
-    job["annotation"] = annotation
     job["observation"] = _observation_from_row(row)
-    job["observations"] = observations
-    job["fit"] = fit
-    job["parse_status"] = parse_status
-    job["filter_decisions"] = filter_decisions
+    job["query_matches"] = [_row_to_dict(match) for match in query_matches]
     return job
-
-
-@app.put("/jobs/{job_id:path}/annotation", response_model=JobAnnotationResponse)
-def update_job_annotation(
-    job_id: str,
-    payload: JobAnnotationPayload,
-    _: bool = Depends(require_token),
-) -> JobAnnotationResponse:
-    """Create or update personal workflow annotations for a job."""
-    try:
-        with open_jobs_db() as conn:
-            existing = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
-            if not existing:
-                raise HTTPException(status_code=404, detail="Job not found")
-
-            normalized_skill_gaps = _normalize_skill_gaps(payload.skill_gaps)
-            updated_at = utc_now_iso()
-            conn.execute(
-                """
-                INSERT INTO job_annotations (
-                    job_id,
-                    status,
-                    priority,
-                    notes,
-                    why_interesting,
-                    skill_gaps,
-                    follow_up_date,
-                    resume_version,
-                    created_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(job_id) DO UPDATE SET
-                    status = excluded.status,
-                    priority = excluded.priority,
-                    notes = excluded.notes,
-                    why_interesting = excluded.why_interesting,
-                    skill_gaps = excluded.skill_gaps,
-                    follow_up_date = excluded.follow_up_date,
-                    resume_version = excluded.resume_version,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    job_id,
-                    payload.status,
-                    payload.priority,
-                    payload.notes.strip(),
-                    payload.why_interesting.strip(),
-                    json.dumps(normalized_skill_gaps),
-                    payload.follow_up_date or None,
-                    payload.resume_version.strip(),
-                    updated_at,
-                    updated_at,
-                ),
-            )
-            conn.commit()
-
-            row = conn.execute(
-                """
-                SELECT
-                    status,
-                    priority,
-                    notes,
-                    why_interesting,
-                    skill_gaps,
-                    follow_up_date,
-                    resume_version,
-                    created_at,
-                    updated_at
-                FROM job_annotations
-                WHERE job_id = ?
-                """,
-                (job_id,),
-            ).fetchone()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to update annotation: {exc}") from exc
-
-    annotation = _annotation_from_row(row)
-    return JobAnnotationResponse(**annotation)
-
-
-@app.get("/fit-profile", response_model=FitProfileResponse)
-def get_fit_profile(
-    profile_id: str = Query(default=DEFAULT_FIT_PROFILE_ID),
-    _: bool = Depends(require_token),
-) -> FitProfileResponse:
-    """Return the active profile-fit configuration."""
-    profile = _require_job_db().get_fit_profile(profile_id)
-    return FitProfileResponse(**profile)
-
-
-@app.put("/fit-profile", response_model=FitProfileResponse)
-def update_fit_profile(
-    payload: FitProfilePayload,
-    profile_id: str = Query(default=DEFAULT_FIT_PROFILE_ID),
-    _: bool = Depends(require_token),
-) -> FitProfileResponse:
-    """Update the active profile-fit configuration and refresh scores."""
-    db = _require_job_db()
-    profile = db.upsert_fit_profile(profile_id=profile_id, name=payload.name, config=payload.config)
-    db.recompute_fit_scores(profile_id=profile_id)
-    return FitProfileResponse(**profile)
-
-
-@app.post("/fit-profile/recompute")
-def recompute_fit_profile(
-    profile_id: str = Query(default=DEFAULT_FIT_PROFILE_ID),
-    _: bool = Depends(require_token),
-) -> dict:
-    """Recompute persisted fit scores for the selected profile."""
-    updated = _require_job_db().recompute_fit_scores(profile_id=profile_id)
-    return {"profile_id": profile_id, "updated": updated}
 
 
 @app.delete("/jobs/{job_id:path}", status_code=204)
@@ -1295,29 +1138,79 @@ def restore_job(job_id: str, _: bool = Depends(require_token)) -> Response:
 def job_stats(_: bool = Depends(require_token)) -> dict:
     """Lightweight wrapper around JobDatabase summary for dashboards."""
     try:
-        summary = _require_job_db().get_job_summary()
         with open_jobs_db() as conn:
+            counts = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN archived_at IS NULL AND datetime(scraped_at) > datetime('now', '-7 days') THEN 1 ELSE 0 END),
+                    MIN(CASE WHEN archived_at IS NULL THEN datetime(scraped_at) END),
+                    MAX(CASE WHEN archived_at IS NULL THEN datetime(scraped_at) END)
+                FROM jobs
+                WHERE LOWER(source) = 'linkedin'
+                """
+            ).fetchone()
             sources = [
                 r[0]
                 for r in conn.execute(
-                    "SELECT DISTINCT source FROM jobs WHERE archived_at IS NULL ORDER BY source"
+                    "SELECT DISTINCT source FROM jobs WHERE archived_at IS NULL AND LOWER(source) = 'linkedin' ORDER BY source"
                 ).fetchall()
             ]
             companies = [
                 r[0]
                 for r in conn.execute(
-                    "SELECT DISTINCT company FROM jobs WHERE archived_at IS NULL ORDER BY company LIMIT 200"
+                    "SELECT DISTINCT company FROM jobs WHERE archived_at IS NULL AND LOWER(source) = 'linkedin' ORDER BY company LIMIT 200"
                 ).fetchall()
             ]
+            role_families = [
+                r[0]
+                for r in conn.execute(
+                    """
+                    SELECT DISTINCT role_family FROM jobs
+                    WHERE archived_at IS NULL AND LOWER(source) = 'linkedin'
+                      AND role_family IS NOT NULL AND role_family != ''
+                    ORDER BY role_family
+                    """
+                ).fetchall()
+            ]
+            query_groups = [
+                {"key": r[0], "name": r[1]}
+                for r in conn.execute(
+                    """
+                    SELECT DISTINCT cq.query_group_key,
+                           COALESCE(qg.display_name, cq.query_group_key)
+                    FROM job_query_matches jqm
+                    INNER JOIN jobs j ON j.job_id = jqm.job_id
+                    INNER JOIN collection_queries cq
+                        ON cq.collection_query_id = jqm.collection_query_id
+                    LEFT JOIN query_groups qg ON qg.query_group_key = cq.query_group_key
+                    WHERE j.archived_at IS NULL AND LOWER(j.source) = 'linkedin'
+                    ORDER BY 2
+                    """
+                ).fetchall()
+            ]
+            company_rows = conn.execute(
+                """
+                SELECT company, COUNT(*)
+                FROM jobs
+                WHERE archived_at IS NULL AND LOWER(source) = 'linkedin'
+                GROUP BY company ORDER BY COUNT(*) DESC LIMIT 10
+                """
+            ).fetchall()
+        summary = {
+            "total_jobs": int(counts[0] or 0),
+            "archived_jobs": int(counts[1] or 0),
+            "recent_jobs_7_days": int(counts[2] or 0),
+            "date_range": {"earliest": counts[3], "latest": counts[4]},
+            "jobs_by_source": {"LinkedIn": int(counts[0] or 0)},
+            "top_companies": dict(company_rows),
+        }
         summary["sources_list"] = sources
         summary["companies_list"] = companies
+        summary["role_families_list"] = role_families
+        summary["query_groups_list"] = query_groups
         summary["collection_freshness"] = compute_collection_freshness(_require_job_db())
-        latest_success = _require_run_store().latest_successful_collection()
-        summary["collection_scheduler"] = {
-            "enabled": APP_SETTINGS.auto_collection_interval_hours > 0,
-            "interval_hours": APP_SETTINGS.auto_collection_interval_hours,
-            "last_successful_run_at": latest_success.get("finished_at") if latest_success else None,
-        }
         summary["database"] = database_readiness()
         return summary
     except Exception as exc:
@@ -1366,76 +1259,6 @@ def _clean_log_text(text: str) -> str:
     return cleaned.replace("\r", "\n")
 
 
-def _normalize_skill_gaps(values: list[str] | None) -> list[str]:
-    if not values:
-        return []
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        clean = " ".join(str(value).strip().split())
-        if not clean:
-            continue
-        key = clean.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(clean)
-    return normalized
-
-
-def _parse_skill_gaps(raw_value: object) -> list[str]:
-    if raw_value in (None, ""):
-        return []
-    if isinstance(raw_value, list):
-        return _normalize_skill_gaps([str(item) for item in raw_value])
-    try:
-        payload = json.loads(str(raw_value))
-    except Exception:
-        payload = [part.strip() for part in str(raw_value).split(",")]
-    if isinstance(payload, list):
-        return _normalize_skill_gaps([str(item) for item in payload])
-    return _normalize_skill_gaps([str(payload)])
-
-
-def _annotation_from_row(row: sqlite3.Row | None) -> dict:
-    if row is None:
-        return {
-            "status": ANNOTATION_DEFAULT_STATUS,
-            "priority": ANNOTATION_DEFAULT_PRIORITY,
-            "notes": "",
-            "why_interesting": "",
-            "skill_gaps": [],
-            "follow_up_date": None,
-            "resume_version": "",
-            "created_at": None,
-            "updated_at": None,
-        }
-
-    keys = set(row.keys())
-    status_key = "annotation_status" if "annotation_status" in keys else "status"
-    priority_key = "annotation_priority" if "annotation_priority" in keys else "priority"
-    notes_key = "annotation_notes" if "annotation_notes" in keys else "notes"
-    why_key = "annotation_why_interesting" if "annotation_why_interesting" in keys else "why_interesting"
-    gaps_key = "annotation_skill_gaps" if "annotation_skill_gaps" in keys else "skill_gaps"
-    follow_up_key = "annotation_follow_up_date" if "annotation_follow_up_date" in keys else "follow_up_date"
-    resume_key = "annotation_resume_version" if "annotation_resume_version" in keys else "resume_version"
-    created_key = "annotation_created_at" if "annotation_created_at" in keys else "created_at"
-    updated_key = "annotation_updated_at" if "annotation_updated_at" in keys else "updated_at"
-
-    return {
-        "status": row[status_key] or ANNOTATION_DEFAULT_STATUS,
-        "priority": row[priority_key] or ANNOTATION_DEFAULT_PRIORITY,
-        "notes": row[notes_key] or "",
-        "why_interesting": row[why_key] or "",
-        "skill_gaps": _parse_skill_gaps(row[gaps_key] if gaps_key in keys else None),
-        "follow_up_date": row[follow_up_key] if follow_up_key in keys else None,
-        "resume_version": row[resume_key] or "",
-        "created_at": row[created_key] if created_key in keys else None,
-        "updated_at": row[updated_key] if updated_key in keys else None,
-    }
-
-
 def _active_days_between(first_seen_at: object, last_seen_at: object) -> int | None:
     try:
         first = datetime.fromisoformat(str(first_seen_at).replace("Z", "+00:00")) if first_seen_at else None
@@ -1476,164 +1299,12 @@ def _observation_from_row(row: sqlite3.Row | None) -> dict:
     }
 
 
-def _fit_from_row(row: sqlite3.Row | None) -> dict | None:
-    if row is None:
-        return None
-
-    keys = set(row.keys())
-    if "fit_score" not in keys and "score" not in keys:
-        return None
-
-    score_key = "fit_score" if "fit_score" in keys else "score"
-    band_key = "fit_band" if "fit_band" in keys else "band"
-    reasons_key = "fit_reasons_json" if "fit_reasons_json" in keys else "reasons_json"
-    signals_key = "fit_signals_json" if "fit_signals_json" in keys else "signals_json"
-    computed_key = "fit_computed_at" if "fit_computed_at" in keys else "computed_at"
-    profile_version_key = "fit_profile_version" if "fit_profile_version" in keys else "profile_version"
-    profile_id_key = "fit_profile_id" if "fit_profile_id" in keys else "profile_id"
-
-    score_value = row[score_key] if score_key in keys else None
-    if score_value in (None, ""):
-        return None
-
-    try:
-        reasons = json.loads(row[reasons_key]) if reasons_key in keys and row[reasons_key] else []
-    except Exception:
-        reasons = []
-    try:
-        signals = json.loads(row[signals_key]) if signals_key in keys and row[signals_key] else {}
-    except Exception:
-        signals = {}
-
-    return {
-        "profile_id": row[profile_id_key] if profile_id_key in keys else DEFAULT_FIT_PROFILE_ID,
-        "score": float(score_value),
-        "band": row[band_key] if band_key in keys else "unscored",
-        "reasons": reasons if isinstance(reasons, list) else [],
-        "signals": signals if isinstance(signals, dict) else {},
-        "computed_at": row[computed_key] if computed_key in keys else None,
-        "profile_version": int(row[profile_version_key] or 1) if profile_version_key in keys else 1,
-    }
-
-
 def _job_row_to_dict(row: sqlite3.Row) -> dict:
     job = _row_to_dict(row)
-    for key in [
-        "fit_score",
-        "fit_band",
-        "fit_reasons_json",
-        "fit_signals_json",
-        "fit_computed_at",
-        "fit_profile_version",
-        "annotation_status",
-        "annotation_priority",
-        "annotation_notes",
-        "annotation_why_interesting",
-        "annotation_skill_gaps",
-        "annotation_follow_up_date",
-        "annotation_resume_version",
-        "annotation_created_at",
-        "annotation_updated_at",
-    ]:
-        job.pop(key, None)
-    job["annotation"] = _annotation_from_row(row)
+    query_groups_csv = str(job.pop("query_groups_csv", "") or "")
+    job["query_groups"] = [value for value in query_groups_csv.split(",") if value]
     job["observation"] = _observation_from_row(row)
-    job["fit"] = _fit_from_row(row)
     return job
-
-
-def _job_annotation_for_job(conn: sqlite3.Connection, job_id: str) -> dict:
-    row = conn.execute(
-        """
-        SELECT
-            status,
-            priority,
-            notes,
-            why_interesting,
-            skill_gaps,
-            follow_up_date,
-            resume_version,
-            created_at,
-            updated_at
-        FROM job_annotations
-        WHERE job_id = ?
-        """,
-        (job_id,),
-    ).fetchone()
-    return _annotation_from_row(row)
-
-
-def _job_observations_for_job(conn: sqlite3.Connection, job_id: str, limit: int = 20) -> list[dict]:
-    rows = conn.execute(
-        """
-        SELECT
-            observed_at,
-            scrape_run_id,
-            title,
-            company,
-            location,
-            source,
-            url,
-            salary,
-            description_present,
-            is_new
-        FROM job_observations
-        WHERE job_id = ?
-        ORDER BY datetime(observed_at) DESC, observation_id DESC
-        LIMIT ?
-        """,
-        (job_id, max(1, int(limit))),
-    ).fetchall()
-    return [_row_to_dict(row) for row in rows]
-
-
-def _job_fit_for_job(conn: sqlite3.Connection, job_id: str, profile_id: str = DEFAULT_FIT_PROFILE_ID) -> dict | None:
-    row = conn.execute(
-        """
-        SELECT
-            profile_id AS fit_profile_id,
-            score AS fit_score,
-            band AS fit_band,
-            reasons_json AS fit_reasons_json,
-            signals_json AS fit_signals_json,
-            computed_at AS fit_computed_at,
-            profile_version AS fit_profile_version
-        FROM job_fit_scores
-        WHERE profile_id = ? AND job_id = ?
-        """,
-        (profile_id, job_id),
-    ).fetchone()
-    return _fit_from_row(row)
-
-
-def _latest_parsed_description(conn: sqlite3.Connection, job_id: str) -> dict | None:
-    try:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT payload_json, version, created_at
-            FROM parsed_descriptions
-            WHERE job_id = ?
-            ORDER BY version DESC, datetime(created_at) DESC
-            LIMIT 1
-            """,
-            (job_id,),
-        ).fetchone()
-        if not row:
-            return None
-        payload = None
-        try:
-            payload = json.loads(row["payload_json"])
-        except Exception:
-            payload = None
-        return {
-            "payload": payload,
-            "raw": row["payload_json"],
-            "version": row["version"],
-            "created_at": row["created_at"],
-        }
-    except Exception:
-        return None
 
 
 def mount_frontend(app_instance: FastAPI, frontend_dist_dir: Path) -> None:

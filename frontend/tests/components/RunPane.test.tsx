@@ -35,10 +35,10 @@ const structuredRunningRun = (): RunStatus => ({
   progress: {
     stage: "collecting",
     label: "Searching configured sources",
-    current_source: "LinkedIn · Data in Berlin",
-    completed_sources: 1,
-    total_sources: 3,
-    metrics: { observed: 12, new: 3, archived: 1, descriptions_fetched: 0, parsed: 0 },
+    current_query: "LinkedIn · Data in Berlin",
+    completed_queries: 1,
+    total_queries: 3,
+    metrics: { observed: 12, new: 3, archived: 1 },
     updated_at: "2026-07-13T08:00:10Z",
     events: [
       { at: "2026-07-13T08:00:00Z", level: "info", message: "Starting source collection" },
@@ -55,15 +55,14 @@ describe("RunPane actions", () => {
     vi.mocked(startRun).mockReset().mockImplementation(async ({ mode = "run-once" }) => completedRun(mode));
   });
 
-  it("keeps collection prominent and maintenance collapsed by default", async () => {
+  it("keeps the single collection action prominent", async () => {
     const user = userEvent.setup();
     render(<RunPane />);
 
-    expect(screen.getByRole("button", { name: "Collect now" })).toBeInTheDocument();
-    const maintenance = screen.getByText("Infrequent cleanup, parsing, and repair tools.").closest("details");
-    expect(maintenance).not.toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "Collect jobs" })).toBeInTheDocument();
+    expect(screen.queryByText("Maintenance")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Collect now" }));
+    await user.click(screen.getByRole("button", { name: "Collect jobs" }));
     expect(startRun).toHaveBeenCalledWith({ mode: "run-once" });
   });
 
@@ -82,10 +81,10 @@ describe("RunPane actions", () => {
     vi.mocked(getRunStatus).mockResolvedValue(runningRun("running"));
 
     render(<RunPane />);
-    await user.click(screen.getByRole("button", { name: "Collect now" }));
+    await user.click(screen.getByRole("button", { name: "Collect jobs" }));
 
-    expect(await screen.findByText("Collection in progress")).toBeInTheDocument();
-    expect(screen.getByText("Collecting and recording live output", { exact: false })).toBeInTheDocument();
+    expect(await screen.findByText("Collecting jobs…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collecting…" })).toBeDisabled();
     expect(getRunStatus).toHaveBeenCalledWith("run-collection");
   });
 
@@ -96,56 +95,25 @@ describe("RunPane actions", () => {
 
     render(<RunPane onRunStatusChange={onRunStatusChange} />);
 
-    expect(await screen.findByText("Collection in progress")).toBeInTheDocument();
+    expect(await screen.findByText("Collecting jobs…")).toBeInTheDocument();
     expect(getRunStatus).toHaveBeenCalledWith("run-collection");
     expect(onRunStatusChange).toHaveBeenCalledWith(expect.objectContaining({ run_id: "run-collection", status: "running" }));
   });
 
-  it("shows structured collection progress before the collapsed technical log", async () => {
+  it("shows only compact structured progress", async () => {
     const user = userEvent.setup();
     vi.mocked(startRun).mockResolvedValue(structuredRunningRun());
     vi.mocked(getRunStatus).mockResolvedValue(structuredRunningRun());
     render(<RunPane />);
 
-    await user.click(screen.getByRole("button", { name: "Collect now" }));
+    await user.click(screen.getByRole("button", { name: "Collect jobs" }));
 
-    expect(await screen.findByText("LinkedIn · Data in Berlin")).toBeInTheDocument();
-    expect(screen.getByText("Sources 1 of 3")).toBeInTheDocument();
+    expect(await screen.findByText(/LinkedIn · Data in Berlin/)).toBeInTheDocument();
     expect(screen.getByRole("progressbar")).toHaveAttribute("max", "3");
-    expect(screen.getByText("Searching LinkedIn · Data in Berlin")).toBeInTheDocument();
-    const technicalLog = screen.getByText("Technical log").closest("details");
-    expect(technicalLog).not.toHaveAttribute("open");
-
-    await user.click(screen.getByText("Technical log").closest("summary")!);
-    expect(technicalLog).toHaveAttribute("open");
-    expect(screen.getByText("raw terminal line")).toBeInTheDocument();
+    expect(screen.getByText("Searching configured sources")).toBeInTheDocument();
+    expect(screen.queryByText("Technical log")).not.toBeInTheDocument();
+    expect(screen.queryByText("Query diagnostics")).not.toBeInTheDocument();
+    expect(screen.queryByText("run-collection")).not.toBeInTheDocument();
   });
 
-  it("requires confirmation before cleaning the database", async () => {
-    const user = userEvent.setup();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
-    render(<RunPane />);
-
-    await user.click(screen.getByText("Infrequent cleanup, parsing, and repair tools.").closest("summary")!);
-    await user.click(screen.getByRole("button", { name: /Clean database/ }));
-
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Matching postings may be archived"));
-    expect(startRun).not.toHaveBeenCalled();
-
-    confirm.mockReturnValue(true);
-    await user.click(screen.getByRole("button", { name: /Clean database/ }));
-    expect(startRun).toHaveBeenCalledWith({ mode: "purge" });
-  });
-
-  it("requires confirmation before resetting AI purge flags", async () => {
-    const user = userEvent.setup();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    render(<RunPane />);
-
-    await user.click(screen.getByText("Infrequent cleanup, parsing, and repair tools.").closest("summary")!);
-    await user.click(screen.getByRole("button", { name: /Reset AI purge/ }));
-
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("eligible for AI filtering again"));
-    expect(startRun).toHaveBeenCalledWith({ mode: "reset-ai-purge" });
-  });
 });

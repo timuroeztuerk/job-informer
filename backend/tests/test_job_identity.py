@@ -40,7 +40,6 @@ class TestLinkedInIdentity(unittest.TestCase):
                 "location": "Berlin",
                 "source": "LinkedIn",
                 "salary": "Not specified",
-                "description": "Build data systems.",
             }
             first = pd.DataFrame(
                 [
@@ -101,13 +100,12 @@ class TestLinkedInIdentity(unittest.TestCase):
                         source,
                         url,
                         salary,
-                        description,
                         normalized_key,
                         scraped_at,
                         first_seen_at,
                         last_seen_at,
                         seen_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         legacy_job_id,
@@ -117,7 +115,6 @@ class TestLinkedInIdentity(unittest.TestCase):
                         "LinkedIn",
                         legacy_url,
                         "Not specified",
-                        "Model data.",
                         legacy_url,
                         first_seen,
                         first_seen,
@@ -139,7 +136,6 @@ class TestLinkedInIdentity(unittest.TestCase):
                             "data-scientist-at-acme-4545454545?refId=new"
                         ),
                         "salary": "Not specified",
-                        "description": "Model data.",
                     }
                 ]
             )

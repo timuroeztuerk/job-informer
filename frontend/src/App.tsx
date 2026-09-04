@@ -1,15 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import JobDetail from "./components/JobDetail";
 import JobTable, { JobTableHandle } from "./components/JobTable";
-import RecentRuns from "./components/RecentRuns";
-import ReviewHome, { type ReviewHomeDashboardFilters } from "./components/ReviewHome";
-import RunPane, { type RunPaneHandle } from "./components/RunPane";
+import RunPane from "./components/RunPane";
 import SummaryPage from "./components/SummaryPage";
 import { API_BASE, fetchStats, getApiErrorMessage } from "./api";
 import type { Job, JobStats, RunStatus } from "./types";
 import { readTextParam, replaceSearchParams } from "./urlState";
 
-type ViewMode = "review" | "dashboard" | "summary";
+type ViewMode = "dashboard" | "summary";
 type ApiConnectionStatus = "checking" | "connected" | "disconnected";
 
 const App: React.FC = () => {
@@ -19,14 +17,13 @@ const App: React.FC = () => {
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const requestedView = readTextParam("view");
-    return requestedView === "dashboard" || requestedView === "summary" ? requestedView : "review";
+    return requestedView === "summary" ? requestedView : "dashboard";
   });
   const [dataRefreshToken, setDataRefreshToken] = useState(0);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<RunStatus | null>(null);
   const [now, setNow] = useState(new Date());
   const tableRef = useRef<JobTableHandle | null>(null);
-  const runPaneRef = useRef<RunPaneHandle | null>(null);
   const completedRunIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
@@ -73,20 +70,14 @@ const App: React.FC = () => {
     if (ageDays < 1) return `${Math.max(1, Math.round(ageDays * 24))}h ago`;
     return `${Math.floor(ageDays)}d ago`;
   };
-  const formatTimestamp = (value?: string | null) =>
-    value
-      ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))
-      : null;
-
+  const freshnessLabel = freshness?.last_collected_at
+    ? `LinkedIn updated ${formatCollectionAge(freshness.age_days)}`
+    : "LinkedIn not collected yet";
   const handleArchiveChanged = (clearSelection = true) => {
     if (clearSelection) {
       setSelectedJob(null);
     }
     tableRef.current?.reload?.(clearSelection);
-  };
-
-  const handleAnnotationSaved = () => {
-    tableRef.current?.reload?.(false);
   };
 
   const handleRunCompleted = useCallback((run: RunStatus) => {
@@ -97,8 +88,8 @@ const App: React.FC = () => {
     setDataRefreshToken((token) => token + 1);
     setActionFeedback(
       run.status === "succeeded"
-        ? `Run complete${run.metrics ? ` · ${run.metrics.new} new · ${run.metrics.parsed} parsed` : ""}.`
-        : `Run ${run.status}. Open the run details for its latest output.`
+        ? `Run complete${run.metrics ? ` · ${run.metrics.new} new · ${run.metrics.archived} filtered` : ""}.`
+        : `Run ${run.status}. Try again or inspect the local backend log if needed.`
     );
   }, []);
 
@@ -107,29 +98,6 @@ const App: React.FC = () => {
     // filter from an earlier dashboard session trap any of its drill-downs.
     replaceSearchParams({ archived: "" });
     setViewMode("dashboard");
-  }, []);
-
-  const handleOpenReviewDashboard = useCallback((filters: ReviewHomeDashboardFilters = {}) => {
-    replaceSearchParams({
-      search: "",
-      location: "",
-      source: "",
-      company: "",
-      archived: "",
-      status: filters.annotationStatus || "",
-      priority: "",
-      from: filters.dateFrom || "",
-      to: "",
-      sort: filters.sort || "",
-      job: filters.job || "",
-      page: "",
-    });
-    setViewMode("dashboard");
-  }, []);
-
-  const handleCollectFromReview = useCallback(() => {
-    setViewMode("dashboard");
-    runPaneRef.current?.startCollection();
   }, []);
 
   const isCollectionRunning = activeRun?.mode === "run-once" && (activeRun.status === "starting" || activeRun.status === "running");
@@ -141,23 +109,26 @@ const App: React.FC = () => {
           <h1>Job Informer</h1>
           <div className="hero-meta">
             <span className="eyebrow">{formattedNow}</span>
-            <p className="muted small">Scrape, parse, and keep an eye on the database footprint.</p>
+            <p className="muted small">Collect LinkedIn jobs and review the local archive.</p>
           </div>
         </div>
         <div className="hero-actions">
-          <div className="badge" role="status" aria-live="polite">
+          <div
+            className="badge connection-summary"
+            role="status"
+            aria-live="polite"
+            title={`API ${API_BASE}${freshness?.last_collected_at ? ` · Last LinkedIn observation ${freshness.last_collected_at}` : ""}`}
+          >
             <span className={`dot ${apiConnectionStatus}`} />
-            API {API_BASE} · {apiConnectionStatus}
+            <span>API {apiConnectionStatus}</span>
+            {apiConnectionStatus === "connected" && (
+              <>
+                <span className="status-separator" aria-hidden="true">·</span>
+                <span className={`freshness-inline ${freshness?.status || "empty"}`}>{freshnessLabel}</span>
+              </>
+            )}
           </div>
           <div className="view-toggle">
-            <button
-              type="button"
-              className={viewMode === "review" ? "active" : ""}
-              aria-pressed={viewMode === "review"}
-              onClick={() => setViewMode("review")}
-            >
-              Review
-            </button>
             <button
               type="button"
               className={viewMode === "dashboard" ? "active" : ""}
@@ -209,7 +180,7 @@ const App: React.FC = () => {
           <div>
             <p className="label">Collection in progress</p>
             <p className="small">
-              {activeRun.status === "starting" ? "Preparing the collection run." : "Collecting jobs and refreshing its live output."}
+              {activeRun.status === "starting" ? "Preparing the collection run." : "Collecting jobs; compact progress is available on Jobs."}
             </p>
           </div>
           <button className="ghost" type="button" onClick={() => setViewMode("dashboard")}>
@@ -228,47 +199,9 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {stats && viewMode === "dashboard" && (
-        <section
-          className={`collection-freshness app-freshness ${freshness?.status || "empty"}`}
-          role={freshness?.status === "stale" || freshness?.status === "empty" ? "alert" : "status"}
-        >
-          <div>
-            <p className="label">Collection freshness</p>
-            <h3>
-              {freshness?.last_collected_at
-                ? `Last observation ${formatCollectionAge(freshness.age_days)}`
-                : "No collected observations yet"}
-            </h3>
-            <p className="small">
-              {freshness?.status === "stale"
-                ? "Market data is stale. Run Collect now before relying on current trends."
-                : freshness?.status === "aging"
-                  ? "Collection is getting old; another run is due soon."
-                  : "Collection data is current."}
-            </p>
-          </div>
-          <div className="freshness-meta">
-            <span className={`freshness-state ${freshness?.status || "empty"}`}>{freshness?.status || "empty"}</span>
-            <span className="muted tiny">
-              {stats.collection_scheduler?.enabled
-                ? `Automatic collection every ${stats.collection_scheduler.interval_hours}h`
-                : "Automatic collection off"}
-            </span>
-            {stats.collection_scheduler?.last_successful_run_at && (
-              <span className="muted tiny">
-                Last successful run {formatTimestamp(stats.collection_scheduler.last_successful_run_at)}
-              </span>
-            )}
-          </div>
-        </section>
-      )}
-
       <main className="layout" hidden={viewMode !== "dashboard"}>
         <div className="main">
           <RunPane
-            ref={runPaneRef}
-            className="highlight"
             onRunCompleted={handleRunCompleted}
             onRunStatusChange={setActiveRun}
           />
@@ -278,30 +211,21 @@ const App: React.FC = () => {
                 <JobTable
                   ref={tableRef}
                   onSelect={setSelectedJob}
-                  sources={stats?.sources_list || []}
                   companies={stats?.companies_list || []}
+                  roleFamilies={stats?.role_families_list || []}
+                  queryGroups={stats?.query_groups_list || []}
                   refreshToken={dataRefreshToken}
                 />
                 <JobDetail
                   job={selectedJob}
                   onArchiveChanged={handleArchiveChanged}
-                  onAnnotationSaved={handleAnnotationSaved}
                   onActionFeedback={setActionFeedback}
                 />
               </div>
             </>
           )}
-          <RecentRuns refreshToken={dataRefreshToken} />
         </div>
       </main>
-      {viewMode === "review" && (
-        <ReviewHome
-          className="summary-shell"
-          onCollect={handleCollectFromReview}
-          onOpenDashboard={handleOpenReviewDashboard}
-          refreshToken={dataRefreshToken}
-        />
-      )}
       {viewMode === "summary" && (
         <SummaryPage
           key={`summary-${dataRefreshToken}`}

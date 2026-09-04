@@ -1,692 +1,114 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { archiveJob, fetchJob, restoreJob, updateJobAnnotation } from "../api";
-import type { Job, JobAnnotation, JobAnnotationPriority, JobAnnotationStatus, ParsedPayload } from "../types";
+import React, { useEffect, useRef, useState } from "react";
+import { archiveJob, restoreJob } from "../api";
+import type { Job } from "../types";
 
 interface JobDetailProps {
   job: Job | null;
   onArchiveChanged: (clearSelection?: boolean) => void;
-  onAnnotationSaved: () => void;
   onActionFeedback?: (message: string) => void;
 }
 
-interface AnnotationDraft {
-  version: 1;
-  jobId: string;
-  annotation: JobAnnotation;
-  skillGapInput: string;
-  savedAt: string;
-}
-
-const ANNOTATION_DRAFT_PREFIX = "job-informer.annotation-draft.";
-
-const defaultAnnotation: JobAnnotation = {
-  status: "unreviewed",
-  priority: "medium",
-  notes: "",
-  why_interesting: "",
-  skill_gaps: [],
-  follow_up_date: null,
-  resume_version: "",
-  created_at: null,
-  updated_at: null,
+const formatDate = (value?: string | null): string => {
+  if (!value) return "unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  return new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(date);
 };
 
-const annotationStatuses: JobAnnotationStatus[] = [
-  "unreviewed",
-  "interesting",
-  "applied",
-  "interviewing",
-  "offer",
-  "rejected",
-  "archived",
-];
-const annotationPriorities: JobAnnotationPriority[] = ["high", "medium", "low"];
-
-const normalizeAnnotation = (annotation?: JobAnnotation | null): JobAnnotation => ({
-  ...defaultAnnotation,
-  ...(annotation || {}),
-  skill_gaps: annotation?.skill_gaps || [],
-});
-
-const annotationDraftKey = (jobId: string): string => `${ANNOTATION_DRAFT_PREFIX}${encodeURIComponent(jobId)}`;
-
-const readAnnotationDraft = (jobId: string): AnnotationDraft | null => {
-  try {
-    const raw = window.localStorage.getItem(annotationDraftKey(jobId));
-    if (!raw) return null;
-    const draft = JSON.parse(raw) as Partial<AnnotationDraft>;
-    if (
-      draft.version !== 1
-      || draft.jobId !== jobId
-      || !draft.annotation
-      || typeof draft.skillGapInput !== "string"
-      || typeof draft.savedAt !== "string"
-      || Number.isNaN(Date.parse(draft.savedAt))
-    ) {
-      window.localStorage.removeItem(annotationDraftKey(jobId));
-      return null;
-    }
-    return draft as AnnotationDraft;
-  } catch {
-    return null;
-  }
-};
-
-const writeAnnotationDraft = (draft: AnnotationDraft): boolean => {
-  try {
-    window.localStorage.setItem(annotationDraftKey(draft.jobId), JSON.stringify(draft));
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const clearAnnotationDraft = (jobId: string): void => {
-  try {
-    window.localStorage.removeItem(annotationDraftKey(jobId));
-  } catch {
-    // Saving to the API still succeeds if local storage is unavailable.
-  }
-};
-
-const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onAnnotationSaved, onActionFeedback }) => {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [details, setDetails] = useState<Job | null>(null);
-  const [parsed, setParsed] = useState<ParsedPayload | null>(null);
+const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onActionFeedback }) => {
   const [archiveAction, setArchiveAction] = useState<"archive" | "restore" | null>(null);
-  const [savingAnnotation, setSavingAnnotation] = useState(false);
-  const [annotation, setAnnotation] = useState<JobAnnotation>(defaultAnnotation);
-  const [skillGapInput, setSkillGapInput] = useState("");
-  const [hasDraft, setHasDraft] = useState(false);
-  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
-  const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
-  const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
-  const activeJobIdRef = useRef(job?.job_id || "");
-  const mountedRef = useRef(false);
-
-  activeJobIdRef.current = job?.job_id || "";
+  const [error, setError] = useState<string | null>(null);
+  const activeJobId = useRef("");
 
   useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const load = async () => {
-      if (!job) {
-        setLoading(false);
-        setError(null);
-        setDetails(null);
-        setParsed(null);
-        setAnnotation(defaultAnnotation);
-        setSkillGapInput("");
-        setHasDraft(false);
-        setDraftSavedAt(null);
-        setDraftStorageError(null);
-        setSaveFeedback(null);
-        setSavingAnnotation(false);
-        setArchiveAction(null);
-        return;
-      }
-      setLoading(true);
-      setError(null);
-      setDetails(null);
-      setParsed(null);
-      setAnnotation(defaultAnnotation);
-      setSkillGapInput("");
-      setHasDraft(false);
-      setDraftSavedAt(null);
-      setDraftStorageError(null);
-      setSaveFeedback(null);
-      setSavingAnnotation(false);
-      setArchiveAction(null);
-      try {
-        const fullJob = await fetchJob(job.job_id);
-        if (cancelled) return;
-        setDetails(fullJob);
-        setParsed((fullJob.parsed_description?.payload as ParsedPayload) || null);
-        const storedDraft = readAnnotationDraft(fullJob.job_id);
-        const nextAnnotation = normalizeAnnotation(storedDraft?.annotation || fullJob.annotation);
-        setAnnotation(nextAnnotation);
-        setSkillGapInput(storedDraft?.skillGapInput ?? nextAnnotation.skill_gaps.join(", "));
-        setHasDraft(Boolean(storedDraft));
-        setDraftSavedAt(storedDraft?.savedAt || null);
-        setDraftStorageError(null);
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load job.");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    };
-
-    load();
-    return () => {
-      cancelled = true;
-    };
+    activeJobId.current = job?.job_id || "";
+    setArchiveAction(null);
+    setError(null);
   }, [job?.job_id]);
 
-  useEffect(() => {
-    if (!hasDraft) return;
-    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warnBeforeUnload);
-    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
-  }, [hasDraft]);
+  if (!job) {
+    return (
+      <aside className="panel detail-pane detail-empty">
+        <p className="muted">Select a job to see its details.</p>
+      </aside>
+    );
+  }
 
-  const formatDate = (value?: string | null) => {
-    if (!value) return "n/a";
-    return new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(value));
-  };
+  const archived = Boolean(job.archived_at);
+  const repeatCount = Math.max(0, (job.seen_count ?? 1) - 1);
+  const firstSeen = formatDate(job.first_seen_at || job.scraped_at);
+  const lastSeen = formatDate(job.last_seen_at || job.scraped_at);
+  const explanation = job.relevance_reason || job.archived_reason;
 
-  const formatDateTime = (value?: string | null) => {
-    if (!value) return "Not saved yet";
-    return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
-  };
-
-  const formatLabel = (value?: string | null) => {
-    if (!value) return "unspecified";
-    return value.replace(/_/g, " ");
-  };
-
-  const formatAnnotationStatus = (value?: JobAnnotationStatus | null) => {
-    if (!value) return "unspecified";
-    if (value === "archived") return "Set aside (annotation)";
-    return formatLabel(value);
-  };
-
-  const salaryText = (range?: { min?: number | null; max?: number | null }) => {
-    if (!range) return "unspecified";
-    const { min, max } = range;
-    if (min && max) return `${min.toLocaleString()} – ${max.toLocaleString()}`;
-    if (min) return `${min.toLocaleString()}+`;
-    if (max) return `up to ${max.toLocaleString()}`;
-    return "unspecified";
-  };
-
-  const benefitsText = (benefits?: string | string[]) => {
-    if (!benefits) return "unspecified";
-    if (Array.isArray(benefits)) return benefits.length ? benefits.join(", ") : "unspecified";
-    return benefits;
-  };
-
-  const annotationUpdatedAt = useMemo(() => formatDateTime(annotation.updated_at), [annotation.updated_at]);
-  const currentDetails = job && details?.job_id === job.job_id ? details : null;
-  const isArchived = Boolean(currentDetails?.archived_at || job?.archived_at);
-  const isTargetActive = (jobId: string) => mountedRef.current && activeJobIdRef.current === jobId;
-
-  const persistDraft = (nextAnnotation: JobAnnotation, nextSkillGapInput: string) => {
-    const jobId = job?.job_id;
-    if (!jobId) return;
-    const savedAt = new Date().toISOString();
-    const stored = writeAnnotationDraft({
-      version: 1,
-      jobId,
-      annotation: nextAnnotation,
-      skillGapInput: nextSkillGapInput,
-      savedAt,
-    });
-    setHasDraft(true);
-    if (stored) {
-      setDraftSavedAt(savedAt);
-      setDraftStorageError(null);
-    } else {
-      setDraftSavedAt(null);
-      setDraftStorageError("Local draft storage is unavailable. Save before leaving this job.");
-    }
-  };
-
-  const updateAnnotationDraft = (updater: (current: JobAnnotation) => JobAnnotation) => {
-    setSaveFeedback(null);
-    setAnnotation((current) => {
-      const next = updater(current);
-      persistDraft(next, skillGapInput);
-      return next;
-    });
-  };
-
-  const updateSkillGapDraft = (value: string) => {
-    setSaveFeedback(null);
-    setSkillGapInput(value);
-    persistDraft(annotation, value);
-  };
-
-  const discardDraft = () => {
-    if (!job || !currentDetails) return;
-    clearAnnotationDraft(job.job_id);
-    const saved = normalizeAnnotation(currentDetails.annotation);
-    setAnnotation(saved);
-    setSkillGapInput(saved.skill_gaps.join(", "));
-    setHasDraft(false);
-    setDraftSavedAt(null);
-    setDraftStorageError(null);
-  };
-
-  const confirmArchive = async () => {
-    if (!job || !currentDetails || isArchived || loading || archiveAction) return;
-    const targetJobId = job.job_id;
-    const draftNote = hasDraft
-      ? draftStorageError
-        ? " Your unsaved notes are not stored locally and may be lost."
-        : " Your local note draft will remain attached to this job."
-      : "";
-    const ok = window.confirm(`Archive this job? It will be hidden from the active job list.${draftNote}`);
-    if (!ok) return;
+  const archive = async () => {
+    if (archived || archiveAction) return;
+    if (!window.confirm("Archive this job? It will be hidden from the active job list.")) return;
+    const jobId = job.job_id;
     setArchiveAction("archive");
     setError(null);
     try {
-      await archiveJob(targetJobId);
-      const stillSelected = isTargetActive(targetJobId);
-      if (stillSelected) {
-        setDetails(null);
-        setParsed(null);
-        setAnnotation(defaultAnnotation);
-        setSkillGapInput("");
-      }
+      await archiveJob(jobId);
       onActionFeedback?.("Job archived.");
-      onArchiveChanged(stillSelected);
-    } catch (err) {
-      if (isTargetActive(targetJobId)) {
-        setError(err instanceof Error ? err.message : "Failed to archive job.");
-      }
-    } finally {
-      if (isTargetActive(targetJobId)) {
+      onArchiveChanged(activeJobId.current === jobId);
+    } catch (reason) {
+      if (activeJobId.current === jobId) {
+        setError(reason instanceof Error ? reason.message : "Failed to archive job.");
         setArchiveAction(null);
       }
     }
   };
 
-  const restoreArchivedJob = async () => {
-    if (!job || !currentDetails || !isArchived || loading || archiveAction) return;
-    const targetJobId = job.job_id;
+  const restore = async () => {
+    if (!archived || archiveAction) return;
+    const jobId = job.job_id;
     setArchiveAction("restore");
     setError(null);
     try {
-      await restoreJob(targetJobId);
-      const stillSelected = isTargetActive(targetJobId);
-      if (stillSelected) {
-        setDetails(null);
-        setParsed(null);
-        setAnnotation(defaultAnnotation);
-        setSkillGapInput("");
-      }
-      onActionFeedback?.("Job restored to the active queue.");
-      onArchiveChanged(stillSelected);
-    } catch (err) {
-      if (isTargetActive(targetJobId)) {
-        setError(err instanceof Error ? err.message : "Failed to restore job.");
-      }
-    } finally {
-      if (isTargetActive(targetJobId)) {
+      await restoreJob(jobId);
+      onActionFeedback?.("Job restored.");
+      onArchiveChanged(activeJobId.current === jobId);
+    } catch (reason) {
+      if (activeJobId.current === jobId) {
+        setError(reason instanceof Error ? reason.message : "Failed to restore job.");
         setArchiveAction(null);
-      }
-    }
-  };
-
-  const saveAnnotation = async () => {
-    if (!job || !currentDetails || loading || savingAnnotation) return;
-    const targetJobId = job.job_id;
-    setSavingAnnotation(true);
-    setError(null);
-    try {
-      const saved = await updateJobAnnotation(targetJobId, {
-        ...annotation,
-        notes: annotation.notes.trim(),
-        why_interesting: annotation.why_interesting.trim(),
-        skill_gaps: skillGapInput
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-        follow_up_date: annotation.follow_up_date || null,
-        resume_version: annotation.resume_version.trim(),
-      });
-      clearAnnotationDraft(targetJobId);
-      onAnnotationSaved();
-      if (!isTargetActive(targetJobId)) return;
-      setAnnotation(normalizeAnnotation(saved));
-      setSkillGapInput((saved.skill_gaps || []).join(", "));
-      setHasDraft(false);
-      setDraftSavedAt(null);
-      setDraftStorageError(null);
-      setDetails((current) => (current ? { ...current, annotation: saved } : current));
-      setSaveFeedback("Notes saved.");
-    } catch (err) {
-      if (isTargetActive(targetJobId)) {
-        setError(err instanceof Error ? err.message : "Failed to save annotation.");
-      }
-    } finally {
-      if (isTargetActive(targetJobId)) {
-        setSavingAnnotation(false);
       }
     }
   };
 
   return (
-    <div className="panel detail-pane">
-      <p className="label">Details</p>
-      {!job && <div>Select a job to see details.</div>}
-
-      {job && (
-        <div className="card">
-          <header>
-            <div>
-              <p className="company">{job.company}</p>
-              <h3>{job.title}</h3>
-              <p className="muted">
-                {job.location} • {job.source}
-              </p>
-            </div>
-            <div className="header-actions">
-              {job.url && (
-                <a className="link" href={job.url} target="_blank" rel="noreferrer">
-                  Open posting
-                </a>
-              )}
-              {isArchived ? (
-                <button
-                  className="primary"
-                  type="button"
-                  onClick={restoreArchivedJob}
-                  disabled={archiveAction !== null || loading || !currentDetails}
-                >
-                  {archiveAction === "restore" ? "Restoring…" : "Restore"}
-                </button>
-              ) : (
-                <button
-                  className="danger"
-                  type="button"
-                  onClick={confirmArchive}
-                  disabled={archiveAction !== null || loading || !currentDetails}
-                >
-                  {archiveAction === "archive" ? "Archiving…" : "Archive"}
-                </button>
-              )}
-            </div>
-          </header>
-
-          {error && <div className="error">{error}</div>}
-          {!error && loading && <div className="muted">Loading details…</div>}
-          {!error && !loading && currentDetails && (
-            <>
-              <p className="muted">Scraped {formatDate(currentDetails.scraped_at)}</p>
-
-              {currentDetails.archived_at ? (
-                <aside className="annotation-card" aria-label="Archive status">
-                  <p className="summary-title">Archived job</p>
-                  <p className="muted small">Archived {formatDate(currentDetails.archived_at)}</p>
-                  <p className="body">
-                    <strong>Reason:</strong> {currentDetails.archived_reason || "No archive reason recorded."}
-                  </p>
-                </aside>
-              ) : null}
-
-              <details className="annotation-card">
-                <summary className="annotation-header annotation-toggle">
-                  <div>
-                    <p className="summary-title">Personal notes</p>
-                    <p className="muted small">Track your own pipeline, fit, and follow-up plan for this job.</p>
-                  </div>
-                  <div className="annotation-summary-meta">
-                    {hasDraft && !draftStorageError && (
-                      <span className="pill small tone">Draft kept locally · {formatDateTime(draftSavedAt)}</span>
-                    )}
-                    {draftStorageError && (
-                      <span className="muted tiny" role="alert">{draftStorageError}</span>
-                    )}
-                    <span className="muted tiny">Last saved: {annotationUpdatedAt}</span>
-                    <span className="muted tiny">
-                      {formatAnnotationStatus(annotation.status)} · {formatLabel(annotation.priority)}
-                    </span>
-                  </div>
-                </summary>
-
-                <div className="annotation-grid">
-                  <label>
-                    <span>Review status</span>
-                    <select
-                      value={annotation.status}
-                      onChange={(e) =>
-                        updateAnnotationDraft((current) => ({
-                          ...current,
-                          status: e.target.value as JobAnnotationStatus,
-                        }))
-                      }
-                    >
-                      {annotationStatuses.map((status) => (
-                        <option key={status} value={status}>
-                          {formatAnnotationStatus(status)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Priority</span>
-                    <select
-                      value={annotation.priority}
-                      onChange={(e) =>
-                        updateAnnotationDraft((current) => ({
-                          ...current,
-                          priority: e.target.value as JobAnnotationPriority,
-                        }))
-                      }
-                    >
-                      {annotationPriorities.map((priority) => (
-                        <option key={priority} value={priority}>
-                          {formatLabel(priority)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Follow up</span>
-                    <input
-                      type="date"
-                      value={annotation.follow_up_date || ""}
-                      onChange={(e) =>
-                        updateAnnotationDraft((current) => ({
-                          ...current,
-                          follow_up_date: e.target.value || null,
-                        }))
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>Resume version</span>
-                    <input
-                      type="text"
-                      placeholder="e.g. ai-general-v2"
-                      value={annotation.resume_version}
-                      onChange={(e) =>
-                        updateAnnotationDraft((current) => ({
-                          ...current,
-                          resume_version: e.target.value,
-                        }))
-                      }
-                    />
-                  </label>
-                </div>
-
-                <label className="annotation-field">
-                  <span>Why interesting</span>
-                  <textarea
-                    rows={3}
-                    placeholder="Why this role is worth your attention."
-                    value={annotation.why_interesting}
-                    onChange={(e) =>
-                      updateAnnotationDraft((current) => ({
-                        ...current,
-                        why_interesting: e.target.value,
-                      }))
-                    }
-                  />
-                </label>
-
-                <label className="annotation-field">
-                  <span>Skill gaps</span>
-                  <input
-                    type="text"
-                    placeholder="rag, deployment, experimentation"
-                    value={skillGapInput}
-                    onChange={(e) => updateSkillGapDraft(e.target.value)}
-                  />
-                  <span className="muted tiny">Comma-separated. Use this to surface repeated gaps across jobs.</span>
-                </label>
-
-                <label className="annotation-field">
-                  <span>Notes</span>
-                  <textarea
-                    rows={5}
-                    placeholder="Application angle, interview prep ideas, companies to revisit, etc."
-                    value={annotation.notes}
-                    onChange={(e) =>
-                      updateAnnotationDraft((current) => ({
-                        ...current,
-                        notes: e.target.value,
-                      }))
-                    }
-                  />
-                </label>
-
-                <div className="annotation-actions">
-                  <button className="primary" type="button" onClick={saveAnnotation} disabled={savingAnnotation}>
-                    {savingAnnotation ? "Saving…" : "Save notes"}
-                  </button>
-                  {hasDraft && (
-                    <button className="ghost" type="button" onClick={discardDraft} disabled={savingAnnotation}>
-                      Discard local draft
-                    </button>
-                  )}
-                  <span className="muted small">
-                    Review: {formatAnnotationStatus(annotation.status)} · Priority: {formatLabel(annotation.priority)}
-                  </span>
-                </div>
-                {saveFeedback && (
-                  <div className="action-feedback" role="status" aria-live="polite">
-                    {saveFeedback}
-                  </div>
-                )}
-              </details>
-
-              {parsed && (
-                <details className="parsed parsed-card">
-                  <summary className="parsed-toggle">
-                    <div>
-                      <p className="summary-title">Parsed signals</p>
-                      <p className="muted small">Model-extracted metadata, skills, and compensation hints.</p>
-                    </div>
-                    <div className="parsed-summary-pills">
-                      <span className="pill small">{parsed.seniority || "unspecified"}</span>
-                      <span className="pill small">{parsed.remote || "unspecified"}</span>
-                    </div>
-                  </summary>
-
-                  <div className="pill-row">
-                    <span className="pill">{parsed.seniority || "unspecified"}</span>
-                    <span className="pill">{parsed.employment_type || "unspecified"}</span>
-                    <span className="pill">{parsed.remote || "unspecified"}</span>
-                    <span className="pill">{parsed.location?.[0] || job.location}</span>
-                  </div>
-
-                  <div className="summary">
-                    <p className="summary-title">Summary</p>
-                    {parsed.summary ? <p className="body">{parsed.summary}</p> : <p className="muted">No parsed summary yet.</p>}
-                  </div>
-
-                  <div className="grid">
-                    <div>
-                      <p className="summary-title">Languages</p>
-                      <div className="chip-row">
-                        {(parsed.languages || []).map((lang) => (
-                          <span key={lang} className="chip">
-                            {lang}
-                          </span>
-                        ))}
-                        {(!parsed.languages || !parsed.languages.length) && <span className="muted small">n/a</span>}
-                      </div>
-                    </div>
-                    <div>
-                      <p className="summary-title">Programming</p>
-                      <div className="chip-row">
-                        {(parsed.programming_languages || []).map((lang) => (
-                          <span key={lang} className="chip">
-                            {lang}
-                          </span>
-                        ))}
-                        {(!parsed.programming_languages || !parsed.programming_languages.length) && (
-                          <span className="muted small">n/a</span>
-                        )}
-                      </div>
-                    </div>
-                    <div>
-                      <p className="summary-title">Tools</p>
-                      <div className="chip-row">
-                        {(parsed.tools || []).map((tool) => (
-                          <span key={tool} className="chip">
-                            {tool}
-                          </span>
-                        ))}
-                        {(!parsed.tools || !parsed.tools.length) && <span className="muted small">n/a</span>}
-                      </div>
-                    </div>
-                    <div>
-                      <p className="summary-title">Skills</p>
-                      <div className="chip-row">
-                        {(parsed.skills || []).map((skill) => (
-                          <span key={skill} className="chip">
-                            {skill}
-                          </span>
-                        ))}
-                        {(!parsed.skills || !parsed.skills.length) && <span className="muted small">n/a</span>}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="meta">
-                    <div>
-                      <p className="summary-title">Degree</p>
-                      <p className="muted">
-                        {parsed.degree_field || "unspecified"} • {parsed.degree_type || "unspecified"}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="summary-title">Experience</p>
-                      <p className="muted">{parsed.years_experience_min ?? "unspecified"}+ years</p>
-                    </div>
-                    <div>
-                      <p className="summary-title">Salary (EUR)</p>
-                      <p className="muted">{salaryText(parsed.salary_eur_range)}</p>
-                    </div>
-                    <div>
-                      <p className="summary-title">Benefits</p>
-                      <p className="muted">{benefitsText(parsed["extra benefits"])}</p>
-                    </div>
-                  </div>
-                </details>
-              )}
-
-              {currentDetails.description ? (
-                <details className="raw">
-                  <summary>Full description</summary>
-                  <p className="body">{currentDetails.description}</p>
-                </details>
-              ) : (
-                <p className="muted">No description stored.</p>
-              )}
-            </>
+    <aside className="panel detail-pane">
+      <div className="detail-header">
+        <div>
+          <p className="company">{job.company}</p>
+          <h2>{job.title}</h2>
+          <p className="muted">{job.location} · LinkedIn</p>
+        </div>
+        <div className="detail-actions">
+          {job.url && (
+            <a className="link" href={job.url} target="_blank" rel="noreferrer">
+              Open LinkedIn
+            </a>
+          )}
+          {archived ? (
+            <button className="primary" type="button" onClick={restore} disabled={Boolean(archiveAction)}>
+              {archiveAction === "restore" ? "Restoring…" : "Restore"}
+            </button>
+          ) : (
+            <button className="danger" type="button" onClick={archive} disabled={Boolean(archiveAction)}>
+              {archiveAction === "archive" ? "Archiving…" : "Archive"}
+            </button>
           )}
         </div>
-      )}
-    </div>
+      </div>
+
+      {error && <div className="error" role="alert">{error}</div>}
+
+      <p className="sighting-line">
+        First seen {firstSeen} · Last seen {lastSeen} · Repeated {repeatCount} {repeatCount === 1 ? "time" : "times"}
+      </p>
+
+      {explanation && <p className="muted small relevance-line">{explanation}</p>}
+    </aside>
   );
 };
 

@@ -15,7 +15,6 @@ services:
       APP_INSTANCE_NAME: ${APP_INSTANCE_NAME:-job-informer-desktop}
       APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Berlin}
       JOBS_DB_PATH: /app/data/jobs.db
-      AUTO_COLLECTION_INTERVAL_HOURS: ${AUTO_COLLECTION_INTERVAL_HOURS:-0}
       COLLECTION_STALE_AFTER_DAYS: ${COLLECTION_STALE_AFTER_DAYS:-7}
     volumes:
       - ./backend/data:/app/data

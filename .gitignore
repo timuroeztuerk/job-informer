@@ -49,6 +49,7 @@ logs/
 screenshots/
 *.log
 agentic-changes/
+.vite/
 
 # Frontend generated/local artifacts
 frontend/node_modules/

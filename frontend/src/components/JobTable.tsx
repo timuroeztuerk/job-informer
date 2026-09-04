@@ -7,7 +7,7 @@ import React, {
   useState,
 } from "react";
 import { fetchJob, fetchJobs } from "../api";
-import type { Job, JobAnnotationPriority, JobAnnotationStatus, JobArchiveFilter } from "../types";
+import type { Job, JobArchiveFilter, QueryGroupOption } from "../types";
 import { readEnumParam, readPositiveIntegerParam, readTextParam, replaceSearchParams } from "../urlState";
 
 export interface JobTableHandle {
@@ -15,8 +15,9 @@ export interface JobTableHandle {
 }
 
 interface JobTableProps {
-  sources: string[];
   companies: string[];
+  roleFamilies?: string[];
+  queryGroups?: QueryGroupOption[];
   onSelect: (job: Job | null) => void;
   refreshToken?: number;
 }
@@ -26,41 +27,22 @@ type SortOption =
   | "scraped_at_asc"
   | "last_seen_desc"
   | "last_seen_asc"
-  | "seen_count_desc"
-  | "seen_count_asc"
-  | "fit_score_desc"
-  | "fit_score_asc"
   | "title_asc"
   | "title_desc";
 
 const PAGE_SIZE = 5;
-const annotationStatusOptions: Array<JobAnnotationStatus | ""> = [
-  "",
-  "unreviewed",
-  "interesting",
-  "applied",
-  "interviewing",
-  "offer",
-  "rejected",
-  "archived",
-];
-const annotationPriorityOptions: Array<JobAnnotationPriority | ""> = ["", "high", "medium", "low"];
 const archiveFilterOptions: JobArchiveFilter[] = ["exclude", "only", "include"];
 const sortOptions: SortOption[] = [
   "scraped_at_desc",
   "scraped_at_asc",
   "last_seen_desc",
   "last_seen_asc",
-  "seen_count_desc",
-  "seen_count_asc",
-  "fit_score_desc",
-  "fit_score_asc",
   "title_asc",
   "title_desc",
 ];
 
 const JobTable = forwardRef<JobTableHandle, JobTableProps>(
-  ({ sources, companies, onSelect, refreshToken = 0 }, ref) => {
+  ({ companies, roleFamilies = [], queryGroups = [], onSelect, refreshToken = 0 }, ref) => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(() => (readPositiveIntegerParam("page", 1) - 1) * PAGE_SIZE);
@@ -69,16 +51,11 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
   const [selectionError, setSelectionError] = useState<string | null>(null);
   const [search, setSearch] = useState(() => readTextParam("search"));
   const [location, setLocation] = useState(() => readTextParam("location"));
-  const [source, setSource] = useState(() => readTextParam("source"));
   const [company, setCompany] = useState(() => readTextParam("company"));
+  const [roleFamily, setRoleFamily] = useState(() => readTextParam("role"));
+  const [queryGroup, setQueryGroup] = useState(() => readTextParam("query_group"));
   const [archiveFilter, setArchiveFilter] = useState<JobArchiveFilter>(
     () => readEnumParam("archived", archiveFilterOptions) || "exclude"
-  );
-  const [annotationStatus, setAnnotationStatus] = useState<JobAnnotationStatus | "">(
-    () => readEnumParam("status", annotationStatusOptions)
-  );
-  const [annotationPriority, setAnnotationPriority] = useState<JobAnnotationPriority | "">(
-    () => readEnumParam("priority", annotationPriorityOptions)
   );
   const [dateFrom, setDateFrom] = useState(() => readTextParam("from"));
   const [dateTo, setDateTo] = useState(() => readTextParam("to"));
@@ -92,11 +69,10 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
       !!(
         readTextParam("search") ||
         readTextParam("location") ||
-        readTextParam("source") ||
         readTextParam("company") ||
+        readTextParam("role") ||
+        readTextParam("query_group") ||
         readTextParam("archived") ||
-        readTextParam("status") ||
-        readTextParam("priority") ||
         readTextParam("from") ||
         readTextParam("to")
       )
@@ -104,32 +80,31 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
 
   const pageNumber = useMemo(() => Math.floor(offset / PAGE_SIZE) + 1, [offset]);
   const hasNext = useMemo(() => offset + PAGE_SIZE < total, [offset, total]);
-  const sourceOptions = useMemo(() => sources || [], [sources]);
   const companyOptions = useMemo(() => companies || [], [companies]);
+  const roleFamilyOptions = useMemo(() => roleFamilies || [], [roleFamilies]);
+  const queryGroupOptions = useMemo(() => queryGroups || [], [queryGroups]);
   const activeFilterCount = useMemo(
     () =>
       [
         search.trim(),
         location.trim(),
-        source,
         company,
+        roleFamily,
+        queryGroup,
         archiveFilter === "exclude" ? "" : archiveFilter,
-        annotationStatus,
-        annotationPriority,
         dateFrom,
         dateTo,
       ].filter(Boolean).length,
-    [annotationPriority, annotationStatus, archiveFilter, company, dateFrom, dateTo, location, search, source]
+    [archiveFilter, company, dateFrom, dateTo, location, queryGroup, roleFamily, search]
   );
   const querySignature = JSON.stringify([
     offset,
     search,
     location,
-    source,
     company,
+    roleFamily,
+    queryGroup,
     archiveFilter,
-    annotationStatus,
-    annotationPriority,
     dateFrom,
     dateTo,
     sort,
@@ -139,11 +114,13 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
     replaceSearchParams({
       search,
       location,
-      source,
+      source: "",
       company,
+      role: roleFamily,
+      query_group: queryGroup,
       archived: archiveFilter === "exclude" ? "" : archiveFilter,
-      status: annotationStatus,
-      priority: annotationPriority,
+      status: "",
+      priority: "",
       from: dateFrom,
       to: dateTo,
       sort: sort === "scraped_at_desc" ? "" : sort,
@@ -151,18 +128,17 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
       job: selectedId || "",
     });
   }, [
-    annotationPriority,
-    annotationStatus,
     archiveFilter,
     company,
     dateFrom,
     dateTo,
     location,
+    queryGroup,
+    roleFamily,
     pageNumber,
     search,
     selectedId,
     sort,
-    source,
   ]);
 
   useEffect(() => {
@@ -181,11 +157,10 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
           offset,
           search,
           location,
-          source,
           company,
+          roleFamily,
+          queryGroup,
           archived: archiveFilter,
-          annotationStatus,
-          annotationPriority,
           dateFrom,
           dateTo,
           sort,
@@ -281,21 +256,18 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
   const clearFilters = () => {
     setSearch("");
     setLocation("");
-    setSource("");
     setCompany("");
+    setRoleFamily("");
+    setQueryGroup("");
     setArchiveFilter("exclude");
-    setAnnotationStatus("");
-    setAnnotationPriority("");
     setDateFrom("");
     setDateTo("");
-    setSort("scraped_at_desc");
     setOffset(0);
     setReloadToken((token) => token + 1);
   };
 
-  const formatAnnotationLabel = (value?: string | null) => {
+  const formatLabel = (value?: string | null) => {
     if (!value) return "";
-    if (value === "archived") return "Set aside (annotation)";
     return value.replace(/_/g, " ");
   };
 
@@ -333,10 +305,6 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
             <option value="scraped_at_asc">Oldest</option>
             <option value="last_seen_desc">Last seen</option>
             <option value="last_seen_asc">Least recent</option>
-            <option value="seen_count_desc">Most recurring</option>
-            <option value="seen_count_asc">Least recurring</option>
-            <option value="fit_score_desc">Best profile fit</option>
-            <option value="fit_score_asc">Lowest profile fit</option>
             <option value="title_asc">Title A-Z</option>
             <option value="title_desc">Title Z-A</option>
           </select>
@@ -352,13 +320,28 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
           <div>
             <p className="label">Filters</p>
             <p className="muted tiny">
-              {activeFilterCount ? `${activeFilterCount} active filter${activeFilterCount === 1 ? "" : "s"}` : "Search, narrow, and sort"}
+              {activeFilterCount ? `${activeFilterCount} filter${activeFilterCount === 1 ? "" : "s"} applied` : "Search and narrow jobs"}
             </p>
           </div>
-          <span className="filter-menu-badge">{activeFilterCount || "All"}</span>
+          {activeFilterCount > 0 && <span className="filter-menu-badge">{activeFilterCount} active</span>}
+          <span className="filter-menu-action">{filtersOpen ? "Close" : "Open filters"}</span>
         </summary>
-        <div className="filters inline">
-          <label className="tiny">
+        <div className="filter-panel">
+          <div className="filter-grid">
+          <label className="filter-field filter-field-wide">
+            <span>Search</span>
+            <input
+              type="search"
+              value={search}
+              className="input"
+              placeholder="Search title, company, or location"
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setOffset(0);
+              }}
+            />
+          </label>
+          <label className="filter-field">
             <span>Job set</span>
             <select
               value={archiveFilter}
@@ -373,20 +356,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               <option value="include">All jobs</option>
             </select>
           </label>
-          <label className="tiny">
-            <span>Search</span>
-            <input
-              type="search"
-              value={search}
-              className="input"
-              placeholder="Title, notes, keywords"
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setOffset(0);
-              }}
-            />
-          </label>
-          <label className="tiny">
+          <label className="filter-field">
             <span>Location</span>
             <input
               type="search"
@@ -399,112 +369,94 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               }}
             />
           </label>
-          <label className="tiny">
-            <span>Source</span>
-            <select
-              value={source}
-              className="input"
-              onChange={(e) => {
-                setSource(e.target.value);
-                setOffset(0);
-              }}
-            >
-              <option value="">Any source</option>
-              {sourceOptions.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="tiny">
+          <label className="filter-field">
             <span>Company</span>
-            <select
+            <input
+              type="search"
+              list="job-company-options"
               value={company}
               className="input"
+              placeholder="Type a company name"
               onChange={(e) => {
                 setCompany(e.target.value);
                 setOffset(0);
-                setReloadToken((token) => token + 1);
+              }}
+            />
+            <datalist id="job-company-options">
+              {companyOptions.map((item) => <option key={item} value={item} />)}
+            </datalist>
+          </label>
+          <label className="filter-field">
+            <span>Role family</span>
+            <select
+              value={roleFamily}
+              className="input"
+              onChange={(e) => {
+                setRoleFamily(e.target.value);
+                setOffset(0);
               }}
             >
-              <option value="">Any company</option>
-              {companyOptions.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
+              <option value="">Any role family</option>
+              {roleFamilyOptions.map((item) => (
+                <option key={item} value={item}>{formatLabel(item)}</option>
               ))}
             </select>
           </label>
-          <label className="tiny">
-            <span>From</span>
-            <input
-              type="date"
-              value={dateFrom}
-              className="input"
-              onChange={(e) => {
-                setDateFrom(e.target.value);
-                setOffset(0);
-              }}
-            />
-          </label>
-          <label className="tiny">
-            <span>To</span>
-            <input
-              type="date"
-              value={dateTo}
-              className="input"
-              onChange={(e) => {
-                setDateTo(e.target.value);
-                setOffset(0);
-              }}
-            />
-          </label>
-          <label className="tiny">
-            <span>Review status</span>
+          <label className="filter-field">
+            <span>Found via</span>
             <select
-              value={annotationStatus}
+              value={queryGroup}
               className="input"
               onChange={(e) => {
-                setAnnotationStatus(e.target.value as JobAnnotationStatus | "");
+                setQueryGroup(e.target.value);
                 setOffset(0);
-                setReloadToken((token) => token + 1);
               }}
             >
-              <option value="">Any review status</option>
-              {annotationStatusOptions
-                .filter((value) => value)
-                .map((value) => (
-                  <option key={value} value={value}>
-                    {formatAnnotationLabel(value)}
-                  </option>
-                ))}
+              <option value="">Any query group</option>
+              {queryGroupOptions.map((item) => (
+                <option key={item.key} value={item.key}>{item.name}</option>
+              ))}
             </select>
           </label>
-          <label className="tiny">
-            <span>Priority</span>
-            <select
-              value={annotationPriority}
-              className="input"
-              onChange={(e) => {
-                setAnnotationPriority(e.target.value as JobAnnotationPriority | "");
-                setOffset(0);
-                setReloadToken((token) => token + 1);
-              }}
-            >
-              <option value="">Any priority</option>
-              {annotationPriorityOptions
-                .filter((value) => value)
-                .map((value) => (
-                  <option key={value} value={value}>
-                    {formatAnnotationLabel(value)}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <button className="ghost sm" type="button" onClick={clearFilters} disabled={loading}>
-            Clear
-          </button>
+          <fieldset className="filter-date-range filter-field-wide">
+            <legend>First seen</legend>
+            <label className="filter-field">
+              <span>From</span>
+              <input
+                type="date"
+                value={dateFrom}
+                className="input"
+                onChange={(e) => {
+                  setDateFrom(e.target.value);
+                  setOffset(0);
+                }}
+              />
+            </label>
+            <label className="filter-field">
+              <span>To</span>
+              <input
+                type="date"
+                value={dateTo}
+                className="input"
+                onChange={(e) => {
+                  setDateTo(e.target.value);
+                  setOffset(0);
+                }}
+              />
+            </label>
+          </fieldset>
+          </div>
+          <div className="filter-actions">
+            <span className="muted tiny">Results update automatically.</span>
+            <div>
+              <button className="ghost sm" type="button" onClick={clearFilters} disabled={loading || activeFilterCount === 0}>
+                Clear filters
+              </button>
+              <button className="filter-done" type="button" onClick={() => setFiltersOpen(false)}>
+                Done
+              </button>
+            </div>
+          </div>
         </div>
       </details>
 
@@ -539,45 +491,49 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               </div>
             ) : (
               <div className="list">
-                {jobs.map((job) => (
-                  <article
-                    key={job.job_id}
-                    className={`row ${job.job_id === selectedId ? "active" : ""}`}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={job.job_id === selectedId}
-                    onClick={() => selectJob(job)}
-                    onKeyDown={(event) => handleRowKeyDown(event, job)}
-                  >
-                    <div className="title">{job.title}</div>
-                    <div className="meta">
-                      <span>{job.company}</span>
-                      <span>•</span>
-                      <span>{job.location}</span>
-                    </div>
-                    <div className="tags">
-                      <span className="tag">{job.source}</span>
-                      {job.annotation?.status ? (
-                        <span className={`tag soft annotation-status annotation-${job.annotation.status}`}>
-                          {formatAnnotationLabel(job.annotation.status)}
-                        </span>
-                      ) : null}
-                      {job.archived_at ? (
-                        <span className="tag soft">Archived job · {formatDate(job.archived_at)}</span>
-                      ) : null}
-                      {job.archived_reason ? <span className="tag soft">Reason: {job.archived_reason}</span> : null}
-                      {job.annotation?.priority ? (
-                        <span className={`tag soft annotation-priority priority-${job.annotation.priority}`}>
-                          {formatAnnotationLabel(job.annotation.priority)}
-                        </span>
-                      ) : null}
-                      {job.seen_count && job.seen_count > 1 ? <span className="tag soft">Seen {job.seen_count}x</span> : null}
-                      {job.last_seen_at ? <span className="tag soft">Last seen {formatDate(job.last_seen_at)}</span> : null}
-                      {job.salary ? <span className="tag soft">{job.salary}</span> : null}
-                      <span className="tag soft">{formatDate(job.scraped_at)}</span>
-                    </div>
-                  </article>
-                ))}
+                {jobs.map((job) => {
+                  const repeatCount = Math.max(0, (job.seen_count ?? 1) - 1);
+                  const firstSeenAt = job.first_seen_at || job.scraped_at;
+                  const latestSeenAt = job.last_seen_at || job.scraped_at;
+                  return (
+                    <article
+                      key={job.job_id}
+                      className={`row ${job.job_id === selectedId ? "active" : ""}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={job.job_id === selectedId}
+                      onClick={() => selectJob(job)}
+                      onKeyDown={(event) => handleRowKeyDown(event, job)}
+                    >
+                      <div className="title">{job.title}</div>
+                      <div className="meta">
+                        <span>{job.company}</span>
+                        <span>•</span>
+                        <span>{job.location}</span>
+                      </div>
+                      <div className="tags">
+                        <span className="tag">{job.source}</span>
+                        {job.role_family ? (
+                          <span className="tag soft">{formatLabel(job.role_family)}</span>
+                        ) : null}
+                        {job.archived_at ? (
+                          <span className="tag soft">Archived job · {formatDate(job.archived_at)}</span>
+                        ) : null}
+                        {job.archived_reason ? <span className="tag soft">Reason: {job.archived_reason}</span> : null}
+                        {repeatCount > 0 ? (
+                          <span className="tag soft recurrence-note">
+                            Repeated {repeatCount} {repeatCount === 1 ? "time" : "times"}
+                          </span>
+                        ) : null}
+                        {repeatCount > 0 && latestSeenAt ? (
+                          <span className="tag soft">Latest repeat {formatDate(latestSeenAt)}</span>
+                        ) : null}
+                        {job.salary ? <span className="tag soft">{job.salary}</span> : null}
+                        {firstSeenAt ? <span className="tag soft">First seen {formatDate(firstSeenAt)}</span> : null}
+                      </div>
+                    </article>
+                  );
+                })}
               </div>
             )}
           </>

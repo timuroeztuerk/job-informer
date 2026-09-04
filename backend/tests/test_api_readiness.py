@@ -26,6 +26,16 @@ class TestApiReadiness(unittest.TestCase):
                 }
 
             self.assertTrue(REQUIRED_DB_TABLES.issubset(tables))
+            self.assertTrue(
+                {
+                    "fit_profiles",
+                    "job_annotations",
+                    "job_fit_scores",
+                    "llm_attempts",
+                    "parse_job_states",
+                    "parsed_descriptions",
+                }.isdisjoint(tables)
+            )
             readiness = database_readiness(db_path, instance_name="test-instance")
             self.assertEqual(readiness["status"], "ready")
             self.assertEqual(readiness["instance_name"], "test-instance")
@@ -41,7 +51,20 @@ class TestApiReadiness(unittest.TestCase):
             readiness = database_readiness(db_path)
             self.assertEqual(readiness["status"], "not_ready")
             self.assertFalse(readiness["schema_ok"])
-            self.assertIn("parsed_descriptions", readiness["missing_tables"])
+            self.assertIn("job_observations", readiness["missing_tables"])
+
+    def test_legacy_tables_are_left_untouched(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "jobs.db"
+            with closing(sqlite3.connect(db_path)) as conn, conn:
+                conn.execute("CREATE TABLE parsed_descriptions (marker TEXT)")
+                conn.execute("INSERT INTO parsed_descriptions VALUES ('keep me')")
+
+            JobDatabase(db_path)
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                marker = conn.execute("SELECT marker FROM parsed_descriptions").fetchone()[0]
+            self.assertEqual(marker, "keep me")
 
     def test_readiness_does_not_create_a_missing_database(self) -> None:
         with TemporaryDirectory() as tmp_dir:
