@@ -15,8 +15,7 @@ from .data_utils import (
     extract_salary_info,
     filter_jobs_by_keywords,
     filter_jobs_by_location,
-    generate_job_summary,
-    export_jobs_to_formats
+    generate_job_summary
 )
 from .terminal_utils import (
     _sleep_quiet,
@@ -37,7 +36,6 @@ __all__ = [
     "filter_jobs_by_keywords",
     "filter_jobs_by_location",
     "generate_job_summary",
-    "export_jobs_to_formats",
     
     # Terminal utilities (note: prefixed with underscore, typically internal)
     "_sleep_quiet",

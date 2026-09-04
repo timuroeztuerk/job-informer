@@ -25,6 +25,7 @@ from ..utils.time_utils import utc_now, utc_now_iso
 from ..utils.terminal_utils import _sleep_with_feedback, _print_progress, _progress_bar, _sleep_quiet
 from ..utils.run_progress import update_api_run_progress
 from ..utils.filtering import (
+    match_academic_title_pattern,
     match_company_filter,
     match_keyword_filter,
     match_study_title_pattern,
@@ -70,6 +71,9 @@ class ScraperSourceStats:
     blocked_until_ts: float = 0.0
     last_status: Optional[int] = None
     last_error: Optional[str] = None
+    requests_attempted: int = 0
+    request_failures: int = 0
+    rate_limit_responses: int = 0
 
 
 class ScraperSource:
@@ -84,6 +88,7 @@ class ScraperSource:
         self.session = session
         self.config = config
         self.stats = ScraperSourceStats()
+        self.last_query_report: Dict[str, object] = {}
         self.request_timeout = int(getattr(config, "request_timeout", 20))
         self.max_retries = max(1, int(getattr(config, "max_retries", 2)))
 
@@ -149,18 +154,25 @@ class ScraperSource:
 
     def mark_network_failure(self, exc: Exception) -> None:
         self.stats.consecutive_failures += 1
+        self.stats.request_failures += 1
         self.stats.last_status = None
         self.stats.last_error = str(exc)
         self.stats.blocked_until_ts = time.time() + self._failure_backoff_seconds(None)
 
+    def _wait_for_cooldown(self) -> None:
+        remaining = self.cooldown_remaining
+        if remaining <= 0:
+            return
+        logger.info(
+            "{} is rate-limited; waiting {:.1f}s before retrying the same request.",
+            self.display_name,
+            remaining,
+        )
+        time.sleep(remaining)
+
     def request(self, url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
         if self.is_in_cooldown:
-            logger.info(
-                "{} is currently in cooldown ({:.1f}s left); skipping request.",
-                self.display_name,
-                self.cooldown_remaining,
-            )
-            return None
+            self._wait_for_cooldown()
 
         if timeout is None:
             timeout = self.request_timeout
@@ -168,15 +180,26 @@ class ScraperSource:
         last_exception: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
-                if attempt > 0:
+                if self.is_in_cooldown:
+                    self._wait_for_cooldown()
+                elif attempt > 0:
                     time.sleep(self._retry_sleep_seconds(attempt - 1))
 
+                self.stats.requests_attempted += 1
                 response = self.session.get(url, headers=self._build_request_headers(), timeout=timeout)
                 if response.status_code == 200:
                     self.mark_success()
                     return response
 
-                if response.status_code in (429, 403, 999):
+                self.stats.request_failures += 1
+                if response.status_code == 429:
+                    self.stats.rate_limit_responses += 1
+                    self.mark_http_failure(response.status_code, response.text[:200])
+                    if attempt < self.max_retries:
+                        continue
+                    return None
+
+                if response.status_code in (403, 999):
                     self.mark_http_failure(response.status_code, response.text[:200])
                     return None
 
@@ -406,14 +429,46 @@ class LinkedInSource(ScraperSource):
         max_jobs = max_jobs if (max_jobs and max_jobs > 0) else None
 
         seen_urls: set = set()
+        seen_page_fingerprints: set[tuple[str, ...]] = set()
+        request_attempts_before = self.stats.requests_attempted
+        request_failures_before = self.stats.request_failures
+        rate_limits_before = self.stats.rate_limit_responses
+        report: Dict[str, object] = {
+            "source": self.display_name,
+            "keyword": keywords,
+            "location": location,
+            "page_limit": max_pages,
+            "page_offsets": [],
+            "pages_attempted": 0,
+            "pages_completed": 0,
+            "raw_cards": 0,
+            "valid_jobs": 0,
+            "duplicate_cards": 0,
+            "request_attempts": 0,
+            "request_failures": 0,
+            "rate_limit_responses": 0,
+            "stop_reason": "page_limit",
+            "last_status": None,
+            "last_error": None,
+        }
         start = 0
         for page_no in range(max_pages):
             if max_jobs is not None and len(jobs) >= max_jobs:
+                report["stop_reason"] = "job_limit"
                 break
 
+            report["pages_attempted"] = int(report["pages_attempted"]) + 1
+            page_offsets = report["page_offsets"]
+            assert isinstance(page_offsets, list)
+            page_offsets.append(start)
             search_url = self._build_search_url(keywords, location, time_filter_seconds, start=start)
             resp = self.request(search_url)
             if not resp:
+                report["stop_reason"] = (
+                    f"http_{self.stats.last_status}"
+                    if self.stats.last_status is not None
+                    else "request_failed"
+                )
                 break
 
             try:
@@ -421,10 +476,37 @@ class LinkedInSource(ScraperSource):
                 cards = self._extract_cards(soup)
             except Exception as exc:
                 logger.debug("LinkedIn list page parse error: {}", exc)
+                report["stop_reason"] = "parse_error"
+                report["last_error"] = str(exc)
                 break
 
+            report["pages_completed"] = int(report["pages_completed"]) + 1
+            report["raw_cards"] = int(report["raw_cards"]) + len(cards)
             if not cards:
+                report["stop_reason"] = "empty_page"
                 break
+
+            fingerprint_parts: List[str] = []
+            for card in cards:
+                link = self._pick_first_attribute(card, self.CARD_LINK_SELECTORS, "href")
+                normalized_link = self._normalize_url(link)
+                if normalized_link:
+                    fingerprint_parts.append(normalized_link)
+                else:
+                    fingerprint_parts.append(
+                        "|".join(
+                            (
+                                self._pick_first_text(card, self.CARD_TITLE_SELECTORS),
+                                self._pick_first_text(card, self.CARD_COMPANY_SELECTORS),
+                            )
+                        )
+                    )
+            page_fingerprint = tuple(fingerprint_parts)
+            if page_fingerprint in seen_page_fingerprints:
+                report["duplicate_cards"] = int(report["duplicate_cards"]) + len(cards)
+                report["stop_reason"] = "repeated_page"
+                break
+            seen_page_fingerprints.add(page_fingerprint)
 
             page_count = 0
             for card in cards:
@@ -439,6 +521,7 @@ class LinkedInSource(ScraperSource):
 
                     normalized_link = self._normalize_url(link)
                     if normalized_link and normalized_link in seen_urls:
+                        report["duplicate_cards"] = int(report["duplicate_cards"]) + 1
                         continue
                     if normalized_link:
                         seen_urls.add(normalized_link)
@@ -459,21 +542,31 @@ class LinkedInSource(ScraperSource):
                         jobs.append(normalized)
                         page_count += 1
                         if max_jobs is not None and len(jobs) >= max_jobs:
+                            report["stop_reason"] = "job_limit"
                             break
                 except Exception as exc:
                     logger.debug("LinkedIn card parse error: {}", exc)
                     continue
 
             if page_count == 0:
+                report["stop_reason"] = "no_new_jobs"
                 break
 
             if len(cards) < self.RESULTS_PER_PAGE:
+                report["stop_reason"] = "short_page"
                 break
 
             start += self.RESULTS_PER_PAGE
             if page_no < max_pages - 1:
                 time.sleep(max(0.5, self.config.request_delay))
 
+        report["valid_jobs"] = len(jobs)
+        report["request_attempts"] = self.stats.requests_attempted - request_attempts_before
+        report["request_failures"] = self.stats.request_failures - request_failures_before
+        report["rate_limit_responses"] = self.stats.rate_limit_responses - rate_limits_before
+        report["last_status"] = self.stats.last_status
+        report["last_error"] = self.stats.last_error
+        self.last_query_report = report
         return jobs
 
     def extract_job_description(self, job_url: str) -> str:
@@ -893,6 +986,7 @@ class JobScraper:
         self.session.mount('https://', adapter)
         # Runtime state
         self.jobs_data = []
+        self.collection_reports: List[Dict[str, object]] = []
         self.last_run_threshold_hit = False
         # Initialize database for fast deduplication
         self.db = JobDatabase()
@@ -917,6 +1011,27 @@ class JobScraper:
 
     def _get_source(self, source_name: str = "linkedin") -> Optional[ScraperSource]:
         return self._sources.get(source_name.lower())
+
+    def get_collection_coverage(self) -> Dict[str, int]:
+        """Return aggregate query/page telemetry for the current collection."""
+        reports = self.collection_reports
+        return {
+            "queries": len(reports),
+            "pages_attempted": sum(int(report.get("pages_attempted", 0) or 0) for report in reports),
+            "pages_completed": sum(int(report.get("pages_completed", 0) or 0) for report in reports),
+            "raw_cards": sum(int(report.get("raw_cards", 0) or 0) for report in reports),
+            "valid_jobs": sum(int(report.get("valid_jobs", 0) or 0) for report in reports),
+            "duplicate_cards": sum(int(report.get("duplicate_cards", 0) or 0) for report in reports),
+            "request_attempts": sum(int(report.get("request_attempts", 0) or 0) for report in reports),
+            "request_failures": sum(int(report.get("request_failures", 0) or 0) for report in reports),
+            "rate_limit_responses": sum(int(report.get("rate_limit_responses", 0) or 0) for report in reports),
+            "incomplete_queries": sum(
+                1
+                for report in reports
+                if str(report.get("stop_reason") or "")
+                in {"request_failed", "parse_error", "http_403", "http_429", "http_999"}
+            ),
+        }
 
     def _clean_text_field(self, text: str) -> str:
         """Normalize whitespace and strip text fields."""
@@ -1016,6 +1131,20 @@ class JobScraper:
                         "filter_name": "study_title",
                         "matched_value": matched_study_pattern,
                         "reason": "Archived as internship or study-track role based on title",
+                        "details": {"title": title, "company": company},
+                    }
+                )
+
+            matched_academic_pattern = match_academic_title_pattern(title)
+            if matched_academic_pattern and not matched_study_pattern:
+                decisions.append(
+                    {
+                        "job_id": job_id,
+                        "decision_source": "rule",
+                        "decision_action": "archive",
+                        "filter_name": "academic_title",
+                        "matched_value": matched_academic_pattern,
+                        "reason": "Archived as an academic role based on title",
                         "details": {"title": title, "company": company},
                     }
                 )
@@ -1240,9 +1369,6 @@ class JobScraper:
         fresh_jobs: List[Dict] = []
 
         for j in page_jobs:
-            if self.purge_keywords(j.get('title', '')) or self.purge_companies(j.get('company', '')):
-                skipped_unwanted += 1
-                continue
             key = self._build_normalized_key_from_fields(
                 j.get('source', source),
                 j.get('title', ''),
@@ -1305,12 +1431,24 @@ class JobScraper:
             max_pages=source_page_limit or self._linkedin_source.DEFAULT_MAX_PAGES,
             max_jobs=page_limit,
         )
+        report = dict(self._linkedin_source.last_query_report)
+        self.collection_reports.append(report)
+        logger.info(
+            "LinkedIn query '{}' @ '{}': {}/{} pages completed, {} cards, {} valid jobs, stop={}",
+            keywords,
+            location,
+            int(report.get("pages_completed", 0) or 0),
+            int(report.get("pages_attempted", 0) or 0),
+            int(report.get("raw_cards", 0) or 0),
+            int(report.get("valid_jobs", 0) or 0),
+            report.get("stop_reason", "unknown"),
+        )
 
         jobs: List[Dict] = []
         existing_keys = self._get_existing_normalized_keys()
 
         try:
-            jobs, _fresh_jobs, skipped_unwanted, existing_matches = self._collect_observed_jobs(
+            jobs, _fresh_jobs, _skipped_unwanted, existing_matches = self._collect_observed_jobs(
                 page_jobs=page_jobs,
                 source='LinkedIn',
                 existing_keys=existing_keys,
@@ -1322,7 +1460,7 @@ class JobScraper:
                     prefix=f"LinkedIn {keywords} @ {location}",
                     current=1,
                     total=1,
-                    suffix=f"Observed:{len(jobs)} Unwanted:{skipped_unwanted} Existing:{existing_matches}"
+                    suffix=f"Observed:{len(jobs)} Existing:{existing_matches}"
                 )
 
             for j in jobs:
@@ -1399,6 +1537,7 @@ class JobScraper:
     def scrape(self, keywords: List[str], locations: List[str], *, limit_per_source: Optional[int] = None) -> pd.DataFrame:
         """Scrape jobs from enabled sources.
         """
+        self.collection_reports = []
         all_jobs: List[Dict] = []
         stop_collecting = False
         enabled_source_count = int(bool(self.config.enable_linkedin)) + int(bool(self.config.enable_indeed))
@@ -1519,11 +1658,15 @@ class JobScraper:
         if not df.empty:
             if self.max_total_jobs:
                 df = df.head(self.max_total_jobs)
-            # Filter out jobs with unwanted keywords in title using centralized logic
-            df = self.filter_scraped_jobs(df)
             # Build job_ids vectorized and drop duplicates
             df['job_id'] = build_job_ids(df)
+            candidate_count = len(df)
             df = df.drop_duplicates(subset=['job_id'], keep='first')
+            logger.info(
+                "Prepared {} unique observations from {} valid source candidates",
+                len(df),
+                candidate_count,
+            )
         else:
             logger.warning("No jobs found")
 
@@ -1539,16 +1682,6 @@ class JobScraper:
             
         return df
     
-    def save_jobs_to_csv(self, df: pd.DataFrame, filename: Optional[str] = None) -> str:
-        """Save jobs data to CSV file"""
-        if filename is None:
-            filename = f"jobs_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        data_dir = Path("data")
-        data_dir.mkdir(parents=True, exist_ok=True)
-        filepath = str(data_dir / filename)
-        df.to_csv(filepath, index=False)
-        return filepath
-
     def backfill_masked_titles(self, limit: int = 100) -> dict:
         """Refetch job titles/companies/locations for records that look masked (e.g., ********)."""
         masked = self.db.get_jobs_with_masked_titles(limit=limit)
@@ -1635,6 +1768,7 @@ class JobScraper:
 
         self.last_run_threshold_hit = False
         self.last_run_failed = False
+        scrape_run_id: Optional[str] = None
         progress_metrics = {
             "observed": 0,
             "new": 0,
@@ -1645,7 +1779,7 @@ class JobScraper:
 
         try:
             # Run automatic purge before scraping to clean up unwanted jobs (if enabled)
-            if getattr(self.config, 'auto_purge_before_scraping', True):
+            if getattr(self.config, 'auto_purge_before_scraping', False):
                 update_api_run_progress(
                     stage="cleaning",
                     label="Cleaning previously collected jobs",
@@ -1671,10 +1805,32 @@ class JobScraper:
                 raise ValueError("No valid search keywords configured. Set SEARCH_KEYWORDS in .env or pass --keywords.")
             if not locations:
                 raise ValueError("No valid search locations configured. Set SEARCH_LOCATIONS in .env or pass --locations.")
+            scrape_run_id = self.db.start_scrape_run(
+                mode="run-once",
+                keywords=keywords,
+                locations=locations,
+                observed_at=utc_now_iso(),
+            )
             jobs_df = self.scrape(keywords, locations)
             progress_metrics["observed"] = len(jobs_df)
+            coverage = self.get_collection_coverage()
+            progress_metrics.update(coverage)
+            logger.info(
+                "LinkedIn coverage: {} queries, {}/{} pages completed, {} request failures, {} rate limits",
+                coverage["queries"],
+                coverage["pages_completed"],
+                coverage["pages_attempted"],
+                coverage["request_failures"],
+                coverage["rate_limit_responses"],
+            )
 
             if jobs_df.empty:
+                self.db.finish_scrape_run(
+                    scrape_run_id,
+                    observed_jobs_count=0,
+                    new_jobs_count=0,
+                    coverage=self.collection_reports,
+                )
                 update_api_run_progress(
                     stage="finalizing",
                     label="Finalizing collection with no observed jobs",
@@ -1686,6 +1842,15 @@ class JobScraper:
                 return False
 
             filter_decisions = self._build_filter_decisions_for_jobs(jobs_df)
+            filter_counts: Dict[str, int] = {}
+            for decision in filter_decisions:
+                filter_name = str(decision.get("filter_name") or "unknown")
+                filter_counts[filter_name] = filter_counts.get(filter_name, 0) + 1
+                details = decision.get("details")
+                if not isinstance(details, dict):
+                    details = {}
+                details["scrape_run_id"] = scrape_run_id
+                decision["details"] = details
             archived_job_ids = self._job_ids_from_filter_decisions(filter_decisions)
             active_jobs_df = jobs_df
             if archived_job_ids and 'job_id' in jobs_df.columns:
@@ -1700,17 +1865,9 @@ class JobScraper:
                 metrics=progress_metrics,
                 event=f"Recording {len(jobs_df)} observed jobs",
             )
-            run_observed_at = utc_now_iso()
-            scrape_run_id = self.db.start_scrape_run(
-                mode="run-once",
-                keywords=keywords,
-                locations=locations,
-                observed_at=run_observed_at,
-            )
             _ = self.db.put_into_sql(
                 jobs_df,
                 scrape_run_id=scrape_run_id,
-                observed_at=run_observed_at,
             )
             archived_count = 0
             if filter_decisions:
@@ -1721,12 +1878,17 @@ class JobScraper:
                 archived_count = int(archive_summary.get("archived", 0) or 0)
                 progress_metrics["archived"] = archived_count
                 logger.info(
-                    "Archived {} filtered jobs from this scrape and recorded {} filter decisions",
+                    "Archived {} filtered jobs and recorded {} decisions by rule: {}",
                     archived_count,
                     int(archive_summary.get("decisions_recorded", 0) or 0),
+                    filter_counts,
                 )
 
-            self.db.finish_scrape_run(scrape_run_id, archived_jobs_count=archived_count)
+            self.db.finish_scrape_run(
+                scrape_run_id,
+                archived_jobs_count=archived_count,
+                coverage=self.collection_reports,
+            )
 
             descriptions_fetched_count = 0
             parsed_jobs_count = 0
@@ -1791,6 +1953,7 @@ class JobScraper:
                     archived_jobs_count=archived_count,
                     descriptions_fetched_count=descriptions_fetched_count,
                     parsed_jobs_count=parsed_jobs_count,
+                    coverage=self.collection_reports,
                 )
 
             with self.db._get_connection() as conn:
@@ -1836,32 +1999,25 @@ class JobScraper:
                 )
                 return False
 
-            # Save CSV for backup/auditing unless dry-run
             update_api_run_progress(
                 stage="finalizing",
                 label="Finalizing collection results",
                 metrics=progress_metrics,
                 event="Finalizing collection results",
             )
-            csv_filename = None
-            if not self.config.dry_run:
-                csv_filename = self.save_jobs_to_csv(active_jobs_df)
-                logger.info("Saved snapshot of scraped jobs to {}", csv_filename)
-            else:
-                logger.info("DRY_RUN is enabled; skipping CSV save")
-
             logger.info(
-                "Scraping completed: {} observed jobs, {} active jobs kept, {} new active jobs stored, {} archived by filters{}",
+                "Scraping completed: {} observed jobs, {} active jobs kept, {} new active jobs stored, {} archived by filters",
                 len(jobs_df),
                 len(active_jobs_df),
                 active_new_jobs_count,
                 archived_count,
-                f" (CSV saved to {csv_filename})" if csv_filename else ""
             )
             return True
 
         except Exception as e:
             self.last_run_failed = True
+            if scrape_run_id:
+                self.db.finish_scrape_run(scrape_run_id, coverage=self.collection_reports)
             update_api_run_progress(
                 stage="failed",
                 label="Collection stopped with an error",
@@ -1968,6 +2124,11 @@ class JobScraper:
                     }
                 )
             ]
+            academic_role_job_ids = {
+                str(decision.get("job_id") or "").strip()
+                for decision in rule_decisions
+                if decision.get("filter_name") == "academic_title"
+            }
 
             # 1.5) Remove internship/student-study roles identified from parsed descriptions
             import json
@@ -2042,7 +2203,7 @@ class JobScraper:
                 return True
 
             logger.info(
-                f"Will archive {len(to_archive_ids)} unwanted jobs [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}]"
+                f"Will archive {len(to_archive_ids)} unwanted jobs [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}, academic roles: {len(academic_role_job_ids)}]"
             )
 
             archive_summary = self.db.archive_jobs_with_filter_decisions(
@@ -2055,7 +2216,7 @@ class JobScraper:
                 ).fetchone()[0]
 
             logger.info(
-                f"Cleanup complete: {int(archive_summary.get('archived', 0) or 0)} unwanted jobs archived [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}]. Remaining active: {final_count}"
+                f"Cleanup complete: {int(archive_summary.get('archived', 0) or 0)} unwanted jobs archived [keywords: {len(unwanted_by_title)}, companies: {len(unwanted_by_company)}, study roles: {len(study_role_job_ids)}, academic roles: {len(academic_role_job_ids)}]. Remaining active: {final_count}"
             )
 
             if len(to_archive_ids) > 0:

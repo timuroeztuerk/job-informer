@@ -26,6 +26,17 @@ STUDY_ROLE_PATTERNS = [
     r"\bhiwi\b",
 ]
 
+ACADEMIC_ROLE_PATTERNS = [
+    r"\bpost[\s-]?doc(?:toral)?\b",
+    r"\bprofessor(?:in)?\b",
+    r"\bjuniorprofessor(?:in)?\b",
+    r"\blecturer\b",
+    r"\bacademic researcher\b",
+    r"\bresearch fellow\b",
+    r"\bdoktorand(?:in)?\b",
+    r"\bwissenschaftlich\w*\*?n?\s+mitarbeiter\w*\b",
+]
+
 SUBSTRING_KEYWORDS = {"entwickl", "informatik"}
 
 
@@ -106,3 +117,20 @@ def match_study_title_pattern(title: str) -> Optional[str]:
 def should_filter_study_title(title: str) -> bool:
     """Return True when the title clearly describes internship/student/study-track roles."""
     return match_study_title_pattern(title) is not None
+
+
+def match_academic_title_pattern(title: str) -> Optional[str]:
+    """Return the matched pattern when a title clearly describes an academic role."""
+    if not title:
+        return None
+
+    title_normalized = normalize_text(title)
+    for pattern in ACADEMIC_ROLE_PATTERNS:
+        if re.search(pattern, title_normalized):
+            return pattern
+    return None
+
+
+def should_filter_academic_title(title: str) -> bool:
+    """Return True when the title clearly describes an academic role."""
+    return match_academic_title_pattern(title) is not None

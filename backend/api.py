@@ -675,15 +675,42 @@ def _metrics_for_api_run(run_id: str) -> Optional[dict[str, int]]:
                 """,
                 (run_id,),
             ).fetchone()
+            coverage_rows = (
+                conn.execute(
+                    "SELECT coverage_json FROM scrape_runs WHERE api_run_id = ?",
+                    (run_id,),
+                ).fetchall()
+                if "coverage_json" in columns
+                else []
+            )
         if not row or int(row[5] or 0) == 0:
             return None
-        return {
+        metrics = {
             "observed": int(row[0] or 0),
             "new": int(row[1] or 0),
             "archived": int(row[2] or 0),
             "descriptions_fetched": int(row[3] or 0),
             "parsed": int(row[4] or 0),
         }
+        reports: list[dict[str, Any]] = []
+        for coverage_row in coverage_rows:
+            try:
+                payload = json.loads(coverage_row[0] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                payload = []
+            if isinstance(payload, list):
+                reports.extend(report for report in payload if isinstance(report, dict))
+        if reports:
+            metrics.update(
+                {
+                    "queries": len(reports),
+                    "pages_attempted": sum(int(report.get("pages_attempted", 0) or 0) for report in reports),
+                    "pages_completed": sum(int(report.get("pages_completed", 0) or 0) for report in reports),
+                    "request_failures": sum(int(report.get("request_failures", 0) or 0) for report in reports),
+                    "rate_limit_responses": sum(int(report.get("rate_limit_responses", 0) or 0) for report in reports),
+                }
+            )
+        return metrics
     except sqlite3.Error:
         return None
 

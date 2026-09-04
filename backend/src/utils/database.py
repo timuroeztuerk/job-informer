@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any, Iterator
 from datetime import UTC, datetime, timedelta
 from loguru import logger
 
-from .data_utils import build_job_ids, build_normalized_key, normalize_job_url
+from .data_utils import build_normalized_key, normalize_job_url
 from .profile_fit import (
     DEFAULT_FIT_PROFILE_ID,
     DEFAULT_FIT_PROFILE_NAME,
@@ -109,6 +109,7 @@ class JobDatabase:
                     archived_jobs_count INTEGER NOT NULL DEFAULT 0,
                     descriptions_fetched_count INTEGER NOT NULL DEFAULT 0,
                     parsed_jobs_count INTEGER NOT NULL DEFAULT 0,
+                    coverage_json TEXT NOT NULL DEFAULT '[]',
                     created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
                     completed_at TIMESTAMP
                 )
@@ -312,6 +313,7 @@ class JobDatabase:
             "archived_jobs_count": "INTEGER NOT NULL DEFAULT 0",
             "descriptions_fetched_count": "INTEGER NOT NULL DEFAULT 0",
             "parsed_jobs_count": "INTEGER NOT NULL DEFAULT 0",
+            "coverage_json": "TEXT NOT NULL DEFAULT '[]'",
         }
         for name, definition in additions.items():
             if name not in columns:
@@ -1469,6 +1471,7 @@ class JobDatabase:
         archived_jobs_count: Optional[int] = None,
         descriptions_fetched_count: Optional[int] = None,
         parsed_jobs_count: Optional[int] = None,
+        coverage: Optional[List[Dict[str, Any]]] = None,
         completed_at: Optional[str] = None,
     ) -> None:
         """Mark a scrape run as complete and persist final counters."""
@@ -1493,6 +1496,9 @@ class JobDatabase:
         if parsed_jobs_count is not None:
             updates.append("parsed_jobs_count = ?")
             params.append(max(0, int(parsed_jobs_count)))
+        if coverage is not None:
+            updates.append("coverage_json = ?")
+            params.append(json.dumps(coverage))
 
         params.append(scrape_run_id)
         with self._get_connection() as conn:
@@ -1822,7 +1828,6 @@ class JobDatabase:
         # Insert/update jobs and record observations
         inserted_count = 0
         observed_count = 0
-        affected_job_ids: set[str] = set()
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
@@ -2048,7 +2053,6 @@ class JobDatabase:
                     ),
                 )
                 observed_count += 0 if observation_exists else 1
-                affected_job_ids.add(canonical_job_id)
                 for alias in self._job_identity_aliases(
                     job_id=canonical_job_id,
                     title=observed_job_title,
@@ -2069,12 +2073,6 @@ class JobDatabase:
             )
         if auto_created_scrape_run:
             logger.debug("Observation run {} recorded {} seen jobs", active_scrape_run_id, observed_count)
-
-        if affected_job_ids:
-            try:
-                self.recompute_fit_scores(job_ids=sorted(affected_job_ids))
-            except Exception as exc:
-                logger.warning("Could not recompute fit scores after DB upsert: {}", exc)
 
         logger.info(f"DB Updated with {inserted_count} new jobs.")
         return inserted_count
@@ -2411,42 +2409,6 @@ class JobDatabase:
 
         return [{key: row[key] for key in row.keys()} for row in rows]
     
-    def migrate_csv_to_sqlite(self, csv_file: str) -> int:
-        """Migrate jobs from CSV file to SQLite database"""
-        try:
-            df = pd.read_csv(csv_file)
-            if 'scraped_at' in df.columns:
-                df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
-            
-            # Build job_ids if not present
-            if 'job_id' not in df.columns:
-                df = self._ensure_job_ids(df)
-            
-            inserted = self.put_into_sql(df)
-            logger.info(f"Migrated {inserted} jobs from {csv_file}")
-            return inserted
-            
-        except Exception as e:
-            logger.error(f"Failed to migrate {csv_file}: {e}")
-            return 0
-    
-    def export_to_csv(self, filename: Optional[str] = None) -> str:
-        """Export all jobs to CSV file"""
-        if filename is None:
-            filename = f"jobs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        
-        filepath = f"data/{filename}"
-        
-        with self._get_connection() as conn:
-            df = pd.read_sql_query("SELECT * FROM jobs WHERE archived_at IS NULL ORDER BY scraped_at DESC", conn)
-        
-        if not df.empty and 'scraped_at' in df.columns:
-            df['scraped_at'] = pd.to_datetime(df['scraped_at'])
-        
-        df.to_csv(filepath, index=False)
-        logger.info(f"Exported {len(df)} jobs to {filepath}")
-        return filepath
-
     # ======================
     # Description backfilling
     # ======================
@@ -2580,14 +2542,6 @@ class JobDatabase:
             except Exception as e:
                 logger.error(f"Failed updating titles/companies: {e}")
                 return 0
-
-    def _ensure_job_ids(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure a DataFrame uses the same canonical IDs as database upserts."""
-        if df.empty:
-            df['job_id'] = pd.Series(dtype='string')
-            return df
-        df['job_id'] = build_job_ids(df)
-        return df
 
     # ======================
     # Parsed descriptions helpers

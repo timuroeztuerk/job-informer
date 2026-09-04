@@ -101,6 +101,19 @@ class TestDataCleaningUtilities(unittest.TestCase):
         self.assertFalse(filtering.should_filter_study_title("Data Engineer"))
         self.assertFalse(filtering.should_filter_study_title("Contract Data Scientist"))
 
+    def test_academic_title_filter_handles_english_and_german_roles(self) -> None:
+        academic_titles = [
+            "PostDoc in Forest Ecology",
+            "Professorin für Datenbanken",
+            "Wissenschaftliche*n Mitarbeiter*in am Lehrstuhl Datenbanken",
+            "Wissenschaftlicher Mitarbeiter: Robotische Handhabungstechnik",
+        ]
+        for title in academic_titles:
+            self.assertTrue(filtering.should_filter_academic_title(title), title)
+
+        self.assertFalse(filtering.should_filter_academic_title("AI Researcher — Training Optimization"))
+        self.assertFalse(filtering.should_filter_academic_title("Research Scientist at Pharma Company"))
+
 class TestSummaryAndExportUtilities(unittest.TestCase):
     """Tests focused on summary generation and export helpers."""
 
@@ -123,24 +136,6 @@ class TestSummaryAndExportUtilities(unittest.TestCase):
         self.assertEqual(summary["top_locations"], {"Berlin": 1, "Paris": 1})
         self.assertEqual(summary["date_range"]["earliest"], "2024-01-01T00:00:00")
         self.assertEqual(summary["date_range"]["latest"], "2024-01-02T00:00:00")
-
-    def test_export_jobs_to_formats_creates_expected_files(self) -> None:
-        df = pd.DataFrame(
-            {"title": ["Role"], "company": ["ACME"], "location": ["Remote"], "source": ["Site"]}
-        )
-
-        with TemporaryDirectory() as tmp_dir:
-            old_cwd = os.getcwd()
-            os.chdir(tmp_dir)
-            try:
-                exported = data_utils.export_jobs_to_formats(df, "jobs")
-            finally:
-                os.chdir(old_cwd)
-
-        # CSV and JSON should always be produced; Excel is optional
-        self.assertTrue(any(name.endswith(".csv") for name in exported))
-        self.assertTrue(any(name.endswith(".json") for name in exported))
-
 
 class TestSalaryAndIdentityUtilities(unittest.TestCase):
     """Tests targeting salary parsing and job identity helpers."""
@@ -430,7 +425,7 @@ class TestProfileFitScoring(unittest.TestCase):
         self.assertEqual(result["score"], 0.0)
         self.assertEqual(result["signals"]["excluded_reason"], "excluded_seniority")
 
-    def test_put_into_sql_persists_fit_scores(self) -> None:
+    def test_put_into_sql_does_not_recompute_deferred_fit_scores(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             db_path = os.path.join(tmp_dir, "jobs.db")
             db = JobDatabase(db_path=db_path)
@@ -450,8 +445,10 @@ class TestProfileFitScoring(unittest.TestCase):
             )
 
             db.put_into_sql(frame, observed_at="2026-04-05T09:00:00")
-            fit = db.get_job_fit("linkedin:fit-1")
+            self.assertIsNone(db.get_job_fit("linkedin:fit-1"))
 
+            db.recompute_fit_scores(job_ids=["linkedin:fit-1"])
+            fit = db.get_job_fit("linkedin:fit-1")
             self.assertIsNotNone(fit)
             assert fit is not None
             self.assertGreaterEqual(fit["score"], 70.0)

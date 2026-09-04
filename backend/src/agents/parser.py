@@ -933,13 +933,6 @@ class DescriptionTools:
             f"Description parser ({context_label}) summary — parsed {total_new} / "
             f"{len(unparsed_df)} jobs (version={version}, batches={batches_processed}/{total_batches})"
         )
-        if total_new > 0:
-            try:
-                self.db.recompute_fit_scores(
-                    job_ids=unparsed_df["job_id"].astype(str).drop_duplicates().tolist()
-                )
-            except Exception as e:
-                logger.warning(f"Could not recompute fit scores after parsing: {e}")
         return total_new
 
     def run_incremental(self, batch_size: int, max_batches: int) -> int:

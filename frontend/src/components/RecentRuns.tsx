@@ -102,7 +102,10 @@ const RecentRuns: React.FC<RecentRunsProps> = ({ className, refreshToken = 0 }) 
               <p className="muted small">{formatDate(run.started_at)}</p>
               {run.metrics && (
                 <p className="muted tiny">
-                  {run.metrics.observed} observed · {run.metrics.new} new · {run.metrics.archived} archived · {run.metrics.parsed} parsed
+                  {run.metrics.observed} observed · {run.metrics.new} new · {run.metrics.archived} archived
+                  {run.metrics.pages_attempted != null
+                    ? ` · ${run.metrics.pages_completed ?? 0}/${run.metrics.pages_attempted} pages`
+                    : ""}
                 </p>
               )}
               {run.trigger === "scheduled" && <p className="muted tiny">Automatic collection</p>}

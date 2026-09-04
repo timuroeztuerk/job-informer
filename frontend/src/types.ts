@@ -105,6 +105,11 @@ export interface RunMetrics {
   archived: number;
   descriptions_fetched: number;
   parsed: number;
+  queries?: number;
+  pages_attempted?: number;
+  pages_completed?: number;
+  request_failures?: number;
+  rate_limit_responses?: number;
 }
 
 export interface RunProgressEvent {

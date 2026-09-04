@@ -412,6 +412,16 @@ const RunPane = forwardRef<RunPaneHandle, RunPaneProps>(({ className, onRunCompl
                   {metricItems(metrics).map(([value, label]) => (
                     <span className="run-metric" key={label}><strong>{value}</strong>{label}</span>
                   ))}
+                  {metrics.pages_attempted != null && (
+                    <span className="run-metric">
+                      <strong>{metrics.pages_completed ?? 0}/{metrics.pages_attempted}</strong>pages
+                    </span>
+                  )}
+                  {(metrics.request_failures ?? 0) > 0 && (
+                    <span className="run-metric">
+                      <strong>{metrics.request_failures}</strong>request failures
+                    </span>
+                  )}
                 </div>
               )}
               {activity.length > 0 && (

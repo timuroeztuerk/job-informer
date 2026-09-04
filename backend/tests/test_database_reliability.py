@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import sqlite3
 import unittest
 import warnings
@@ -68,19 +69,34 @@ class TestDatabaseReliability(unittest.TestCase):
                 archived_jobs_count=2,
                 descriptions_fetched_count=4,
                 parsed_jobs_count=4,
+                coverage=[
+                    {
+                        "source": "LinkedIn",
+                        "keyword": "Data Scientist",
+                        "location": "Berlin",
+                        "page_offsets": [0, 25],
+                        "pages_attempted": 2,
+                        "pages_completed": 2,
+                        "stop_reason": "short_page",
+                    }
+                ],
             )
 
             with db._get_connection() as conn:  # noqa: SLF001
                 row = conn.execute(
                     """
                     SELECT api_run_id, observed_jobs_count, new_jobs_count,
-                           archived_jobs_count, descriptions_fetched_count, parsed_jobs_count
+                           archived_jobs_count, descriptions_fetched_count, parsed_jobs_count,
+                           coverage_json
                     FROM scrape_runs WHERE scrape_run_id = ?
                     """,
                     (run_id,),
                 ).fetchone()
 
-            self.assertEqual(tuple(row), ("api-123", 10, 3, 2, 4, 4))
+            self.assertEqual(tuple(row[:6]), ("api-123", 10, 3, 2, 4, 4))
+            coverage = json.loads(row[6])
+            self.assertEqual(coverage[0]["page_offsets"], [0, 25])
+            self.assertEqual(coverage[0]["pages_completed"], 2)
 
     def test_legacy_orphans_are_reported_without_being_changed(self) -> None:
         with TemporaryDirectory() as tmp_dir:

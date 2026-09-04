@@ -7,7 +7,6 @@ import pandas as pd
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 import re
-from datetime import datetime
 from .filtering import should_filter_by_keywords, should_filter_by_company, should_filter_study_title
 from loguru import logger
 
@@ -216,36 +215,6 @@ def generate_job_summary(jobs_df: pd.DataFrame) -> Dict:
     }
     
     return summary
-
-
-def export_jobs_to_formats(jobs_df: pd.DataFrame, base_filename: str) -> List[str]:
-    """Export jobs data to multiple formats"""
-    exported_files = []
-    
-    if jobs_df.empty:
-        return exported_files
-    
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # Export to CSV
-    csv_file = f"{base_filename}_{timestamp}.csv"
-    jobs_df.to_csv(csv_file, index=False)
-    exported_files.append(csv_file)
-    
-    # Export to Excel
-    try:
-        excel_file = f"{base_filename}_{timestamp}.xlsx"
-        jobs_df.to_excel(excel_file, index=False)
-        exported_files.append(excel_file)
-    except ImportError:
-        pass  # openpyxl not installed
-    
-    # Export to JSON
-    json_file = f"{base_filename}_{timestamp}.json"
-    jobs_df.to_json(json_file, orient='records', date_format='iso')
-    exported_files.append(json_file)
-    
-    return exported_files
 
 
 # -----------------------

@@ -17,12 +17,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_LOG_FILE = str(BASE_DIR / "logs" / "job_informer.log")
 DEFAULT_JOBS_DB_PATH = str(BASE_DIR / "data" / "jobs.db")
 DEFAULT_UNWANTED_KEYWORDS = (
-    "intern,internship,praktikant,praktikum,werkstudent,working student,"
-    "student assistant,student helper,studentenjob,thesis,masterarbeit,masterthesis,"
-    "bachelorarbeit,bachelorthesis,dissertation,doctoral,phd student,trainee,traineeship,"
-    "ausbildung,duales studium,research assistant,hiwi,engineer,engineering,"
-    "fachkraft,fachinformatiker,research,postdoctoral,software,entwickl,"
-    "projektleiter,informatik,backend,frontend"
+    "ai engineer,artificial intelligence engineer,generative ai engineer,genai engineer"
 )
 
 
@@ -167,7 +162,7 @@ class Config:
             recipient_email=os.getenv('RECIPIENT_EMAIL', ''),
             
             # Job Search Configuration
-            search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Scientist, Data Analyst, AI Engineer'),
+            search_keywords=os.getenv('SEARCH_KEYWORDS', 'Data Scientist, Data Analyst'),
             search_locations=os.getenv('SEARCH_LOCATIONS', 'Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover'),
             search_time_range=_get_time_range('SEARCH_TIME_RANGE', DEFAULT_TIME_RANGE),
             unwanted_keywords=os.getenv('UNWANTED_KEYWORDS', DEFAULT_UNWANTED_KEYWORDS),
@@ -181,7 +176,7 @@ class Config:
             max_total_jobs=int(os.getenv('MAX_TOTAL_JOBS', '0')),
             min_new_jobs_to_continue=int(os.getenv('MIN_NEW_JOBS_TO_CONTINUE', '1')),
             quiet_progress=_get_bool('QUIET_PROGRESS', 'true'),
-            linkedin_max_search_pages=int(os.getenv('LINKEDIN_MAX_SEARCH_PAGES', '0')),
+            linkedin_max_search_pages=int(os.getenv('LINKEDIN_MAX_SEARCH_PAGES', '4')),
             indeed_max_search_pages=int(os.getenv('INDEED_MAX_SEARCH_PAGES', '0')),
             indeed_session_cookies=os.getenv('INDEED_SESSION_COOKIES', ''),
             
@@ -205,7 +200,7 @@ class Config:
             llm_retry_jitter=_get_float('LLM_RETRY_JITTER', '0.2'),
             
             # Description Parser Configuration
-            enable_description_parser=_get_bool('ENABLE_DESCRIPTION_PARSER', 'true'),
+            enable_description_parser=_get_bool('ENABLE_DESCRIPTION_PARSER', 'false'),
             desc_parser_model=os.getenv('DESC_PARSER_MODEL', os.getenv('OPENAI_MODEL', 'gpt-5-mini')),
             desc_parser_prompt=os.getenv('DESC_PARSER_PROMPT', (
                 'Extract structured job information from the provided title, company, and description.\n'
@@ -222,14 +217,14 @@ class Config:
             desc_parser_max_chars=_get_int('DESC_PARSER_MAX_CHARS', '12000'),
             desc_parser_dry_run=_get_bool('DESC_PARSER_DRY_RUN', 'false'),
             desc_parser_concurrency=int(os.getenv('DESC_PARSER_CONCURRENCY', '25')),
-            scrape_descriptions_on_search=_get_bool('SCRAPE_DESCRIPTIONS', 'true'),
+            scrape_descriptions_on_search=_get_bool('SCRAPE_DESCRIPTIONS', 'false'),
             scrape_descriptions_limit=int(os.getenv('SCRAPE_DESCRIPTIONS_LIMIT', '20')),
 
             # Feature Toggles
             enable_linkedin=_get_bool('ENABLE_LINKEDIN', 'true'),
             enable_indeed=_get_bool('ENABLE_INDEED', 'false'),
             dry_run=_get_bool('DRY_RUN', 'false'),
-            auto_purge_before_scraping=_get_bool('AUTO_PURGE_BEFORE_SCRAPING', 'true')
+            auto_purge_before_scraping=_get_bool('AUTO_PURGE_BEFORE_SCRAPING', 'false')
         )
     
     def validate_for_mode(self, mode: str) -> None:
