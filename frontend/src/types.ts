@@ -1,4 +1,6 @@
 export type JobArchiveFilter = "exclude" | "include" | "only";
+export type JobRelevanceOutcome = "target" | "excluded" | "unrelated" | "unmatched" | "manual_keep" | "manual_archive";
+export type JobRelevanceFilter = JobRelevanceOutcome | "auto_archived";
 
 export interface QueryGroupOption {
   key: string;
@@ -25,18 +27,76 @@ export interface Job {
   salary?: string;
   scraped_at?: string;
   created_at?: string;
+  is_favorite: boolean;
+  is_flagged?: boolean;
+  flag_reason?: string | null;
+  flagged_at?: string | null;
   archived_at?: string | null;
   archived_reason?: string | null;
   first_seen_at?: string;
   last_seen_at?: string;
   seen_count?: number;
-  relevance_outcome?: "target" | "excluded" | "unrelated" | "unmatched" | "manual_keep" | "manual_archive" | null;
+  relevance_outcome?: JobRelevanceOutcome | null;
   role_family?: string | null;
   relevance_reason?: string | null;
   relevance_ruleset_version?: string | null;
   relevance_evaluated_at?: string | null;
   query_groups?: string[];
   query_matches?: JobQueryMatch[];
+}
+
+export interface JobFlag {
+  job_id: string;
+  is_flagged: boolean;
+  flag_reason: string | null;
+  flagged_at: string | null;
+}
+
+export interface DescriptionQueueState {
+  paused: boolean;
+  reason: string | null;
+  cooldown_until: string | null;
+  queued: number;
+  fetching: number;
+  saved_jobs: number;
+  failed_jobs: number;
+  added?: number;
+}
+
+export interface JobDescriptionResponse {
+  job_id: string;
+  saved: {
+    source_id: number;
+    source_url: string;
+    fetched_at: string;
+    extraction_id: number;
+    extractor: string;
+    extractor_version: string;
+    schema_version: string;
+    extracted_at: string;
+    content_sha256: string;
+    data: {
+      description_text: string;
+      title: string | null;
+      criteria: { key: string; label: string; value: string; evidence: { selector: string; text: string } }[];
+      evidence: { source_url: string; description_locator: string };
+    };
+  } | null;
+  attempts: {
+    fetch_id: number;
+    requested_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+    status: "queued" | "fetching" | "succeeded" | "unchanged" | "failed" | "interrupted";
+    http_status: number | null;
+    error_kind: string | null;
+    error_message: string | null;
+    source_id: number | null;
+  }[];
+  source_versions: number;
+  reparse_available: boolean;
+  parser_version: string;
+  queue: DescriptionQueueState;
 }
 
 export interface JobsResponse {
@@ -85,6 +145,55 @@ export interface QueryCoverage {
   last_error?: string | null;
 }
 
+export interface CollectionScopeMetrics {
+  locations: string[];
+  queries: number;
+  unique_jobs: number;
+  pages_attempted: number;
+  pages_completed: number;
+  page_completion_percent: number;
+  request_failures: number;
+}
+
+export interface CollectionScopeComparison {
+  countrywide: CollectionScopeMetrics;
+  cities: CollectionScopeMetrics;
+  shared_jobs: number;
+  countrywide_only_jobs: number;
+  city_only_jobs: number;
+  city_jobs_covered_by_countrywide_percent: number;
+  per_city?: { location: string; unique_jobs: number; shared_jobs: number; city_only_jobs: number }[];
+}
+
+export interface CollectionValidation {
+  required_days: number;
+  healthy_days: number;
+  timezone: string;
+  baseline: { keywords: string; locations: string; time_range: string } | null;
+  matching_runs: number;
+  other_runs: number;
+  runs: {
+    run_id: string;
+    started_at: string;
+    date: string;
+    healthy: boolean;
+    counted: boolean;
+    concerns: string[];
+    pages_completed: number;
+    pages_attempted: number;
+    city_only_jobs: number | null;
+    city_coverage_percent: number | null;
+  }[];
+  cities: {
+    location: string;
+    sampled_days: number;
+    days_adding_jobs: number;
+    unique_jobs: number;
+    shared_jobs: number;
+    city_only_jobs: number;
+  }[];
+}
+
 export interface RunProgressEvent {
   at: string;
   level: "info" | "warning" | "error";
@@ -117,6 +226,7 @@ export interface RunStatus {
   pid?: number | null;
   metrics?: RunMetrics | null;
   query_coverage?: QueryCoverage[] | null;
+  scope_comparison?: CollectionScopeComparison | null;
   progress?: RunProgress | null;
 }
 
@@ -167,22 +277,40 @@ export interface JobStats {
 }
 
 export interface CountStat {
+  key: string;
   name: string;
   count: number;
   percentage?: number;
+  new_jobs_7_days?: number;
+  repeated_jobs?: number;
 }
 
+export type IntelligenceWindow = "all" | "7d" | "30d";
+
 export interface DbSummary {
+  scope: {
+    window: IntelligenceWindow;
+    as_of: string;
+    seen_since: string | null;
+    recent_since: string;
+    all_active_jobs: number;
+  };
   totals: {
     total_jobs: number;
     archived_jobs: number;
     recent_jobs_7_days: number;
+    companies: number;
+    locations: number;
+    repeated_jobs: number;
     date_range: { earliest: string | null; latest: string | null };
   };
+  review: { unmatched_jobs: number; automatic_archives: number; favorite_jobs: number };
   jobs_by_source: Record<string, number>;
   top_companies: CountStat[];
   top_locations: CountStat[];
   role_families?: CountStat[];
   query_groups?: CountStat[];
   collection_freshness: CollectionFreshness;
+  recurring_jobs: Job[];
+  collection_validation?: CollectionValidation;
 }

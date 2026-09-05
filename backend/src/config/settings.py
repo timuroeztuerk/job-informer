@@ -11,6 +11,8 @@ from typing import Optional
 
 from dotenv import dotenv_values, load_dotenv
 
+from ..utils.collection_scope import CITY_SEARCH_LOCATIONS, COUNTRYWIDE_SEARCH_LOCATIONS
+
 
 VALID_TIME_RANGES = {"day", "week", "month"}
 VALID_RELEVANCE_MODES = {"shadow", "enforce"}
@@ -18,6 +20,8 @@ DEFAULT_TIME_RANGE = "day"
 BASE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_LOG_FILE = str(BASE_DIR / "logs" / "job_informer.log")
 DEFAULT_JOBS_DB_PATH = str(BASE_DIR / "data" / "jobs.db")
+DEFAULT_SEARCH_KEYWORDS = "Data Scientist, Data Analyst"
+DEFAULT_SEARCH_LOCATIONS = ", ".join((*COUNTRYWIDE_SEARCH_LOCATIONS, *CITY_SEARCH_LOCATIONS))
 DEFAULT_UNWANTED_KEYWORDS = (
     "ai engineer,artificial intelligence engineer,generative ai engineer,genai engineer"
 )
@@ -95,11 +99,8 @@ class Config:
             time_range = DEFAULT_TIME_RANGE
 
         return cls(
-            search_keywords=os.getenv("SEARCH_KEYWORDS", "Data Scientist, Data Analyst"),
-            search_locations=os.getenv(
-                "SEARCH_LOCATIONS",
-                "Stuttgart, Berlin, Frankfurt, Köln, Ulm, Konstanz, Zürich, Düsseldorf, Freiburg, München, Augsburg, Nürnberg, Hannover",
-            ),
+            search_keywords=os.getenv("SEARCH_KEYWORDS", DEFAULT_SEARCH_KEYWORDS),
+            search_locations=os.getenv("SEARCH_LOCATIONS", DEFAULT_SEARCH_LOCATIONS),
             search_time_range=time_range,
             unwanted_keywords=os.getenv("UNWANTED_KEYWORDS", DEFAULT_UNWANTED_KEYWORDS),
             unwanted_companies=os.getenv("UNWANTED_COMPANIES", ""),

@@ -47,9 +47,37 @@ const structuredRunningRun = (): RunStatus => ({
   },
 });
 
+const comparedRun = (): RunStatus => ({
+  ...completedRun("run-once"),
+  metrics: { observed: 11, new: 4, archived: 2 },
+  scope_comparison: {
+    countrywide: {
+      locations: ["Germany", "Switzerland"],
+      queries: 4,
+      unique_jobs: 7,
+      pages_attempted: 8,
+      pages_completed: 7,
+      page_completion_percent: 87.5,
+      request_failures: 1,
+    },
+    cities: {
+      locations: ["Berlin", "Stuttgart", "Frankfurt", "München"],
+      queries: 8,
+      unique_jobs: 6,
+      pages_attempted: 16,
+      pages_completed: 16,
+      page_completion_percent: 100,
+      request_failures: 0,
+    },
+    shared_jobs: 5,
+    countrywide_only_jobs: 2,
+    city_only_jobs: 1,
+    city_jobs_covered_by_countrywide_percent: 83.3,
+  },
+});
+
 describe("RunPane actions", () => {
   beforeEach(() => {
-    vi.restoreAllMocks();
     vi.mocked(getRunStatus).mockReset();
     vi.mocked(listRuns).mockReset().mockResolvedValue([]);
     vi.mocked(startRun).mockReset().mockImplementation(async ({ mode = "run-once" }) => completedRun(mode));
@@ -114,6 +142,22 @@ describe("RunPane actions", () => {
     expect(screen.queryByText("Technical log")).not.toBeInTheDocument();
     expect(screen.queryByText("Query diagnostics")).not.toBeInTheDocument();
     expect(screen.queryByText("run-collection")).not.toBeInTheDocument();
+  });
+
+  it("keeps the latest country-versus-city comparison visible", async () => {
+    vi.mocked(listRuns).mockResolvedValue([comparedRun()]);
+
+    render(<RunPane />);
+
+    expect(await screen.findByText("Country-wide vs retained cities")).toBeInTheDocument();
+    expect(screen.getByText("Germany + Switzerland")).toBeInTheDocument();
+    expect(screen.getByText("Berlin + Stuttgart + Frankfurt + München")).toBeInTheDocument();
+    expect(screen.getByText("7 unique jobs")).toBeInTheDocument();
+    expect(screen.getByText("6 unique jobs")).toBeInTheDocument();
+    expect(screen.getByText("5 shared · 83.3% of city jobs covered country-wide")).toBeInTheDocument();
+    expect(screen.getByText("2 country-only · 1 city-only")).toBeInTheDocument();
+    expect(screen.getByText("7/8 pages · 1 request failure")).toBeInTheDocument();
+    expect(screen.getByText("16/16 pages · 0 request failures")).toBeInTheDocument();
   });
 
 });

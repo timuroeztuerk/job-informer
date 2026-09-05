@@ -1,0 +1,284 @@
+{
+  "reviewed_at": "2026-09-05",
+  "cases": [
+    {
+      "job_id": "linkedin:4461712834",
+      "title": "Bioinformatician (m/w/d)",
+      "company": "Max Delbrück Center",
+      "flag_reason": "This has nothing to do with my stack",
+      "outcome": "excluded",
+      "rule": "personal_bioinformatics",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4460242939",
+      "title": "Principal Biostatistician , FSP - Permanent Homebased (m/w/d)",
+      "company": "IQVIA",
+      "flag_reason": "No principal jobs",
+      "outcome": "excluded",
+      "rule": "personal_seniority",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4462742178",
+      "title": "Leitende(r) Mitarbeiterin/Mitarbeiter im Bereich Zahlen- und Datenanalyse (m/w/d)",
+      "company": "Kassenärztliche Vereinigung Hessen (KVH)",
+      "flag_reason": null,
+      "outcome": "target",
+      "rule": null,
+      "review": "No general rule inferred from this single unexplained flag"
+    },
+    {
+      "job_id": "linkedin:4459207025",
+      "title": "Director of Data Science",
+      "company": "AI Futures",
+      "flag_reason": "as I mentioned before, senior jobs are fine, but no director or C level jobs",
+      "outcome": "excluded",
+      "rule": "personal_seniority",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4461753488",
+      "title": "Bachelor - Künstliche Intelligenz und Data Science",
+      "company": "AUMOVIO",
+      "flag_reason": "no bachelor!!",
+      "outcome": "excluded",
+      "rule": "study_role",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4462183976",
+      "title": "Professur: Mathematik mit dem Schwerpunkt Maschinelles Lernen",
+      "company": "OTH Regensburg",
+      "flag_reason": "No professor jobs",
+      "outcome": "excluded",
+      "rule": "academic_role",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4460005891",
+      "title": "Senior Data Engineer (m/w/d) SAP und Snowflake",
+      "company": "Schmitt Engineering",
+      "flag_reason": "no SAP",
+      "outcome": "excluded",
+      "rule": "personal_sap",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4459423477",
+      "title": "Data Analyst Customer Base Management / CRM & Retention (all genders)",
+      "company": "PŸUR | Tele Columbus",
+      "flag_reason": "No CRM",
+      "outcome": "excluded",
+      "rule": "personal_crm",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4456086725",
+      "title": "Fachspezialist:in HR Analytics und HR Controlling",
+      "company": "Lucerne University of Applied Sciences and Arts",
+      "flag_reason": "no Fachspezialist",
+      "outcome": "excluded",
+      "rule": "personal_role_labels",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4461440411",
+      "title": "Financial Mathematician Fund Management | Risk, Performance, Reporting",
+      "company": "coni+partner AG",
+      "flag_reason": "I'm not a mathematician.",
+      "outcome": "excluded",
+      "rule": "personal_mathematician",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4447963985",
+      "title": "Assortment & Pricing Analyst (m/f/d)",
+      "company": "Flink",
+      "flag_reason": "No pricing or risk analysis",
+      "outcome": "excluded",
+      "rule": "personal_pricing_risk",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4433572785",
+      "title": "Kaufmann (w/m/d) für Digitalisierungsmanagement 2027",
+      "company": "Siemens",
+      "flag_reason": "no kaufmann.",
+      "outcome": "excluded",
+      "rule": "personal_role_labels",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4450158070",
+      "title": "Demand Planning Expert",
+      "company": "Lovehoney Group",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "personal_demand_planning",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4381884025",
+      "title": "Executive Category Strategist - Einkauf Food (m/w/d)",
+      "company": "Lidl in Deutschland",
+      "flag_reason": "Senior jobs are fine, but no executive jobs",
+      "outcome": "excluded",
+      "rule": "personal_seniority",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4460977034",
+      "title": "PreMaster Programm - GapYear - Marketing Performance & Operations Support",
+      "company": "Bosch",
+      "flag_reason": "Premaster?? no need for such things",
+      "outcome": "excluded",
+      "rule": "study_role",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4435530397",
+      "title": "Business Analyst Accounting IFRS",
+      "company": "Palantec GmbH",
+      "flag_reason": "I'm not an accountant.",
+      "outcome": "excluded",
+      "rule": "personal_accounting",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4442721938",
+      "title": "Experte Datenmanagement SAP (m/w/d)",
+      "company": "BWI GmbH",
+      "flag_reason": "no SAP",
+      "outcome": "excluded",
+      "rule": "personal_sap",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4451189283",
+      "title": "Customer Lifecycle & CRM Manager (m/w/d)",
+      "company": "BusinessBike",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "personal_crm",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4443011028",
+      "title": "Senior Experte Datenmanagement SAP (m/w/d)",
+      "company": "BWI GmbH",
+      "flag_reason": "SAP is not in my stack.",
+      "outcome": "excluded",
+      "rule": "personal_sap",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4444071878",
+      "title": "MSAT Data Expert (Biologics)",
+      "company": "Takeda",
+      "flag_reason": null,
+      "outcome": "unmatched",
+      "rule": null,
+      "review": "No general rule inferred from this single unexplained flag"
+    },
+    {
+      "job_id": "linkedin:4463624733",
+      "title": "Data Engineer – banksteuerndes und aufsichtsrechtliches Reporting (a)",
+      "company": "aity AG",
+      "flag_reason": null,
+      "outcome": "unmatched",
+      "rule": null,
+      "review": "No general rule inferred from this single unexplained flag"
+    },
+    {
+      "job_id": "linkedin:4444438492",
+      "title": "Demand Planner (all genders)",
+      "company": "Sunday Natural",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "personal_demand_planning",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4461406318",
+      "title": "Fraud Manager im Team Detection",
+      "company": "DKB | Deutsche Kreditbank AG",
+      "flag_reason": null,
+      "outcome": "unmatched",
+      "rule": null,
+      "review": "No general rule inferred from this single unexplained flag"
+    },
+    {
+      "job_id": "linkedin:4463382462",
+      "title": "Audit Specialist - Artificial Intelligence (m/w/d)",
+      "company": "Schwarz Corporate Solutions",
+      "flag_reason": null,
+      "outcome": "unmatched",
+      "rule": null,
+      "review": "No general rule inferred from this single unexplained flag"
+    },
+    {
+      "job_id": "linkedin:4461174456",
+      "title": "Masterand (m/w/d) Automatisierte Ergebnisplausibilisierung von 1-D Simulationsergebnissen dynamischer Lastfälle",
+      "company": "Porsche AG",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "study_role",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4463396639",
+      "title": "Research Data Manager / Scientific Employee (all genders) for Research Date Management and Science Data Platform Development",
+      "company": "GSI Helmholtz Centre for Heavy Ion Research",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "academic_role",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4462329989",
+      "title": "Scientist Modeling- and Simulation Hot Forming & Processing (m/w/d)",
+      "company": "SCHOTT",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "personal_hot_forming_science",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4462344813",
+      "title": "Scientist Hot Forming & Processing (m/w/d)",
+      "company": "SCHOTT",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "personal_hot_forming_science",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4462197367",
+      "title": "Manager CRM Analytics (w/m/x)",
+      "company": "Douglas",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "personal_crm",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4462189916",
+      "title": "Manager CRM Analytics (f/m/x)",
+      "company": "Douglas",
+      "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "personal_crm",
+      "review": "Reviewed note or repeated title family"
+    },
+    {
+      "job_id": "linkedin:4463604093",
+      "title": "Cloud FinOps und Tokenverbrauch Analyst (m/w/d)",
+      "company": "AXA",
+      "flag_reason": null,
+      "outcome": "unmatched",
+      "rule": null,
+      "review": "No general rule inferred from this single unexplained flag"
+    }
+  ]
+}

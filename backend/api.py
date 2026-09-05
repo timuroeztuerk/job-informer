@@ -30,7 +30,12 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from src.utils.database import JobDatabase  # noqa: E402
+from src.descriptions.service import DescriptionService  # noqa: E402
+from src.descriptions.linkedin import DescriptionError  # noqa: E402
+from src.utils.collection_scope import build_collection_scope_comparison  # noqa: E402
 from src.utils.db_summary import build_db_summary, compute_collection_freshness  # noqa: E402
+from src.utils.locations import primary_location  # noqa: E402
+from src.utils.relevance_service import AUTO_ARCHIVED_SQL  # noqa: E402
 from src.utils.sqlite_connection import open_sqlite  # noqa: E402
 from src.utils.time_utils import as_utc_datetime, normalize_utc_iso, utc_now, utc_now_iso  # noqa: E402
 
@@ -78,6 +83,7 @@ REQUIRED_DB_TABLES = frozenset(
         "query_terms",
         "relevance_validation_labels",
         "scrape_runs",
+        "description_sources", "description_extractions", "description_fetches", "description_queue_state",
     }
 )
 
@@ -164,8 +170,10 @@ def database_readiness(
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    global job_db, run_store
+    global job_db, run_store, description_service
     job_db = JobDatabase(APP_SETTINGS.db_path)
+    description_service = DescriptionService(job_db.db_path)
+    description_service.store.recover()
     run_store = RunStore(APP_SETTINGS.run_store_db_path)
     readiness = database_readiness()
     logger.info(
@@ -179,6 +187,7 @@ async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        description_service.close()
         for record in list(RUNS.values()):
             if record.process.poll() is None:
                 record.process.terminate()
@@ -190,6 +199,7 @@ async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         RUNS.clear()
         job_db = None
         run_store = None
+        description_service = None
 
 
 app = FastAPI(title="Job Informer API", version="0.1.0", lifespan=app_lifespan)
@@ -218,6 +228,23 @@ def readiness_check(response: Response) -> dict:
 
 job_db: Optional[JobDatabase] = None
 run_store: Optional["RunStore"] = None
+description_service: Optional[DescriptionService] = None
+
+
+def _descriptions() -> DescriptionService:
+    if description_service is None:
+        raise HTTPException(status_code=503, detail="Description retrieval is not initialized yet.")
+    return description_service
+
+
+@contextmanager
+def _description_errors():
+    try:
+        yield
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (ValueError, DescriptionError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 def _require_job_db() -> JobDatabase:
@@ -247,6 +274,15 @@ class RunRequest(BaseModel):
     keywords: Optional[str] = None
     locations: Optional[str] = None
     time_range: Optional[str] = None
+
+
+class FavoriteUpdate(BaseModel):
+    is_favorite: bool
+
+
+class FlagUpdate(BaseModel):
+    is_flagged: bool
+    flag_reason: Optional[str] = Field(default=None, max_length=2000)
 
 
 class RunProgressEvent(BaseModel):
@@ -281,6 +317,7 @@ class RunStatus(BaseModel):
     pid: Optional[int] = None
     metrics: Optional[dict[str, int]] = None
     query_coverage: Optional[list[dict[str, Any]]] = None
+    scope_comparison: Optional[dict[str, Any]] = None
     progress: Optional[RunProgress] = None
 
 
@@ -298,6 +335,7 @@ class RunSummary(BaseModel):
     pid: Optional[int] = None
     metrics: Optional[dict[str, int]] = None
     query_coverage: Optional[list[dict[str, Any]]] = None
+    scope_comparison: Optional[dict[str, Any]] = None
     progress: Optional[RunProgress] = None
 
 
@@ -696,6 +734,56 @@ def _query_coverage_for_api_run(run_id: str) -> list[dict[str, Any]]:
         return []
 
 
+def _scope_comparison_for_api_run(run_id: str) -> Optional[dict[str, Any]]:
+    """Compare distinct country-wide and retained-city results for one run."""
+    if not run_id:
+        return None
+    try:
+        with open_jobs_db() as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if not {
+                "collection_queries",
+                "job_query_matches",
+                "scrape_runs",
+            }.issubset(tables):
+                return None
+            query_rows = [
+                _row_to_dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT cq.location, cq.pages_attempted, cq.pages_completed,
+                           cq.request_failures
+                    FROM collection_queries cq
+                    INNER JOIN scrape_runs sr ON sr.scrape_run_id = cq.scrape_run_id
+                    WHERE sr.api_run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ]
+            match_rows = [
+                _row_to_dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT jqm.job_id, cq.location
+                    FROM job_query_matches jqm
+                    INNER JOIN collection_queries cq
+                        ON cq.collection_query_id = jqm.collection_query_id
+                    INNER JOIN scrape_runs sr ON sr.scrape_run_id = cq.scrape_run_id
+                    WHERE sr.api_run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ]
+        return build_collection_scope_comparison(query_rows, match_rows)
+    except sqlite3.Error:
+        return None
+
+
 def _progress_for_run(record: dict[str, Any]) -> Optional[RunProgress]:
     raw_progress = record.get("progress_json")
     if not raw_progress:
@@ -761,6 +849,7 @@ class RunRecord:
             pid=self.process.pid if code is None else None,
             metrics=_metrics_for_api_run(self.run_id),
             query_coverage=_query_coverage_for_api_run(self.run_id),
+            scope_comparison=_scope_comparison_for_api_run(self.run_id),
             progress=_progress_for_run(self._run_store.get(self.run_id) or {}),
         )
 
@@ -873,6 +962,7 @@ def get_run_status(run_id: str, _: bool = Depends(require_token)) -> RunStatus:
         pid=stored.get("pid"),
         metrics=_metrics_for_api_run(run_id),
         query_coverage=_query_coverage_for_api_run(run_id),
+        scope_comparison=_scope_comparison_for_api_run(run_id),
         progress=_progress_for_run(stored),
     )
 
@@ -901,6 +991,7 @@ def list_runs(limit: int = Query(20, ge=1, le=100), _: bool = Depends(require_to
                 pid=record.get("pid"),
                 metrics=_metrics_for_api_run(record["run_id"]),
                 query_coverage=_query_coverage_for_api_run(record["run_id"]),
+                scope_comparison=_scope_comparison_for_api_run(record["run_id"]),
                 progress=_progress_for_run(record),
             )
         )
@@ -915,8 +1006,17 @@ def list_jobs(
     location: Optional[str] = None,
     source: Optional[str] = None,
     company: Optional[str] = None,
+    company_exact: bool = False,
+    location_primary: bool = False,
+    last_seen_from: Optional[str] = None,
+    repeated: bool = False,
+    flagged: bool = False,
     role_family: Optional[str] = None,
     query_group: Optional[str] = None,
+    relevance_outcome: Optional[Literal[
+        "target", "excluded", "unrelated", "unmatched", "manual_keep", "manual_archive", "auto_archived"
+    ]] = None,
+    favorite: bool = Query(default=False, description="Return only favorite jobs"),
     archived: Literal["exclude", "include", "only"] = Query(default="exclude"),
     date_from: Optional[str] = Query(default=None, description="ISO date/time lower bound"),
     date_to: Optional[str] = Query(default=None, description="ISO date/time upper bound"),
@@ -930,27 +1030,45 @@ def list_jobs(
     clauses = ["LOWER(j.source) = 'linkedin'"]
     params: list[str] = []
 
-    if archived == "exclude":
+    if relevance_outcome == "auto_archived":
+        clauses.append(AUTO_ARCHIVED_SQL)
+    elif archived == "exclude":
         clauses.append("j.archived_at IS NULL")
     elif archived == "only":
         clauses.append("j.archived_at IS NOT NULL")
+
+    if favorite:
+        clauses.append("j.is_favorite = 1")
+    if flagged:
+        clauses.append("j.is_flagged = 1")
 
     if search:
         like = f"%{search}%"
         clauses.append("(j.title LIKE ? OR j.company LIKE ? OR j.location LIKE ?)")
         params.extend([like, like, like])
     if location:
-        clauses.append("j.location LIKE ?")
-        params.append(f"%{location}%")
+        clauses.append("primary_location(j.location) = ?" if location_primary else "j.location LIKE ?")
+        params.append(primary_location(location) if location_primary else f"%{location}%")
     if source:
         clauses.append("j.source = ?")
         params.append(source)
     if company:
-        clauses.append("j.company LIKE ?")
-        params.append(f"%{company}%")
+        clauses.append("COALESCE(NULLIF(j.company, ''), 'Unknown') = ?" if company_exact else "j.company LIKE ?")
+        params.append(company if company_exact else f"%{company}%")
     if role_family:
-        clauses.append("j.role_family = ?")
-        params.append(role_family)
+        if role_family == "unclassified":
+            clauses.append("(j.role_family IS NULL OR j.role_family = '')")
+        else:
+            clauses.append("j.role_family = ?")
+            params.append(role_family)
+    if last_seen_from:
+        clauses.append("datetime(COALESCE(j.last_seen_at, j.scraped_at, j.created_at)) >= datetime(?)")
+        params.append(last_seen_from)
+    if repeated:
+        clauses.append("COALESCE(j.seen_count, 1) > 1")
+    if relevance_outcome and relevance_outcome != "auto_archived":
+        clauses.append("j.relevance_outcome = ?")
+        params.append(relevance_outcome)
     if query_group:
         clauses.append(
             """
@@ -987,6 +1105,7 @@ def list_jobs(
     where_clause = " AND ".join(clauses)
     try:
         with open_jobs_db() as conn:
+            conn.create_function("primary_location", 1, primary_location, deterministic=True)
             query = f"""
                 SELECT
                     j.job_id,
@@ -999,6 +1118,10 @@ def list_jobs(
                     j.scraped_at,
                     j.archived_at,
                     j.archived_reason,
+                    j.is_favorite,
+                    j.is_flagged,
+                    j.flag_reason,
+                    j.flagged_at,
                     j.first_seen_at,
                     j.last_seen_at,
                     j.seen_count,
@@ -1035,6 +1158,59 @@ def list_jobs(
         "count": len(rows),
         "items": [_job_row_to_dict(row) for row in rows],
     }
+
+
+class DescriptionRequest(BaseModel):
+    refresh: bool = False
+
+
+class DescriptionBatchRequest(BaseModel):
+    selection: Literal["next", "retry"] = "next"
+    limit: int = Field(default=10, ge=1, le=20)
+
+
+@app.get("/descriptions/queue")
+def description_queue(_: bool = Depends(require_token)) -> dict:
+    return _descriptions().store.queue_status()
+
+
+@app.post("/descriptions/queue")
+def queue_descriptions(request: DescriptionBatchRequest, _: bool = Depends(require_token)) -> dict:
+    service = _descriptions()
+    with _description_errors():
+        jobs = service.store.next_candidates(request.limit) if request.selection == "next" else service.store.failed_candidates(request.limit)
+        added = service.enqueue(jobs, refresh=request.selection == "retry")
+    return {**service.store.queue_status(), "added": added}
+
+
+@app.post("/descriptions/queue/{action}")
+def control_description_queue(action: Literal["pause", "resume"], _: bool = Depends(require_token)) -> dict:
+    service = _descriptions()
+    with _description_errors():
+        if action == "pause":
+            service.store.pause()
+        else:
+            service.resume()
+    return service.store.queue_status()
+
+
+@app.get("/jobs/{job_id:path}/description")
+def get_description(job_id: str, _: bool = Depends(require_token)) -> dict:
+    with _description_errors():
+        return {**_descriptions().store.job_description(job_id), "queue": _descriptions().store.queue_status()}
+
+
+@app.post("/jobs/{job_id:path}/description")
+def request_description(job_id: str, request: DescriptionRequest, _: bool = Depends(require_token)) -> dict:
+    with _description_errors():
+        _descriptions().enqueue([job_id], refresh=request.refresh)
+        return get_description(job_id, _=True)
+
+
+@app.post("/jobs/{job_id:path}/description/reparse")
+def reparse_description(job_id: str, _: bool = Depends(require_token)) -> dict:
+    with _description_errors():
+        return {**_descriptions().reparse(job_id), "queue": _descriptions().store.queue_status()}
 
 
 @app.get("/jobs/{job_id:path}")
@@ -1134,6 +1310,42 @@ def restore_job(job_id: str, _: bool = Depends(require_token)) -> Response:
     return Response(status_code=204)
 
 
+@app.put("/jobs/{job_id:path}/flag")
+def update_job_flag(
+    job_id: str,
+    update: FlagUpdate,
+    _: bool = Depends(require_token),
+) -> dict[str, object]:
+    """Flag a mismatch example for later filter review, without archiving it."""
+    try:
+        result = _require_job_db().set_job_flag(job_id, update.is_flagged, update.flag_reason)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to update flag: {exc}") from exc
+
+
+@app.put("/jobs/{job_id:path}/favorite")
+def update_job_favorite(
+    job_id: str,
+    update: FavoriteUpdate,
+    _: bool = Depends(require_token),
+) -> dict[str, object]:
+    """Set a job's favorite flag without changing its archive state."""
+    try:
+        updated = _require_job_db().set_job_favorite(job_id, update.is_favorite)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Job not found")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to update favorite: {exc}") from exc
+    return {"job_id": job_id, "is_favorite": update.is_favorite}
+
+
 @app.get("/stats")
 def job_stats(_: bool = Depends(require_token)) -> dict:
     """Lightweight wrapper around JobDatabase summary for dashboards."""
@@ -1218,16 +1430,21 @@ def job_stats(_: bool = Depends(require_token)) -> dict:
 
 
 @app.get("/db-summary")
-def db_summary(_: bool = Depends(require_token)) -> dict:
+def db_summary(window: Literal["all", "7d", "30d"] = "all", _: bool = Depends(require_token)) -> dict:
     """Expose the richer database summary that mirrors the CLI db-summary output."""
     try:
-        return build_db_summary(_require_job_db())
+        return build_db_summary(_require_job_db(), window=window)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to build database summary: {exc}") from exc
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
-    return {k: row[k] for k in row.keys()}
+    result = {key: row[key] for key in row.keys()}
+    if "is_favorite" in result:
+        result["is_favorite"] = bool(result["is_favorite"])
+    if "is_flagged" in result:
+        result["is_flagged"] = bool(result["is_flagged"])
+    return result
 
 
 def _read_log_tail(path: Path) -> str:

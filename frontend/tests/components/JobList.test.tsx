@@ -2,16 +2,19 @@ import React, { useRef, useState } from "react";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { archiveJob, fetchJob, fetchJobs } from "../../src/api";
+import { archiveJob, fetchJob, fetchJobs, restoreJob, setJobFavorite, setJobFlag } from "../../src/api";
 import type { Job, JobsResponse } from "../../src/types";
 import JobDetail from "../../src/components/JobDetail";
 import JobTable, { type JobTableHandle } from "../../src/components/JobTable";
+vi.mock("../../src/components/JobDescription", () => ({ default: () => null }));
 
 vi.mock("../../src/api", () => ({
   archiveJob: vi.fn(),
   fetchJob: vi.fn(),
   fetchJobs: vi.fn(),
   restoreJob: vi.fn(),
+  setJobFavorite: vi.fn(),
+  setJobFlag: vi.fn(),
 }));
 
 const makeJob = (job_id: string, title: string): Job => ({
@@ -20,6 +23,8 @@ const makeJob = (job_id: string, title: string): Job => ({
   company: `${title} Co`,
   location: "Berlin",
   source: "LinkedIn",
+  is_favorite: false,
+  salary: "Not specified",
   scraped_at: "2026-07-12T08:00:00Z",
 });
 
@@ -36,7 +41,17 @@ const JobList: React.FC = () => {
       <JobTable ref={tableRef} companies={[]} onSelect={setSelectedJob} />
       <JobDetail
         job={selectedJob}
+        onFlagChanged={(flag) => {
+          setSelectedJob((current) => current?.job_id === flag.job_id ? { ...current, ...flag } : current);
+          tableRef.current?.reload(false);
+        }}
         onArchiveChanged={() => tableRef.current?.reload(false)}
+        onFavoriteChanged={(jobId, isFavorite) => {
+          setSelectedJob((current) =>
+            current?.job_id === jobId ? { ...current, is_favorite: isFavorite } : current
+          );
+          tableRef.current?.reload(false);
+        }}
       />
     </div>
   );
@@ -46,13 +61,56 @@ describe("JobTable and JobDetail", () => {
   beforeEach(() => {
     window.history.replaceState({}, "", "/?view=dashboard&status=unreviewed&priority=high");
     vi.mocked(archiveJob).mockReset().mockResolvedValue(undefined);
+    vi.mocked(restoreJob).mockReset().mockResolvedValue(undefined);
     vi.mocked(fetchJobs).mockReset();
     vi.mocked(fetchJob).mockReset().mockImplementation(async (jobId) => {
       const match = [firstJob, secondJob].find((job) => job.job_id === jobId);
       if (!match) throw new Error("Unknown job");
       return match;
     });
+    vi.mocked(setJobFavorite).mockReset().mockImplementation(async (jobId, isFavorite) => ({
+      job_id: jobId,
+      is_favorite: isFavorite,
+    }));
     vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(setJobFlag).mockReset();
+  });
+
+  it("persists the flagged filter and advances after removing an example", async () => {
+    window.history.replaceState({}, "", "/?view=dashboard&flagged=1&archived=include");
+    let items = [firstJob, secondJob].map((job) => ({ ...job, is_flagged: true, flag_reason: "Wrong role" }));
+    vi.mocked(fetchJobs).mockImplementation(async () => response(items));
+    vi.mocked(setJobFlag).mockImplementation(async (jobId) => {
+      items = items.filter((item) => item.job_id !== jobId);
+      return { job_id: jobId, is_flagged: false, flag_reason: null, flagged_at: null };
+    });
+    const user = userEvent.setup();
+    render(<JobList />);
+    expect(await screen.findByRole("heading", { name: "2 flagged all records" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Flagged only")).toBeChecked();
+    expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({ flagged: true, archived: "include" }));
+    expect(screen.getAllByText("Flagged for review")).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: "Unflag" }));
+    expect(await screen.findByRole("heading", { name: "Second role" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^First role/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({ flagged: false })));
+    expect(new URLSearchParams(window.location.search).has("flagged")).toBe(false);
+  });
+
+  it("shows an honest loading label before the first job response", async () => {
+    let resolveJobs!: (value: JobsResponse) => void;
+    vi.mocked(fetchJobs).mockReturnValue(
+      new Promise((resolve) => {
+        resolveJobs = resolve;
+      })
+    );
+
+    render(<JobTable companies={[]} onSelect={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "Loading jobs…" })).toBeInTheDocument();
+    resolveJobs(response([firstJob]));
+    expect(await screen.findByRole("button", { name: /^First role/ })).toBeInTheDocument();
   });
 
   it("selects jobs and advances after archiving without note filters", async () => {
@@ -66,14 +124,16 @@ describe("JobTable and JobDetail", () => {
     const detail = document.querySelector<HTMLElement>(".detail-pane");
     if (!detail) throw new Error("Detail pane did not render");
     await within(detail).findByRole("heading", { name: "First role" });
+    expect(screen.getByRole("button", { name: /^First role/ })).toHaveAttribute("aria-current", "true");
     expect(vi.mocked(fetchJobs).mock.calls[0][0]).not.toHaveProperty("annotationStatus");
     expect(vi.mocked(fetchJobs).mock.calls[0][0]).not.toHaveProperty("annotationPriority");
 
-    await user.click(screen.getByRole("button", { name: /Second role/ }));
+    await user.click(screen.getByRole("button", { name: /^Second role/ }));
     await within(detail).findByRole("heading", { name: "Second role" });
+    expect(screen.getByRole("button", { name: /^Second role/ })).toHaveAttribute("aria-current", "true");
     expect(new URLSearchParams(window.location.search).get("job")).toBe("job-2");
 
-    await user.click(screen.getByRole("button", { name: /First role/ }));
+    await user.click(screen.getByRole("button", { name: /^First role/ }));
     await within(detail).findByRole("heading", { name: "First role" });
     await user.click(within(detail).getByRole("button", { name: "Archive" }));
 
@@ -82,7 +142,7 @@ describe("JobTable and JobDetail", () => {
       expect(fetchJobs).toHaveBeenCalledTimes(2);
     });
     await within(detail).findByRole("heading", { name: "Second role" });
-    expect(screen.queryByRole("button", { name: /First role/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^First role/ })).not.toBeInTheDocument();
     expect(new URLSearchParams(window.location.search).get("job")).toBe("job-2");
     expect(new URLSearchParams(window.location.search).has("status")).toBe(false);
     expect(new URLSearchParams(window.location.search).has("priority")).toBe(false);
@@ -96,13 +156,23 @@ describe("JobTable and JobDetail", () => {
       last_seen_at: "2026-07-12T08:00:00Z",
     };
     vi.mocked(fetchJobs).mockResolvedValue(response([repeatedJob]));
+    const user = userEvent.setup();
 
     render(<JobTable companies={[]} onSelect={vi.fn()} />);
 
     expect(await screen.findByText("Repeated 3 times")).toBeInTheDocument();
     expect(screen.getByText("Latest repeat Jul 12, 2026")).toBeInTheDocument();
     expect(screen.getByText("First seen Jul 9, 2026")).toBeInTheDocument();
+    expect(screen.queryByText(/not specified/i)).not.toBeInTheDocument();
     expect(document.querySelectorAll(".job-table .row")).toHaveLength(1);
+
+    await user.selectOptions(screen.getByLabelText("Sort"), "seen_count_desc");
+    await waitFor(() => {
+      expect(fetchJobs).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: "seen_count_desc" })
+      );
+    });
+    expect(new URLSearchParams(window.location.search).get("sort")).toBe("seen_count_desc");
   });
 
   it("filters by role family and the query group that found the job", async () => {
@@ -118,7 +188,7 @@ describe("JobTable and JobDetail", () => {
       />
     );
 
-    await screen.findByRole("button", { name: /First role/ });
+    await screen.findByRole("button", { name: /^First role/ });
     const filterToggle = screen.getByText("Open filters").closest("summary");
     if (!filterToggle) throw new Error("Filter toggle did not render");
     await user.click(filterToggle);
@@ -126,10 +196,16 @@ describe("JobTable and JobDetail", () => {
     await user.type(screen.getByLabelText("Company"), "Acme");
     await user.selectOptions(screen.getByLabelText("Role family"), "analytics_bi");
     await user.selectOptions(screen.getByLabelText("Found via"), "data_science");
+    await user.click(screen.getByLabelText("Favorites only"));
 
     await waitFor(() => {
       expect(fetchJobs).toHaveBeenLastCalledWith(
-        expect.objectContaining({ company: "Acme", roleFamily: "analytics_bi", queryGroup: "data_science" })
+        expect.objectContaining({
+          company: "Acme",
+          roleFamily: "analytics_bi",
+          queryGroup: "data_science",
+          favorite: true,
+        })
       );
     });
     await user.click(screen.getByRole("button", { name: "Done" }));
@@ -138,5 +214,110 @@ describe("JobTable and JobDetail", () => {
     expect(params.get("company")).toBe("Acme");
     expect(params.get("role")).toBe("analytics_bi");
     expect(params.get("query_group")).toBe("data_science");
+    expect(params.get("favorite")).toBe("1");
+  });
+
+  it("toggles a favorite directly from the canonical job list", async () => {
+    vi.mocked(fetchJobs).mockResolvedValue(response([firstJob]));
+    const user = userEvent.setup();
+
+    render(<JobTable companies={[]} onSelect={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Add First role to favorites" }));
+
+    expect(setJobFavorite).toHaveBeenCalledWith("job-1", true);
+    expect(await screen.findByRole("button", { name: "Remove First role from favorites" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+  });
+
+  it("restores an audit filter from the URL and resets pagination when changing or clearing it", async () => {
+    window.history.replaceState({}, "", "/?relevance_outcome=unmatched&page=3&company=Acme");
+    vi.mocked(fetchJobs).mockResolvedValue(response([firstJob]));
+    const user = userEvent.setup();
+    render(<JobTable companies={[]} onSelect={vi.fn()} />);
+
+    await screen.findByRole("button", { name: /^First role/ });
+    expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({
+      relevanceOutcome: "unmatched", offset: 10, company: "Acme", archived: "exclude",
+    }));
+    expect(screen.getByLabelText("Relevance")).toHaveValue("unmatched");
+
+    await user.selectOptions(screen.getByLabelText("Relevance"), "auto_archived");
+    await waitFor(() => expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({
+      relevanceOutcome: "auto_archived", offset: 0, company: "Acme", archived: "only",
+    })));
+    expect(screen.getByLabelText("Job set")).toHaveValue("only");
+    expect(screen.getByLabelText("Job set")).toBeDisabled();
+    expect(new URLSearchParams(window.location.search).get("relevance_outcome")).toBe("auto_archived");
+    expect(new URLSearchParams(window.location.search).has("page")).toBe(false);
+
+    await user.selectOptions(screen.getByLabelText("Relevance"), "unmatched");
+    await waitFor(() => expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({
+      relevanceOutcome: "unmatched", archived: "exclude",
+    })));
+    expect(screen.getByLabelText("Job set")).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({
+      relevanceOutcome: undefined, archived: "exclude", company: "", offset: 0,
+    })));
+    expect(new URLSearchParams(window.location.search).has("relevance_outcome")).toBe(false);
+  });
+
+  it("opens the automatic archive audit directly and advances after restoring a job", async () => {
+    window.history.replaceState({}, "", "/?relevance_outcome=auto_archived");
+    const archivedJob = { ...firstJob, archived_at: "2026-09-04T08:00:00Z" };
+    vi.mocked(fetchJobs)
+      .mockResolvedValueOnce(response([archivedJob, secondJob]))
+      .mockResolvedValue(response([secondJob]));
+    const user = userEvent.setup();
+    render(<JobList />);
+
+    await screen.findByRole("heading", { name: "First role" });
+    expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({
+      relevanceOutcome: "auto_archived", archived: "only",
+    }));
+    await user.click(screen.getByRole("button", { name: "Restore" }));
+
+    expect(restoreJob).toHaveBeenCalledWith("job-1");
+    await screen.findByRole("heading", { name: "Second role" });
+    expect(screen.queryByRole("button", { name: /^First role/ })).not.toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get("relevance_outcome")).toBe("auto_archived");
+  });
+
+  it("ignores invalid relevance values from old or edited URLs", async () => {
+    window.history.replaceState({}, "", "/?relevance_outcome=unknown");
+    vi.mocked(fetchJobs).mockResolvedValue(response([firstJob]));
+    render(<JobTable companies={[]} onSelect={vi.fn()} />);
+
+    await screen.findByRole("button", { name: /^First role/ });
+    expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({ relevanceOutcome: undefined }));
+    expect(new URLSearchParams(window.location.search).has("relevance_outcome")).toBe(false);
+  });
+
+  it("preserves Intelligence scope and exact matching until those filters are edited or cleared", async () => {
+    window.history.replaceState({}, "", "/?company=Acme&company_exact=1&location=M%C3%BCnchen&location_primary=1&seen_since=2026-08-29T12%3A00%3A00Z&repeated=1&from=2026-08-29T12%3A00%3A00Z");
+    vi.mocked(fetchJobs).mockResolvedValue(response([firstJob]));
+    const user = userEvent.setup();
+    render(<JobTable companies={[]} onSelect={vi.fn()} />);
+    await screen.findByRole("button", { name: /^First role/ });
+    expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({
+      company: "Acme", companyExact: true, location: "München", locationPrimary: true,
+      lastSeenFrom: "2026-08-29T12:00:00Z", repeated: true, dateFrom: "2026-08-29T12:00:00Z",
+    }));
+    expect(screen.getByLabelText("Last seen since")).toHaveValue("2026-08-29");
+    expect(screen.getByLabelText("From")).toHaveValue("2026-08-29");
+    expect(screen.getByLabelText("Seen more than once")).toBeChecked();
+    await user.type(screen.getByLabelText("Company"), " tools");
+    await user.type(screen.getByLabelText("Location"), " city");
+    await waitFor(() => expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({ companyExact: false, locationPrimary: false })));
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({
+      lastSeenFrom: "", repeated: false, companyExact: false, locationPrimary: false,
+    })));
+    const params = new URLSearchParams(window.location.search);
+    for (const key of ["company_exact", "location_primary", "seen_since", "repeated", "from"]) expect(params.has(key)).toBe(false);
   });
 });

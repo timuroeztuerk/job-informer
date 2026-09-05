@@ -1,9 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
 
 afterEach(() => {
-  cleanup();
-  window.localStorage.clear();
-  window.history.replaceState({}, "", "/");
+  if (typeof document !== "undefined") cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  if (typeof window !== "undefined") {
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    window.history.replaceState({}, "", "/");
+  }
 });

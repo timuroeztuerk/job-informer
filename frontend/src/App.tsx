@@ -3,8 +3,9 @@ import JobDetail from "./components/JobDetail";
 import JobTable, { JobTableHandle } from "./components/JobTable";
 import RunPane from "./components/RunPane";
 import SummaryPage from "./components/SummaryPage";
+import DescriptionQueue from "./components/DescriptionQueue";
 import { API_BASE, fetchStats, getApiErrorMessage } from "./api";
-import type { Job, JobStats, RunStatus } from "./types";
+import type { Job, JobFlag, JobStats, RunStatus } from "./types";
 import { readTextParam, replaceSearchParams } from "./urlState";
 
 type ViewMode = "dashboard" | "summary";
@@ -20,6 +21,8 @@ const App: React.FC = () => {
     return requestedView === "summary" ? requestedView : "dashboard";
   });
   const [dataRefreshToken, setDataRefreshToken] = useState(0);
+  const [descriptionRefreshToken, setDescriptionRefreshToken] = useState(0);
+  const handleDescriptionQueueChanged = useCallback(() => setDescriptionRefreshToken((token) => token + 1), []);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<RunStatus | null>(null);
   const [now, setNow] = useState(new Date());
@@ -79,6 +82,16 @@ const App: React.FC = () => {
     }
     tableRef.current?.reload?.(clearSelection);
   };
+  const handleFavoriteChanged = (jobId: string, isFavorite: boolean) => {
+    setSelectedJob((current) =>
+      current?.job_id === jobId ? { ...current, is_favorite: isFavorite } : current
+    );
+    tableRef.current?.reload?.(false);
+  };
+  const handleFlagChanged = (flag: JobFlag) => {
+    setSelectedJob((current) => current?.job_id === flag.job_id ? { ...current, ...flag } : current);
+    tableRef.current?.reload?.(false);
+  };
 
   const handleRunCompleted = useCallback((run: RunStatus) => {
     if (completedRunIdsRef.current.has(run.run_id)) {
@@ -94,9 +107,7 @@ const App: React.FC = () => {
   }, []);
 
   const handleOpenDashboard = useCallback(() => {
-    // Intelligence is calculated from active jobs. Do not let an archived-only
-    // filter from an earlier dashboard session trap any of its drill-downs.
-    replaceSearchParams({ archived: "" });
+    // Each Intelligence drill-down supplies its own complete filter scope.
     setViewMode("dashboard");
   }, []);
 
@@ -207,6 +218,7 @@ const App: React.FC = () => {
           />
           {viewMode === "dashboard" && (
             <>
+              <DescriptionQueue refreshToken={descriptionRefreshToken} onChanged={handleDescriptionQueueChanged} />
               <div className="jobs">
                 <JobTable
                   ref={tableRef}
@@ -219,7 +231,11 @@ const App: React.FC = () => {
                 <JobDetail
                   job={selectedJob}
                   onArchiveChanged={handleArchiveChanged}
+                  onFavoriteChanged={handleFavoriteChanged}
+                  onFlagChanged={handleFlagChanged}
                   onActionFeedback={setActionFeedback}
+                  descriptionRefreshToken={descriptionRefreshToken}
+                  onDescriptionQueueChanged={handleDescriptionQueueChanged}
                 />
               </div>
             </>

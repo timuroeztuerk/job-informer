@@ -6,8 +6,8 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { fetchJob, fetchJobs } from "../api";
-import type { Job, JobArchiveFilter, QueryGroupOption } from "../types";
+import { fetchJob, fetchJobs, setJobFavorite } from "../api";
+import type { Job, JobArchiveFilter, JobRelevanceFilter, QueryGroupOption } from "../types";
 import { readEnumParam, readPositiveIntegerParam, readTextParam, replaceSearchParams } from "../urlState";
 
 export interface JobTableHandle {
@@ -27,33 +27,63 @@ type SortOption =
   | "scraped_at_asc"
   | "last_seen_desc"
   | "last_seen_asc"
+  | "seen_count_desc"
+  | "seen_count_asc"
   | "title_asc"
   | "title_desc";
 
 const PAGE_SIZE = 5;
 const archiveFilterOptions: JobArchiveFilter[] = ["exclude", "only", "include"];
+const relevanceFilterOptions: { value: JobRelevanceFilter; label: string }[] = [
+  { value: "unmatched", label: "Unmatched" },
+  { value: "auto_archived", label: "Automatically archived" },
+  { value: "target", label: "Target" },
+  { value: "excluded", label: "Excluded" },
+  { value: "unrelated", label: "Unrelated" },
+  { value: "manual_keep", label: "Manually kept" },
+  { value: "manual_archive", label: "Manually archived" },
+];
 const sortOptions: SortOption[] = [
   "scraped_at_desc",
   "scraped_at_asc",
   "last_seen_desc",
   "last_seen_asc",
+  "seen_count_desc",
+  "seen_count_asc",
   "title_asc",
   "title_desc",
 ];
+
+const meaningfulSalary = (value?: string): string | null => {
+  const salary = value?.trim();
+  if (!salary || /^(?:not specified|not available|n\/?a|unknown)$/i.test(salary)) {
+    return null;
+  }
+  return salary;
+};
 
 const JobTable = forwardRef<JobTableHandle, JobTableProps>(
   ({ companies, roleFamilies = [], queryGroups = [], onSelect, refreshToken = 0 }, ref) => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(() => (readPositiveIntegerParam("page", 1) - 1) * PAGE_SIZE);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectionError, setSelectionError] = useState<string | null>(null);
   const [search, setSearch] = useState(() => readTextParam("search"));
   const [location, setLocation] = useState(() => readTextParam("location"));
   const [company, setCompany] = useState(() => readTextParam("company"));
+  const [companyExact, setCompanyExact] = useState(() => readTextParam("company_exact") === "1");
+  const [locationPrimary, setLocationPrimary] = useState(() => readTextParam("location_primary") === "1");
+  const [lastSeenFrom, setLastSeenFrom] = useState(() => readTextParam("seen_since"));
+  const [repeatedOnly, setRepeatedOnly] = useState(() => readTextParam("repeated") === "1");
   const [roleFamily, setRoleFamily] = useState(() => readTextParam("role"));
   const [queryGroup, setQueryGroup] = useState(() => readTextParam("query_group"));
+  const [relevanceFilter, setRelevanceFilter] = useState<JobRelevanceFilter | "">(
+    () => readEnumParam("relevance_outcome", relevanceFilterOptions.map(({ value }) => value))
+  );
+  const [favoritesOnly, setFavoritesOnly] = useState(() => readTextParam("favorite") === "1");
+  const [flaggedOnly, setFlaggedOnly] = useState(() => readTextParam("flagged") === "1");
   const [archiveFilter, setArchiveFilter] = useState<JobArchiveFilter>(
     () => readEnumParam("archived", archiveFilterOptions) || "exclude"
   );
@@ -61,6 +91,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
   const [dateTo, setDateTo] = useState(() => readTextParam("to"));
   const [sort, setSort] = useState<SortOption>(() => readEnumParam("sort", sortOptions) || "scraped_at_desc");
   const [selectedId, setSelectedId] = useState<string | null>(() => readTextParam("job") || null);
+  const [favoriteActionId, setFavoriteActionId] = useState<string | null>(null);
+  const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const lastQuerySignatureRef = useRef<string | null>(null);
   const advanceIfMissingRef = useRef(false);
@@ -72,7 +104,12 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
         readTextParam("company") ||
         readTextParam("role") ||
         readTextParam("query_group") ||
+        readTextParam("relevance_outcome") ||
+        readTextParam("favorite") ||
+        readTextParam("flagged") ||
         readTextParam("archived") ||
+        readTextParam("seen_since") ||
+        readTextParam("repeated") ||
         readTextParam("from") ||
         readTextParam("to")
       )
@@ -83,6 +120,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
   const companyOptions = useMemo(() => companies || [], [companies]);
   const roleFamilyOptions = useMemo(() => roleFamilies || [], [roleFamilies]);
   const queryGroupOptions = useMemo(() => queryGroups || [], [queryGroups]);
+  const effectiveArchiveFilter = relevanceFilter === "auto_archived" ? "only" : archiveFilter;
   const activeFilterCount = useMemo(
     () =>
       [
@@ -91,19 +129,31 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
         company,
         roleFamily,
         queryGroup,
-        archiveFilter === "exclude" ? "" : archiveFilter,
+        relevanceFilter,
+        favoritesOnly ? "favorite" : "",
+        flaggedOnly ? "flagged" : "",
+        relevanceFilter === "auto_archived" || archiveFilter === "exclude" ? "" : archiveFilter,
         dateFrom,
         dateTo,
+        lastSeenFrom,
+        repeatedOnly ? "repeated" : "",
       ].filter(Boolean).length,
-    [archiveFilter, company, dateFrom, dateTo, location, queryGroup, roleFamily, search]
+    [archiveFilter, company, dateFrom, dateTo, favoritesOnly, flaggedOnly, lastSeenFrom, location, queryGroup, relevanceFilter, repeatedOnly, roleFamily, search]
   );
   const querySignature = JSON.stringify([
     offset,
     search,
     location,
     company,
+    companyExact,
+    locationPrimary,
+    lastSeenFrom,
+    repeatedOnly,
     roleFamily,
     queryGroup,
+    relevanceFilter,
+    favoritesOnly,
+    flaggedOnly,
     archiveFilter,
     dateFrom,
     dateTo,
@@ -116,9 +166,16 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
       location,
       source: "",
       company,
+      company_exact: companyExact && company ? "1" : "",
+      location_primary: locationPrimary && location ? "1" : "",
+      seen_since: lastSeenFrom,
+      repeated: repeatedOnly ? "1" : "",
       role: roleFamily,
       query_group: queryGroup,
-      archived: archiveFilter === "exclude" ? "" : archiveFilter,
+      relevance_outcome: relevanceFilter,
+      favorite: favoritesOnly ? "1" : "",
+      flagged: flaggedOnly ? "1" : "",
+      archived: effectiveArchiveFilter === "exclude" ? "" : effectiveArchiveFilter,
       status: "",
       priority: "",
       from: dateFrom,
@@ -129,11 +186,19 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
     });
   }, [
     archiveFilter,
+    effectiveArchiveFilter,
     company,
+    companyExact,
+    locationPrimary,
+    lastSeenFrom,
+    repeatedOnly,
     dateFrom,
     dateTo,
+    favoritesOnly,
+    flaggedOnly,
     location,
     queryGroup,
+    relevanceFilter,
     roleFamily,
     pageNumber,
     search,
@@ -158,9 +223,16 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
           search,
           location,
           company,
+          companyExact,
+          locationPrimary,
+          lastSeenFrom,
+          repeated: repeatedOnly,
           roleFamily,
           queryGroup,
-          archived: archiveFilter,
+          relevanceOutcome: relevanceFilter || undefined,
+          favorite: favoritesOnly,
+          flagged: flaggedOnly,
+          archived: effectiveArchiveFilter,
           dateFrom,
           dateTo,
           sort,
@@ -257,8 +329,15 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
     setSearch("");
     setLocation("");
     setCompany("");
+    setCompanyExact(false);
+    setLocationPrimary(false);
+    setLastSeenFrom("");
+    setRepeatedOnly(false);
     setRoleFamily("");
     setQueryGroup("");
+    setRelevanceFilter("");
+    setFavoritesOnly(false);
+    setFlaggedOnly(false);
     setArchiveFilter("exclude");
     setDateFrom("");
     setDateTo("");
@@ -268,16 +347,34 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
 
   const formatLabel = (value?: string | null) => {
     if (!value) return "";
+    if (value === "unclassified") return "Other / unclassified";
     return value.replace(/_/g, " ");
   };
 
-  const recordLabel =
-    archiveFilter === "only" ? "archived records" : archiveFilter === "include" ? "all records" : "active records";
+  const recordSetLabel =
+    effectiveArchiveFilter === "only" ? "archived records" : effectiveArchiveFilter === "include" ? "all records" : "active records";
+  const recordLabel = `${flaggedOnly ? "flagged " : ""}${favoritesOnly ? "favorite " : ""}${recordSetLabel}`;
 
-  const handleRowKeyDown = (event: React.KeyboardEvent<HTMLElement>, job: Job) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      selectJob(job);
+  const toggleFavorite = async (job: Job) => {
+    if (favoriteActionId) return;
+    setFavoriteActionId(job.job_id);
+    setFavoriteError(null);
+    try {
+      const result = await setJobFavorite(job.job_id, !job.is_favorite);
+      const updatedJob = { ...job, is_favorite: result.is_favorite };
+      if (selectedId === job.job_id) {
+        onSelect(updatedJob);
+      }
+      if (favoritesOnly && !result.is_favorite) {
+        advanceIfMissingRef.current = selectedId === job.job_id;
+        setReloadToken((token) => token + 1);
+      } else {
+        setJobs((current) => current.map((item) => item.job_id === job.job_id ? updatedJob : item));
+      }
+    } catch (reason) {
+      setFavoriteError(reason instanceof Error ? reason.message : "Failed to update favorite.");
+    } finally {
+      setFavoriteActionId(null);
     }
   };
 
@@ -287,7 +384,9 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
         <div>
           <p className="label">Jobs</p>
           <h3>
-            {total ? total.toLocaleString() : "No"} {recordLabel}
+            {loading && jobs.length === 0
+              ? "Loading jobs…"
+              : `${total ? total.toLocaleString() : "No"} ${recordLabel}`}
           </h3>
         </div>
         <label className="tiny sort-control">
@@ -305,6 +404,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
             <option value="scraped_at_asc">Oldest</option>
             <option value="last_seen_desc">Last seen</option>
             <option value="last_seen_asc">Least recent</option>
+            <option value="seen_count_desc">Most repeated</option>
+            <option value="seen_count_asc">Least repeated</option>
             <option value="title_asc">Title A-Z</option>
             <option value="title_desc">Title Z-A</option>
           </select>
@@ -344,7 +445,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
           <label className="filter-field">
             <span>Job set</span>
             <select
-              value={archiveFilter}
+              value={effectiveArchiveFilter}
+              disabled={relevanceFilter === "auto_archived"}
               className="input"
               onChange={(e) => {
                 setArchiveFilter(e.target.value as JobArchiveFilter);
@@ -357,6 +459,42 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
             </select>
           </label>
           <label className="filter-field">
+            <span>Relevance</span>
+            <select
+              value={relevanceFilter}
+              className="input"
+              onChange={(event) => {
+                const next = event.target.value as JobRelevanceFilter | "";
+                if (relevanceFilter === "auto_archived") setArchiveFilter("exclude");
+                setRelevanceFilter(next);
+                setOffset(0);
+              }}
+            >
+              <option value="">Any relevance outcome</option>
+              {relevanceFilterOptions.map(({ value, label }) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="favorite-filter">
+            <input
+              type="checkbox"
+              checked={favoritesOnly}
+              onChange={(event) => {
+                setFavoritesOnly(event.target.checked);
+                setOffset(0);
+              }}
+            />
+            <span>Favorites only</span>
+          </label>
+          <label className="favorite-filter">
+            <input type="checkbox" checked={flaggedOnly} onChange={(event) => {
+              setFlaggedOnly(event.target.checked);
+              setOffset(0);
+            }} />
+            <span>Flagged only</span>
+          </label>
+          <label className="filter-field">
             <span>Location</span>
             <input
               type="search"
@@ -365,6 +503,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               placeholder="Berlin, remote, Germany"
               onChange={(e) => {
                 setLocation(e.target.value);
+                setLocationPrimary(false);
                 setOffset(0);
               }}
             />
@@ -379,6 +518,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               placeholder="Type a company name"
               onChange={(e) => {
                 setCompany(e.target.value);
+                setCompanyExact(false);
                 setOffset(0);
               }}
             />
@@ -397,6 +537,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               }}
             >
               <option value="">Any role family</option>
+              <option value="unclassified">Other / unclassified</option>
               {roleFamilyOptions.map((item) => (
                 <option key={item} value={item}>{formatLabel(item)}</option>
               ))}
@@ -424,7 +565,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               <span>From</span>
               <input
                 type="date"
-                value={dateFrom}
+                value={dateFrom.slice(0, 10)}
                 className="input"
                 onChange={(e) => {
                   setDateFrom(e.target.value);
@@ -436,7 +577,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               <span>To</span>
               <input
                 type="date"
-                value={dateTo}
+                value={dateTo.slice(0, 10)}
                 className="input"
                 onChange={(e) => {
                   setDateTo(e.target.value);
@@ -445,6 +586,23 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               />
             </label>
           </fieldset>
+          <label className="filter-field">
+            <span>Last seen since</span>
+            <input
+              type="date"
+              value={lastSeenFrom.slice(0, 10)}
+              className="input"
+              onChange={(event) => { setLastSeenFrom(event.target.value); setOffset(0); }}
+            />
+          </label>
+          <label className="favorite-filter">
+            <input
+              type="checkbox"
+              checked={repeatedOnly}
+              onChange={(event) => { setRepeatedOnly(event.target.checked); setOffset(0); }}
+            />
+            <span>Seen more than once</span>
+          </label>
           </div>
           <div className="filter-actions">
             <span className="muted tiny">Results update automatically.</span>
@@ -469,6 +627,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
         </div>
       )}
 
+      {favoriteError && <div className="error" role="alert">{favoriteError}</div>}
+
       <div className="table-card">
         {error ? (
           <div className="error">
@@ -487,7 +647,13 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
               </div>
             ) : jobs.length === 0 ? (
               <div className="empty">
-                {archiveFilter === "only" ? "No archived jobs found." : "No jobs found. Try loosening filters."}
+                {flaggedOnly
+                  ? "No flagged jobs match these filters. Flag jobs from the detail panel to collect examples."
+                  : favoritesOnly
+                  ? "No favorite jobs found."
+                  : effectiveArchiveFilter === "only"
+                    ? "No archived jobs found."
+                    : "No jobs found. Try loosening filters."}
               </div>
             ) : (
               <div className="list">
@@ -495,42 +661,57 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
                   const repeatCount = Math.max(0, (job.seen_count ?? 1) - 1);
                   const firstSeenAt = job.first_seen_at || job.scraped_at;
                   const latestSeenAt = job.last_seen_at || job.scraped_at;
+                  const salary = meaningfulSalary(job.salary);
                   return (
                     <article
                       key={job.job_id}
                       className={`row ${job.job_id === selectedId ? "active" : ""}`}
-                      role="button"
-                      tabIndex={0}
-                      aria-pressed={job.job_id === selectedId}
-                      onClick={() => selectJob(job)}
-                      onKeyDown={(event) => handleRowKeyDown(event, job)}
                     >
-                      <div className="title">{job.title}</div>
-                      <div className="meta">
-                        <span>{job.company}</span>
-                        <span>•</span>
-                        <span>{job.location}</span>
-                      </div>
-                      <div className="tags">
-                        <span className="tag">{job.source}</span>
-                        {job.role_family ? (
-                          <span className="tag soft">{formatLabel(job.role_family)}</span>
-                        ) : null}
-                        {job.archived_at ? (
-                          <span className="tag soft">Archived job · {formatDate(job.archived_at)}</span>
-                        ) : null}
-                        {job.archived_reason ? <span className="tag soft">Reason: {job.archived_reason}</span> : null}
-                        {repeatCount > 0 ? (
-                          <span className="tag soft recurrence-note">
-                            Repeated {repeatCount} {repeatCount === 1 ? "time" : "times"}
-                          </span>
-                        ) : null}
-                        {repeatCount > 0 && latestSeenAt ? (
-                          <span className="tag soft">Latest repeat {formatDate(latestSeenAt)}</span>
-                        ) : null}
-                        {job.salary ? <span className="tag soft">{job.salary}</span> : null}
-                        {firstSeenAt ? <span className="tag soft">First seen {formatDate(firstSeenAt)}</span> : null}
-                      </div>
+                      <button
+                        className="row-select"
+                        type="button"
+                        aria-current={job.job_id === selectedId ? "true" : undefined}
+                        onClick={() => selectJob(job)}
+                      >
+                        <div className="title">{job.title}</div>
+                        <div className="meta">
+                          <span>{job.company}</span>
+                          <span>•</span>
+                          <span>{job.location}</span>
+                        </div>
+                        <div className="tags">
+                          <span className="tag">{job.source}</span>
+                          {job.is_flagged && <span className="tag flagged-tag">Flagged for review</span>}
+                          {job.role_family ? (
+                            <span className="tag soft">{formatLabel(job.role_family)}</span>
+                          ) : null}
+                          {job.archived_at ? (
+                            <span className="tag soft">Archived job · {formatDate(job.archived_at)}</span>
+                          ) : null}
+                          {job.archived_reason ? <span className="tag soft">Reason: {job.archived_reason}</span> : null}
+                          {repeatCount > 0 ? (
+                            <span className="tag soft recurrence-note">
+                              Repeated {repeatCount} {repeatCount === 1 ? "time" : "times"}
+                            </span>
+                          ) : null}
+                          {repeatCount > 0 && latestSeenAt ? (
+                            <span className="tag soft">Latest repeat {formatDate(latestSeenAt)}</span>
+                          ) : null}
+                          {salary ? <span className="tag soft">{salary}</span> : null}
+                          {firstSeenAt ? <span className="tag soft">First seen {formatDate(firstSeenAt)}</span> : null}
+                        </div>
+                      </button>
+                      <button
+                        className={`favorite-toggle ${job.is_favorite ? "is-favorite" : ""}`}
+                        type="button"
+                        aria-label={job.is_favorite ? `Remove ${job.title} from favorites` : `Add ${job.title} to favorites`}
+                        aria-pressed={job.is_favorite}
+                        title={job.is_favorite ? "Remove from favorites" : "Add to favorites"}
+                        disabled={favoriteActionId === job.job_id}
+                        onClick={() => toggleFavorite(job)}
+                      >
+                        <span aria-hidden="true">{job.is_favorite ? "★" : "☆"}</span>
+                      </button>
                     </article>
                   );
                 })}

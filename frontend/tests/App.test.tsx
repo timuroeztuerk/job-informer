@@ -10,6 +10,7 @@ vi.mock("../src/api", () => ({
   getApiErrorMessage: (_error: unknown, fallback: string) => `${fallback} Check VITE_API_BASE.`,
 }));
 vi.mock("../src/components/JobDetail", () => ({ default: () => null }));
+vi.mock("../src/components/DescriptionQueue", () => ({ default: () => null }));
 vi.mock("../src/components/JobTable", async () => {
   const React = await import("react");
   return { default: React.forwardRef(() => null) };

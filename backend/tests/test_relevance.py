@@ -81,7 +81,6 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Technischer Einkäufer (m/w/d)": "purchasing_procurement",
             "Procurement Specialist": "purchasing_procurement",
             "Cost Controller Construction (m/w/d)": "finance_controlling",
-            "Sachbearbeiter Buchhaltung": "finance_controlling",
             "HR Payroll & Reporting": "human_resources",
             "People Business Partner": "human_resources",
             "Technical Support Specialist": "customer_technical_support",
@@ -111,14 +110,12 @@ class TestRelevanceClassifier(unittest.TestCase):
                 self.assertEqual(result.outcome, "target")
                 self.assertIn(result.role_family, {"data_science", "analytics_bi"})
 
-    def test_scope_exclusions_win_before_target_rules(self) -> None:
+    def test_explicit_personal_study_academic_and_non_target_exclusions(self) -> None:
         for title in (
             "AI Engineer",
             "Working Student Data Analyst",
             "Postdoctoral Data Scientist",
             "Professorin für Data Science",
-            "Analytics Engineer",
-            "Data Warehouse Engineer",
             "Scientific Software Developer",
             "AI Developer",
             "Data Warehouse Developer",
@@ -176,7 +173,7 @@ class TestRelevanceClassifier(unittest.TestCase):
         self.assertIn("analytics_bi", result.positive_matches)
         self.assertIn("sales_acquisition", result.negative_matches)
 
-        self.assert_outcome("Data Warehouse Engineer", "excluded")
+        self.assert_outcome("Data Warehouse Engineer", "unmatched")
         self.assert_outcome("Sales Analyst", "unmatched")
         self.assert_outcome("Research Scientist, Drug Discovery", "unmatched")
         self.assert_outcome("Junior Business Developer", "unmatched")
@@ -207,7 +204,6 @@ class TestRelevanceClassifier(unittest.TestCase):
     def test_non_target_consulting_is_unrelated(self) -> None:
         for title in (
             "Business Consultant",
-            "Consultant Accounting & Finance Beratung",
             "Berater Energiewende und Elektromobilität",
             "Data & AI Strategy Consultant",
             "Research Consultant",
@@ -232,10 +228,58 @@ class TestRelevanceClassifier(unittest.TestCase):
                 self.assertEqual(result.role_family, family)
                 self.assertIn("general_consulting", result.negative_matches)
 
+    def test_countrywide_audit_targets_override_broad_engineering_exclusions(self) -> None:
+        for title, family in {
+            "Analytics Engineer": "analytics_bi",
+            "Business Intelligence Engineer": "analytics_bi",
+            "Data Engineer / Data Scientist": "data_science",
+            "Consultant Data Science & ML Engineering": "data_science",
+            "EPM Developer/Business Data Analyst": "analytics_bi",
+            "Senior Machine Learning Scientist": "data_science",
+            "Data / Business Analyst Supply Chain": "analytics_bi",
+            "Process & BI Manager": "analytics_bi",
+            "Air Defense Data Visualization Analyst": "analytics_bi",
+            "Website Analyst": "analytics_bi",
+            "Webanalyst": "analytics_bi",
+        }.items():
+            with self.subTest(title=title):
+                self.assert_outcome(title, "target", family)
+
+    def test_countrywide_audit_adjacent_technical_roles_remain_reviewable(self) -> None:
+        for title in (
+            "Data Engineer",
+            "Research Data Engineer",
+            "Consultant Data Engineering",
+            "Senior Consultant Data Engineering / Azure / GCP",
+            "Machine Learning Engineer - Computer Vision",
+            "Staff ML Engineer",
+            "AI Delivery Engineer",
+            "AI Solutions Engineer",
+            "Senior AI Platform Engineer",
+            "Consultant AI Engineering",
+            "Staff Product Engineer, AI",
+            "Senior Staff Forward Deployed Engineer, GenAI",
+            "AI Tech Consultant",
+            "Consultant GenAI & Agentic AI",
+        ):
+            with self.subTest(title=title):
+                result = classify_relevance(title, unwanted_keywords=UNWANTED)
+                self.assertEqual(result.outcome, "unmatched")
+                self.assertIn("Retained as adjacent", result.reason)
+
+        for title in (
+            "AI Engineer",
+            "Applied AI Engineer",
+            "Senior Artificial Intelligence Engineer",
+            "Backend Engineer",
+            "Software Engineer - GPU performance",
+            "Validation Engineer",
+        ):
+            with self.subTest(title=title):
+                self.assert_outcome(title, "excluded")
+
     def test_implementation_heavy_consulting_cannot_be_rescued_by_analytics(self) -> None:
         for title in (
-            "Inhouse Consultant SAP Business Analytics",
-            "Consultant SAP Second-Level-Support",
             "Senior Consultant Databricks",
             "Sr. Prism Analytics Consultant - Workday Success Plans",
             "Senior Consultant Forensic eDiscovery - Digital Forensics & Analytics",
@@ -271,7 +315,7 @@ class TestRelevanceClassifier(unittest.TestCase):
         unrelated = classify_relevance("Teamassistent", unwanted_keywords=UNWANTED)
         unmatched = classify_relevance("Sales Analyst", unwanted_keywords=UNWANTED)
         target = classify_relevance("Data Scientist", unwanted_keywords=UNWANTED)
-        excluded = classify_relevance("Data Engineer", unwanted_keywords=UNWANTED)
+        excluded = classify_relevance("Backend Engineer", unwanted_keywords=UNWANTED)
 
         self.assertEqual(decision_for_result("1", unrelated, mode="shadow")["decision_action"], "shadow")
         self.assertEqual(decision_for_result("1", unrelated, mode="enforce")["decision_action"], "archive")

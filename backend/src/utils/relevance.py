@@ -14,7 +14,7 @@ from .filtering import (
 )
 
 
-RULESET_VERSION = "2026-09-04.6"
+RULESET_VERSION = "2026-09-05.2"
 VALID_RELEVANCE_MODES = {"shadow", "enforce"}
 
 CONSULTING_TITLE_PATTERN = (
@@ -67,6 +67,7 @@ TARGET_RULES: tuple[RelevanceRule, ...] = (
             r"\bdata[\s/-]+science\b",
             r"\bdecision[\s/-]+scientist\w*\b",
             r"\bapplied[\s/-]+scientist\w*\b",
+            r"\b(?:machine[\s/-]+learning|ml)[\s/-]+scientist\w*\b",
             r"\b(?:bio)?statistiker\w*\b",
             r"\b(?:bio)?statistician\w*\b",
         ),
@@ -76,19 +77,123 @@ TARGET_RULES: tuple[RelevanceRule, ...] = (
         "analytics_bi",
         (
             r"\bdata[\s/-]+analyst\w*\b",
+            r"\bdata(?:\s*/\s*|[\s/-]+)business[\s/-]+analyst\w*\b",
             r"\bdata[\s/-]+analytics\b",
             r"\banalytics\b",
             r"\banalytics[\s/-]+engineer\w*\b",
             r"\bbusiness[\s/-]+intelligence\b",
             r"\bpower[\s/-]+bi\b",
             r"\bbi[\s/-]+(?:analyst|developer|engineer|consultant)\w*\b",
+            r"\bbi[\s/-]+manager\w*\b",
             r"\bconsultant[\s/-]+bi\b",
             r"\breporting[\s/-]+analyst\w*\b",
             r"\binsights?[\s/-]+analyst\w*\b",
+            r"\bdata[\s/-]+visuali[sz]ation[\s/-]+analyst\w*\b",
+            r"\bweb(?:site)?[\s/-]*analyst\w*\b",
             r"\bdatenanalyst\w*\b",
             r"\bdatenanalyse\w*\b",
             r"\bdatenanalytik\w*\b",
         ),
+    ),
+)
+
+
+ADJACENT_TECHNICAL_RULES: tuple[RelevanceRule, ...] = (
+    RelevanceRule(
+        "audited_target_engineering",
+        "target_engineering",
+        (
+            r"\banalytics[\s/-]+engineer\w*\b",
+            r"\bbusiness[\s/-]+intelligence[\s/-]+engineer\w*\b",
+            r"\bbi[\s/-]+engineer\w*\b",
+            r"\bbusiness[\s/-]+data[\s/-]+analyst\w*\b",
+        ),
+    ),
+    RelevanceRule(
+        "data_engineering_adjacent",
+        "data_engineering",
+        (
+            r"\bdata[\s/-]+engin(?:eer|eering)\w*\b",
+            r"\bdata[\s/-]+(?:platform|warehouse|lake)[\s/-]+engineer\w*\b",
+        ),
+    ),
+    RelevanceRule(
+        "ml_engineering_adjacent",
+        "ml_engineering",
+        (
+            r"\bmachine[\s/-]+learning(?:[\s/-]+\([^)]*\))?(?:[\s/-]+ops)?[\s/-]+engineer\w*\b",
+            r"\bml[\s/-]+engineer\w*\b",
+        ),
+    ),
+    RelevanceRule(
+        "ai_engineering_adjacent",
+        "ai_engineering",
+        (
+            r"\bai[\s/-]+engineering\b",
+            r"\bai[\s/-]+(?:delivery|solutions?|platform|computer[\s/-]+vision)[\s/-]+engineer\w*\b",
+            r"\b(?:product|forward[\s/-]+deployed)[\s/-]+engineer\w*[^a-z0-9]+(?:ai|genai)\b",
+            r"\bai[\s/-]+tech[\s/-]+consult\w*\b",
+            r"\bconsult\w*[\s/-]+(?:genai|agentic[\s/-]+ai)\b",
+        ),
+    ),
+)
+
+
+# Reviewed personal preferences from the September 5 flagged examples. These
+# match titles only, override target/adjacent signals, and never read flag text
+# at runtime. Adding a flag does not silently create a new blacklist rule.
+PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
+    RelevanceRule("personal_sap", "SAP-focused roles", (r"\bsap\b",)),
+    RelevanceRule(
+        "personal_crm", "CRM-focused roles",
+        (r"\bcrm\b", r"\bcustomer[\s/-]+relationship[\s/-]+management\b"),
+    ),
+    RelevanceRule(
+        "personal_seniority", "director, principal or executive roles",
+        (
+            r"\b(?:director|principal)\b(?![\s/-]+(?:office|support)\b)",
+            r"\bchief(?:[\s/-]+[a-z]+){0,4}[\s/-]+officer\b(?![\s/-]+office\b)",
+            r"^\W*(?:(?:co[\s-]?founder|founder)[\s&/,;:-]+)?(?:ceo|cto|cfo|coo|cdo|cio|cmo|cpo|cso|c[\s-]+level)\b(?![\s/-]+(?:office|services|advisory|analyst|specialist|support)\b)",
+            r"\b(?:ceo|cto|cfo|coo|cdo|cio|cmo|cpo|cso)[\s&/,-]+(?:co[\s-]?founder|founder)\b",
+            r"^(?:senior[\s/-]+)?executive\b",
+        ),
+    ),
+    RelevanceRule(
+        "personal_accounting", "accounting roles",
+        (r"\b(?:accounting|accountant\w*|buchhalter\w*|buchhaltung|bilanzbuchhalter\w*)\b",),
+    ),
+    RelevanceRule(
+        "personal_pricing_risk", "pricing or financial risk roles",
+        (
+            r"\bpricing\b",
+            r"\brisk[\s/&,-]+(?:analyst\w*|analytics|analysis|modeller\w*|modeling|modelling|management|manager|consulting|performance)\b",
+            r"\b(?:credit|market|investment|financial|quant(?:itative)?)[\s/-]+risk\b",
+            r"\b(?:preisanalys|risikoanalys|risikomodell|risikomanagement)\w*\b",
+        ),
+    ),
+    RelevanceRule(
+        "personal_mathematician", "mathematician roles",
+        (r"\b(?:mathematician|mathematiker)\w*\b",),
+    ),
+    RelevanceRule(
+        "personal_bioinformatics", "bioinformatics roles",
+        (r"\bbioinformatic(?:ian|s)\b", r"\bbioinformatik\w*\b"),
+    ),
+    RelevanceRule(
+        "personal_role_labels", "Fachspezialist or Kaufmann roles",
+        (r"\bfachspezialist(?:(?::|/)?in)?\b", r"\bkauf(?:mann|frau)\b"),
+    ),
+    RelevanceRule(
+        "personal_demand_planning", "demand planning roles",
+        (
+            r"\bdemand[\s/-]+(?:(?:and|&)[\s/-]+supply[\s/-]+)?planner\b",
+            r"\bdemand[\s/-]+planning[\s/-]+(?:expert|manager|specialist|lead|coordinator)\b",
+            r"\b(?:manager|expert|specialist|head|lead|director)[\s/-]+(?:of[\s/-]+)?demand[\s/-]+planning\b",
+        ),
+    ),
+    RelevanceRule(
+        "personal_hot_forming_science", "hot-forming scientist roles",
+        (r"^(?:(?:senior|lead|junior)[\s/-]+)?scientist\b.*\bhot[\s/-]+forming\b",),
     ),
 )
 
@@ -369,16 +474,41 @@ def classify_relevance(
 
     study = match_study_title_pattern(title)
     if study:
-        return RelevanceResult("excluded", None, study, "Excluded as a student or study-track role")
+        return RelevanceResult(
+            "excluded", None, study, "Excluded as a student or study-track role",
+            matches=("study_role",), negative_matches=("study_role",),
+        )
 
     academic = match_academic_title_pattern(title, company)
     if academic:
-        return RelevanceResult("excluded", None, academic, "Excluded as an academic role")
+        return RelevanceResult(
+            "excluded", None, academic, "Excluded as an academic role",
+            matches=("academic_role",), negative_matches=("academic_role",),
+        )
 
+    target_matches = _all_matches(normalized, TARGET_RULES)
+    adjacent_matches = _all_matches(normalized, ADJACENT_TECHNICAL_RULES)
     scope_matches = _all_matches(normalized, SCOPE_EXCLUSION_RULES)
-    if scope_matches:
-        primary_rule, matched_value = scope_matches[0]
-        rule_names = tuple(rule.name for rule, _ in scope_matches)
+    unrelated_matches = _all_matches(normalized, UNRELATED_RULES)
+    personal_matches = _all_matches(normalized, PERSONAL_EXCLUSION_RULES)
+    if personal_matches:
+        primary_rule, matched_value = personal_matches[0]
+        positive_rules = tuple(rule.name for rule, _ in target_matches)
+        negative_rules = tuple(rule.name for rule, _ in personal_matches)
+        return RelevanceResult(
+            "excluded", None, matched_value,
+            f"Excluded by reviewed personal preference: {primary_rule.family} ({matched_value})",
+            matches=(*positive_rules, *negative_rules),
+            positive_matches=positive_rules,
+            negative_matches=negative_rules,
+        )
+
+    blocking_scope_matches = [
+        match for match in scope_matches if match[0].name != "engineering_role"
+    ]
+    if blocking_scope_matches:
+        primary_rule, matched_value = blocking_scope_matches[0]
+        rule_names = tuple(rule.name for rule, _ in blocking_scope_matches)
         return RelevanceResult(
             "excluded",
             None,
@@ -390,7 +520,7 @@ def classify_relevance(
 
     consulting_match = re.search(CONSULTING_TITLE_PATTERN, normalized)
     implementation_match = re.search(CONSULTING_IMPLEMENTATION_PATTERN, normalized)
-    if consulting_match and implementation_match:
+    if consulting_match and implementation_match and not adjacent_matches:
         matched_value = implementation_match.group(0)
         return RelevanceResult(
             "excluded",
@@ -401,8 +531,21 @@ def classify_relevance(
             negative_matches=("consulting_implementation",),
         )
 
-    target_matches = _all_matches(normalized, TARGET_RULES)
-    unrelated_matches = _all_matches(normalized, UNRELATED_RULES)
+    engineering_scope_matches = [
+        match for match in scope_matches if match[0].name == "engineering_role"
+    ]
+    if engineering_scope_matches and not adjacent_matches:
+        primary_rule, matched_value = engineering_scope_matches[0]
+        rule_names = tuple(rule.name for rule, _ in engineering_scope_matches)
+        return RelevanceResult(
+            "excluded",
+            None,
+            matched_value,
+            f"Excluded as {primary_rule.family.replace('_', ' ')}: {matched_value}",
+            matches=rule_names,
+            negative_matches=rule_names,
+        )
+
     positive_rule_names = tuple(rule.name for rule, _ in target_matches)
     negative_rule_names = tuple(rule.name for rule, _ in unrelated_matches)
     if target_matches:
@@ -415,6 +558,17 @@ def classify_relevance(
             matches=(*positive_rule_names, *negative_rule_names),
             positive_matches=positive_rule_names,
             negative_matches=negative_rule_names,
+        )
+
+    if adjacent_matches:
+        primary_rule, matched_value = adjacent_matches[0]
+        rule_names = tuple(rule.name for rule, _ in adjacent_matches)
+        return RelevanceResult(
+            "unmatched",
+            None,
+            matched_value,
+            f"Retained as adjacent {primary_rule.family.replace('_', ' ')}: {matched_value}",
+            matches=rule_names,
         )
 
     if unrelated_matches:

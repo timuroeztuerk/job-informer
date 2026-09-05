@@ -8,11 +8,47 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pandas as pd
+
 from backend.src.utils.database import JobDatabase
 from backend.src.utils.sqlite_connection import SQLITE_BUSY_TIMEOUT_MS
 
 
 class TestDatabaseReliability(unittest.TestCase):
+    def test_favorite_defaults_false_and_survives_repeat_sightings(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            db = JobDatabase(Path(tmp_dir) / "jobs.db")
+            frame = pd.DataFrame(
+                [{
+                    "job_id": "linkedin:favorite-test",
+                    "title": "Data Analyst",
+                    "company": "ACME",
+                    "location": "Berlin",
+                    "source": "LinkedIn",
+                    "url": "https://www.linkedin.com/jobs/view/favorite-test/",
+                }]
+            )
+
+            db.put_into_sql(frame, observed_at="2026-09-04T08:00:00Z")
+            with db._get_connection() as conn:  # noqa: SLF001
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT is_favorite FROM jobs WHERE job_id = 'linkedin:favorite-test'"
+                    ).fetchone()[0],
+                    0,
+                )
+            self.assertTrue(db.set_job_favorite("linkedin:favorite-test", True))
+            self.assertFalse(db.set_job_favorite("missing-job", True))
+
+            db.put_into_sql(frame, observed_at="2026-09-05T08:00:00Z")
+            with db._get_connection() as conn:  # noqa: SLF001
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT is_favorite FROM jobs WHERE job_id = 'linkedin:favorite-test'"
+                    ).fetchone()[0],
+                    1,
+                )
+
     def test_managed_connections_apply_pragmas_and_close(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             db = JobDatabase(Path(tmp_dir) / "jobs.db")

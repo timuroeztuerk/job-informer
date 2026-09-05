@@ -52,6 +52,9 @@ const runSummary = (status: RunStatus | null): string => {
   return status.status === "failed" ? "Collection failed." : `Collection ${status.status}.`;
 };
 
+const requestFailureLabel = (count: number): string =>
+  `${count} request ${count === 1 ? "failure" : "failures"}`;
+
 const RunPane = forwardRef<RunPaneHandle, RunPaneProps>(
   ({ className, onRunCompleted, onRunStatusChange }, ref) => {
     const [status, setStatus] = useState<RunStatus | null>(null);
@@ -199,10 +202,17 @@ const RunPane = forwardRef<RunPaneHandle, RunPaneProps>(
           .then((runs) => {
             if (cancelled) return;
             const activeRun = runs.find((run) => isActiveStatus(run.status));
-            if (!activeRun) return;
-            acceptStatus(activeRun);
-            startPolling();
-            void refreshStatus();
+            if (activeRun) {
+              acceptStatus(activeRun);
+              startPolling();
+              void refreshStatus();
+              return;
+            }
+            const latestRun = runs[0];
+            if (latestRun) {
+              runIdRef.current = latestRun.run_id;
+              setStatus(latestRun);
+            }
           })
           .catch(() => {
             // Starting a run will surface connection errors directly.
@@ -252,6 +262,40 @@ const RunPane = forwardRef<RunPaneHandle, RunPaneProps>(
               {progress.completed} of {progress.total}
             </progress>
             <span>{progress.completed}/{progress.total} searches</span>
+          </div>
+        )}
+
+        {status?.scope_comparison && (
+          <div className="scope-comparison" aria-label="Country-wide and city search comparison">
+            <div className="scope-comparison-heading">
+              <p className="label">Country-wide vs retained cities</p>
+              <span className="muted small">
+                {status.scope_comparison.shared_jobs} shared · {status.scope_comparison.city_jobs_covered_by_countrywide_percent}% of city jobs covered country-wide
+              </span>
+            </div>
+            <div className="scope-comparison-grid">
+              <div>
+                <span className="scope-name">
+                  {status.scope_comparison.countrywide.locations.join(" + ")}
+                </span>
+                <strong>{status.scope_comparison.countrywide.unique_jobs} unique jobs</strong>
+                <span className="muted small">
+                  {status.scope_comparison.countrywide.pages_completed}/{status.scope_comparison.countrywide.pages_attempted} pages · {requestFailureLabel(status.scope_comparison.countrywide.request_failures)}
+                </span>
+              </div>
+              <div>
+                <span className="scope-name">
+                  {status.scope_comparison.cities.locations.join(" + ")}
+                </span>
+                <strong>{status.scope_comparison.cities.unique_jobs} unique jobs</strong>
+                <span className="muted small">
+                  {status.scope_comparison.cities.pages_completed}/{status.scope_comparison.cities.pages_attempted} pages · {requestFailureLabel(status.scope_comparison.cities.request_failures)}
+                </span>
+              </div>
+            </div>
+            <p className="scope-difference muted small">
+              {status.scope_comparison.countrywide_only_jobs} country-only · {status.scope_comparison.city_only_jobs} city-only
+            </p>
           </div>
         )}
 

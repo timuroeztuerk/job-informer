@@ -62,7 +62,7 @@ class TestRelevanceWorkflow(unittest.TestCase):
                 [
                     {
                         "job_id": "linkedin:1001",
-                        "title": "Data Engineer",
+                        "title": "Backend Engineer",
                         "company": "ACME",
                         "location": "Berlin",
                         "source": "LinkedIn",
@@ -75,6 +75,14 @@ class TestRelevanceWorkflow(unittest.TestCase):
                         "location": "Berlin",
                         "source": "LinkedIn",
                         "url": "https://www.linkedin.com/jobs/view/1002/",
+                    },
+                    {
+                        "job_id": "linkedin:1003",
+                        "title": "Senior Data Analyst SAP",
+                        "company": "ACME",
+                        "location": "Berlin",
+                        "source": "LinkedIn",
+                        "url": "https://www.linkedin.com/jobs/view/1003/",
                     },
                 ]
             )
@@ -104,6 +112,8 @@ class TestRelevanceWorkflow(unittest.TestCase):
             self.assertIsNotNone(states["linkedin:1001"][1])
             self.assertEqual(states["linkedin:1002"][0], "unmatched")
             self.assertIsNone(states["linkedin:1002"][1])
+            self.assertEqual(states["linkedin:1003"][0], "excluded")
+            self.assertIsNotNone(states["linkedin:1003"][1])
             self.assertEqual(scope_decisions, 1)
 
     def test_validation_labels_are_sql_only_and_do_not_change_job_state(self) -> None:
@@ -247,7 +257,7 @@ class TestRelevanceWorkflow(unittest.TestCase):
                             "Business Analyst",
                             "Data Analyst",
                             "Data Scientist",
-                            "Data Engineer",
+                            "Backend Engineer",
                         ],
                         start=10,
                     )

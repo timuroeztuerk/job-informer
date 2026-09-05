@@ -1,7 +1,12 @@
 import type {
   DbSummary,
   Job,
+  JobFlag,
+  JobDescriptionResponse,
+  DescriptionQueueState,
   JobArchiveFilter,
+  JobRelevanceFilter,
+  IntelligenceWindow,
   JobStats,
   JobsResponse,
   RunRequest,
@@ -115,8 +120,15 @@ export interface JobsQuery {
   location?: string;
   source?: string;
   company?: string;
+  companyExact?: boolean;
+  locationPrimary?: boolean;
+  lastSeenFrom?: string;
+  repeated?: boolean;
   roleFamily?: string;
   queryGroup?: string;
+  relevanceOutcome?: JobRelevanceFilter;
+  favorite?: boolean;
+  flagged?: boolean;
   archived?: JobArchiveFilter;
   dateFrom?: string;
   dateTo?: string;
@@ -150,8 +162,15 @@ export async function fetchJobs(query: JobsQuery = {}): Promise<JobsResponse> {
       location: query.location,
       source: query.source,
       company: query.company,
+      company_exact: query.companyExact ? "true" : undefined,
+      location_primary: query.locationPrimary ? "true" : undefined,
+      last_seen_from: normalizeDateStart(query.lastSeenFrom),
+      repeated: query.repeated ? "true" : undefined,
       role_family: query.roleFamily,
       query_group: query.queryGroup,
+      relevance_outcome: query.relevanceOutcome,
+      favorite: query.favorite ? "true" : undefined,
+      flagged: query.flagged ? "true" : undefined,
       archived: query.archived,
       date_from: normalizeDateStart(query.dateFrom),
       date_to: normalizeDateEnd(query.dateTo),
@@ -187,12 +206,61 @@ export async function restoreJob(jobId: string): Promise<void> {
   }
 }
 
+export async function setJobFlag(jobId: string, isFlagged: boolean, reason?: string): Promise<JobFlag> {
+  const res = await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/flag`), {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ is_flagged: isFlagged, flag_reason: reason }),
+  });
+  return handleJson<JobFlag>(res);
+}
+
+export async function setJobFavorite(
+  jobId: string,
+  isFavorite: boolean
+): Promise<Pick<Job, "job_id" | "is_favorite">> {
+  const res = await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/favorite`), {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ is_favorite: isFavorite }),
+  });
+  return handleJson<Pick<Job, "job_id" | "is_favorite">>(res);
+}
+
 export async function fetchStats(): Promise<JobStats> {
   const res = await apiFetch(buildUrl("stats"), { headers: authHeaders() });
   return handleJson<JobStats>(res);
 }
 
-export async function fetchDbSummary(): Promise<DbSummary> {
-  const res = await apiFetch(buildUrl("db-summary"), { headers: authHeaders() });
+export async function fetchDbSummary(window: IntelligenceWindow = "all"): Promise<DbSummary> {
+  const res = await apiFetch(buildUrl("db-summary", { window }), { headers: authHeaders() });
   return handleJson<DbSummary>(res);
+}
+
+export async function fetchDescription(jobId: string): Promise<JobDescriptionResponse> {
+  return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/description`), { headers: authHeaders() }));
+}
+
+export async function requestDescription(jobId: string, refresh = false): Promise<JobDescriptionResponse> {
+  return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/description`), {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ refresh }),
+  }));
+}
+
+export async function reparseDescription(jobId: string): Promise<JobDescriptionResponse> {
+  return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/description/reparse`), { method: "POST", headers: authHeaders() }));
+}
+
+export async function fetchDescriptionQueue(): Promise<DescriptionQueueState> {
+  return handleJson(await apiFetch(buildUrl("descriptions/queue"), { headers: authHeaders() }));
+}
+
+export async function queueDescriptions(selection: "next" | "retry" = "next"): Promise<DescriptionQueueState> {
+  return handleJson(await apiFetch(buildUrl("descriptions/queue"), {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ selection, limit: 10 }),
+  }));
+}
+
+export async function controlDescriptionQueue(action: "pause" | "resume"): Promise<DescriptionQueueState> {
+  return handleJson(await apiFetch(buildUrl(`descriptions/queue/${action}`), { method: "POST", headers: authHeaders() }));
 }

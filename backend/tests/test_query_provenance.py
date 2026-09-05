@@ -166,13 +166,24 @@ class TestQueryProvenance(unittest.TestCase):
                 {"query_groups", "query_terms", "collection_queries", "job_query_matches"}.issubset(tables)
             )
             self.assertTrue(
-                {"relevance_outcome", "role_family", "relevance_reason", "relevance_ruleset_version"}.issubset(columns)
+                {
+                    "is_favorite",
+                    "relevance_outcome",
+                    "role_family",
+                    "relevance_reason",
+                    "relevance_ruleset_version",
+                }.issubset(columns)
             )
             with db._get_connection() as conn:  # noqa: SLF001
-                self.assertEqual(
-                    conn.execute("SELECT title FROM jobs WHERE job_id = 'legacy-job'").fetchone()[0],
-                    "Data Analyst",
+                migrated = conn.execute(
+                    "SELECT title, is_favorite FROM jobs WHERE job_id = 'legacy-job'"
+                ).fetchone()
+                favorite_column = next(
+                    row for row in conn.execute("PRAGMA table_info(jobs)") if row[1] == "is_favorite"
                 )
+            self.assertEqual(tuple(migrated), ("Data Analyst", 0))
+            self.assertEqual(favorite_column[3], 1)
+            self.assertEqual(favorite_column[4], "0")
 
 
 if __name__ == "__main__":

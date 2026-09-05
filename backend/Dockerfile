@@ -1,9 +1,17 @@
-FROM node:20-alpine AS frontend-build
+FROM node:20-alpine AS frontend-deps
 
 WORKDIR /frontend
 
 COPY frontend/package*.json ./
 RUN npm ci
+
+
+FROM frontend-deps AS frontend-test
+
+# The test runner mounts current source and configuration over these cached dependencies.
+
+
+FROM frontend-deps AS frontend-build
 
 COPY frontend .
 
@@ -15,7 +23,7 @@ ENV VITE_API_TOKEN=${VITE_API_TOKEN}
 RUN npm run build
 
 
-FROM python:3.11-slim
+FROM python:3.11-slim AS backend-deps
 
 WORKDIR /app
 RUN addgroup --system --gid 1001 app && \
@@ -30,6 +38,14 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --chown=app:app backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r /app/backend/requirements.txt
+
+
+FROM backend-deps AS backend-test
+
+USER app
+
+
+FROM backend-deps AS backend-runtime
 
 # Preserve the backend package layout used by local execution and tests.
 COPY --chown=app:app backend /app/backend

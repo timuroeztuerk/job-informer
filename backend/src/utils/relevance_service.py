@@ -12,6 +12,22 @@ from .relevance import RULESET_VERSION, classify_relevance, decision_for_result
 from .time_utils import utc_now_iso
 
 
+# Shared by the canonical list and Intelligence counts. Shadow evaluations do
+# not supersede an archive; a later manual decision, keep, or restore does.
+AUTO_ARCHIVED_SQL = """
+    j.archived_at IS NOT NULL
+    AND COALESCE(j.relevance_outcome, '') NOT IN ('manual_keep', 'manual_archive')
+    AND (
+        SELECT fd.decision_source = 'rule' AND fd.decision_action = 'archive'
+        FROM filter_decisions fd
+        WHERE fd.job_id = j.job_id
+          AND fd.decision_action IN ('archive', 'restore', 'keep')
+        ORDER BY fd.decided_at DESC, fd.decision_id DESC
+        LIMIT 1
+    )
+"""
+
+
 def _default_unwanted_keywords() -> list[str]:
     return [item.strip() for item in DEFAULT_UNWANTED_KEYWORDS.split(",") if item.strip()]
 
@@ -101,15 +117,7 @@ def build_relevance_preview(
         details = {"batch_id": batch_id, "ruleset_version": RULESET_VERSION}
         if result.outcome == "excluded":
             decisions.append(
-                {
-                    "job_id": job_id,
-                    "decision_source": "rule",
-                    "decision_action": "archive",
-                    "filter_name": "scope_exclusion",
-                    "matched_value": result.matched_value,
-                    "reason": result.reason,
-                    "details": details,
-                }
+                decision_for_result(job_id, result, mode="enforce", details=details)
             )
         elif result.outcome == "manual_archive":
             decisions.append(

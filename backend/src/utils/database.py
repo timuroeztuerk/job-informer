@@ -21,6 +21,7 @@ from loguru import logger
 from .data_utils import build_normalized_key, normalize_job_url
 from .sqlite_connection import connect_sqlite, open_sqlite
 from .time_utils import normalize_utc_iso, utc_now_iso
+from ..descriptions.schema import SCHEMA as DESCRIPTION_SCHEMA
 
 
 DEFAULT_DB_PATH = str(Path(__file__).resolve().parents[2] / "data" / "jobs.db")
@@ -90,6 +91,12 @@ class JobDatabase:
                     seen_count INTEGER NOT NULL DEFAULT 1,
                     archived_at TIMESTAMP,
                     archived_reason TEXT,
+                    is_favorite INTEGER NOT NULL DEFAULT 0
+                        CHECK(is_favorite IN (0, 1)),
+                    is_flagged INTEGER NOT NULL DEFAULT 0
+                        CHECK(is_flagged IN (0, 1)),
+                    flag_reason TEXT,
+                    flagged_at TIMESTAMP,
                     relevance_outcome TEXT,
                     role_family TEXT,
                     relevance_reason TEXT,
@@ -240,6 +247,7 @@ class JobDatabase:
             )
 
             self._ensure_jobs_columns(conn)
+            conn.executescript(DESCRIPTION_SCHEMA)
             self._ensure_scrape_run_columns(conn)
             self._create_indexes_and_guards(conn)
             self._backfill_observation_fields(conn)
@@ -255,6 +263,10 @@ class JobDatabase:
             "seen_count": "INTEGER DEFAULT 1",
             "archived_at": "TIMESTAMP",
             "archived_reason": "TEXT",
+            "is_favorite": "INTEGER NOT NULL DEFAULT 0 CHECK(is_favorite IN (0, 1))",
+            "is_flagged": "INTEGER NOT NULL DEFAULT 0 CHECK(is_flagged IN (0, 1))",
+            "flag_reason": "TEXT",
+            "flagged_at": "TIMESTAMP",
             "relevance_outcome": "TEXT",
             "role_family": "TEXT",
             "relevance_reason": "TEXT",
@@ -654,6 +666,44 @@ class JobDatabase:
             )
             conn.commit()
         return True
+
+    def set_job_favorite(self, job_id: str, is_favorite: bool) -> bool:
+        """Set the independent favorite flag for one stored job."""
+        normalized_id = str(job_id or "").strip()
+        if not normalized_id:
+            return False
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET is_favorite = ? WHERE job_id = ?",
+                (1 if is_favorite else 0, normalized_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def set_job_flag(
+        self, job_id: str, is_flagged: bool, reason: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """Keep personal mismatch examples independent of automated decisions."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE jobs SET
+                    is_flagged = ?,
+                    flag_reason = CASE WHEN ? THEN COALESCE(?, flag_reason) ELSE NULL END,
+                    flagged_at = CASE WHEN ? THEN COALESCE(flagged_at, ?) ELSE NULL END
+                WHERE job_id = ? AND LOWER(source) = 'linkedin'
+                """,
+                (int(is_flagged), is_flagged, reason.strip() if reason is not None else None,
+                 is_flagged, utc_now_iso(), job_id),
+            )
+            if not cursor.rowcount:
+                return None
+            row = conn.execute(
+                "SELECT job_id, is_flagged, flag_reason, flagged_at FROM jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            conn.commit()
+        return {"job_id": row[0], "is_flagged": bool(row[1]), "flag_reason": row[2], "flagged_at": row[3]}
 
     def start_scrape_run(
         self,
