@@ -86,7 +86,7 @@ describe("JobTable and JobDetail", () => {
     });
     const user = userEvent.setup();
     render(<JobList />);
-    expect(await screen.findByRole("heading", { name: "2 flagged all records" })).toBeInTheDocument();
+    expect(await screen.findByRole("status", { name: "2 flagged all records" })).toBeInTheDocument();
     expect(screen.getByLabelText("Flagged only")).toBeChecked();
     expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({ flagged: true, archived: "include" }));
     expect(screen.getAllByText("Flagged for review")).toHaveLength(2);
@@ -108,9 +108,38 @@ describe("JobTable and JobDetail", () => {
 
     render(<JobTable companies={[]} onSelect={vi.fn()} />);
 
-    expect(screen.getByRole("heading", { name: "Loading jobs…" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Loading jobs…" })).toBeInTheDocument();
     resolveJobs(response([firstJob]));
     expect(await screen.findByRole("button", { name: /^First role/ })).toBeInTheDocument();
+  });
+
+  it("pages through ten jobs at a time and resets when a quick filter changes", async () => {
+    const items = Array.from({ length: 21 }, (_, i) => makeJob(`page-job-${i}`, `Role ${i + 1}`));
+    vi.mocked(fetchJobs).mockImplementation(async ({ limit = 10, offset = 0 } = {}) => ({
+      total: items.length, count: items.slice(offset, offset + limit).length,
+      items: items.slice(offset, offset + limit),
+    }));
+    const user = userEvent.setup();
+    render(<JobTable companies={[]} onSelect={vi.fn()} />);
+
+    await screen.findByRole("button", { name: /^Role 1 / });
+    expect(screen.getAllByRole("article")).toHaveLength(10);
+    expect(screen.getByText("Page 1 of 3")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Prev" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByRole("button", { name: /^Role 11 / });
+    expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 10, offset: 10 }));
+    expect(new URLSearchParams(window.location.search).get("page")).toBe("2");
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByRole("button", { name: /^Role 21 / });
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Prev" }));
+    await screen.findByRole("button", { name: /^Role 11 / });
+    await user.click(screen.getByLabelText("Favorites only"));
+    await screen.findByRole("button", { name: /^Role 1 / });
+    expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({ favorite: true, offset: 0, limit: 10 }));
+    expect(screen.getByRole("button", { name: /^Filters/ })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("selects jobs and advances after archiving without note filters", async () => {
@@ -148,7 +177,7 @@ describe("JobTable and JobDetail", () => {
     expect(new URLSearchParams(window.location.search).has("priority")).toBe(false);
   });
 
-  it("shows one canonical card with its repeat count and latest repeat date", async () => {
+  it("keeps a compact canonical card with its repeat count", async () => {
     const repeatedJob: Job = {
       ...firstJob,
       seen_count: 4,
@@ -161,7 +190,8 @@ describe("JobTable and JobDetail", () => {
     render(<JobTable companies={[]} onSelect={vi.fn()} />);
 
     expect(await screen.findByText("Repeated 3 times")).toBeInTheDocument();
-    expect(screen.getByText("Latest repeat Jul 12, 2026")).toBeInTheDocument();
+    expect(screen.queryByText(/Latest repeat/)).not.toBeInTheDocument();
+    expect(screen.queryByText("LinkedIn")).not.toBeInTheDocument();
     expect(screen.getByText("First seen Jul 9, 2026")).toBeInTheDocument();
     expect(screen.queryByText(/not specified/i)).not.toBeInTheDocument();
     expect(document.querySelectorAll(".job-table .row")).toHaveLength(1);
@@ -189,9 +219,7 @@ describe("JobTable and JobDetail", () => {
     );
 
     await screen.findByRole("button", { name: /^First role/ });
-    const filterToggle = screen.getByText("Open filters").closest("summary");
-    if (!filterToggle) throw new Error("Filter toggle did not render");
-    await user.click(filterToggle);
+    await user.click(screen.getByRole("button", { name: "Filters" }));
     expect(screen.queryByLabelText("Source")).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("Company"), "Acme");
     await user.selectOptions(screen.getByLabelText("Role family"), "analytics_bi");
@@ -209,12 +237,28 @@ describe("JobTable and JobDetail", () => {
       );
     });
     await user.click(screen.getByRole("button", { name: "Done" }));
-    await waitFor(() => expect(document.querySelector(".filter-menu")).not.toHaveAttribute("open"));
+    expect(screen.getByRole("button", { name: /^Filters/ })).toHaveAttribute("aria-expanded", "false");
     const params = new URLSearchParams(window.location.search);
     expect(params.get("company")).toBe("Acme");
     expect(params.get("role")).toBe("analytics_bi");
     expect(params.get("query_group")).toBe("data_science");
     expect(params.get("favorite")).toBe("1");
+  });
+
+  it("shows the filter scope without opening every control and can clear a drill-down", async () => {
+    window.history.replaceState({}, "", "/?company=Acme&role=analytics_bi&seen_since=2026-09-01&repeated=1");
+    vi.mocked(fetchJobs).mockResolvedValue(response([firstJob]));
+    const user = userEvent.setup();
+    render(<JobTable companies={[]} onSelect={vi.fn()} />);
+    await screen.findByRole("button", { name: /^First role/ });
+    expect(screen.getByRole("button", { name: /^Filters/ })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("searchbox", { name: "Search" })).toBeVisible();
+    expect(screen.getByLabelText("Favorites only")).toBeVisible();
+    expect(screen.getByLabelText("Flagged only")).toBeVisible();
+    expect(screen.getByText(/Company: Acme · Role: analytics bi/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({ company: "", roleFamily: "", lastSeenFrom: "", repeated: false })));
+    expect(new URLSearchParams(window.location.search).has("company")).toBe(false);
   });
 
   it("toggles a favorite directly from the canonical job list", async () => {
@@ -240,8 +284,9 @@ describe("JobTable and JobDetail", () => {
 
     await screen.findByRole("button", { name: /^First role/ });
     expect(fetchJobs).toHaveBeenLastCalledWith(expect.objectContaining({
-      relevanceOutcome: "unmatched", offset: 10, company: "Acme", archived: "exclude",
+      relevanceOutcome: "unmatched", limit: 10, offset: 20, company: "Acme", archived: "exclude",
     }));
+    await user.click(screen.getByRole("button", { name: /^Filters/ }));
     expect(screen.getByLabelText("Relevance")).toHaveValue("unmatched");
 
     await user.selectOptions(screen.getByLabelText("Relevance"), "auto_archived");
@@ -307,6 +352,7 @@ describe("JobTable and JobDetail", () => {
       company: "Acme", companyExact: true, location: "München", locationPrimary: true,
       lastSeenFrom: "2026-08-29T12:00:00Z", repeated: true, dateFrom: "2026-08-29T12:00:00Z",
     }));
+    await user.click(screen.getByRole("button", { name: /^Filters/ }));
     expect(screen.getByLabelText("Last seen since")).toHaveValue("2026-08-29");
     expect(screen.getByLabelText("From")).toHaveValue("2026-08-29");
     expect(screen.getByLabelText("Seen more than once")).toBeChecked();

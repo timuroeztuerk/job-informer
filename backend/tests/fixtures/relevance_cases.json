@@ -6,7 +6,7 @@
     {"title": "Data Analyst (m/w/d)", "company": "Retail Data", "outcome": "target", "role_family": "analytics_bi"},
     {"title": "Business Intelligence Consultant", "company": "Consulting GmbH", "outcome": "target", "role_family": "analytics_bi"},
     {"title": "DataScientist Logistik (w/m/d)", "company": "Mobility Systems", "outcome": "target", "role_family": "data_science"},
-    {"title": "Team Lead Marketing Analytics", "company": "Commerce GmbH", "outcome": "target", "role_family": "analytics_bi"},
+    {"title": "Team Lead Marketing Analytics", "company": "Commerce GmbH", "outcome": "excluded"},
     {"title": "Sachbearbeiter/in Datenanalytik (w/m/d)", "company": "Public Sector", "outcome": "target", "role_family": "analytics_bi"},
 
     {"title": "AI Engineer", "company": "Example AI", "outcome": "excluded"},
@@ -41,12 +41,12 @@
     {"title": "Sachbearbeiter (m/w/d)", "company": "Public Sector", "outcome": "unrelated"},
     {"title": "Logistiker:in (m/w/d)", "company": "Manufacturing GmbH", "outcome": "unrelated"},
     {"title": "Technischer Einkäufer (m/w/d)", "company": "Construction GmbH", "outcome": "unrelated"},
-    {"title": "Cost Controller Construction (m/w/d)", "company": "Construction GmbH", "outcome": "unrelated"},
+    {"title": "Cost Controller Construction (m/w/d)", "company": "Construction GmbH", "outcome": "excluded"},
     {"title": "HR Payroll & Reporting", "company": "Retail GmbH", "outcome": "unrelated"},
     {"title": "Technical Support Specialist", "company": "Software GmbH", "outcome": "unrelated"},
     {"title": "Datenbankadministrator PostgreSQL", "company": "Software GmbH", "outcome": "unrelated"},
     {"title": "Produktionsmitarbeiter (m/w/d)", "company": "Manufacturing GmbH", "outcome": "unrelated"},
-    {"title": "Junior Marketing Manager", "company": "Commerce GmbH", "outcome": "unrelated"},
+    {"title": "Junior Marketing Manager", "company": "Commerce GmbH", "outcome": "excluded"},
 
     {"title": "Sales Analyst", "company": "Commerce GmbH", "outcome": "unmatched"},
     {"title": "Research Scientist, Drug Discovery", "company": "Example Pharma", "outcome": "unmatched"},

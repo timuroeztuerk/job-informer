@@ -1164,6 +1164,12 @@ async def get_extraction(job_id: str, _: bool = Depends(require_token)) -> dict:
         return await _ai().db(_ai().store.job_result, job_id)
 
 
+@app.post("/jobs/{job_id:path}/extraction")
+async def request_extraction(job_id: str, _: bool = Depends(require_token)) -> dict:
+    with _description_errors():
+        return await _ai().queue_job(job_id)
+
+
 class DescriptionBatchRequest(BaseModel):
     selection: Literal["all", "retry"] = "all"
     limit: int = Field(default=10, ge=1, le=20)

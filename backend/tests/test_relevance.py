@@ -29,7 +29,7 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Business Intelligence Consultant": "analytics_bi",
             "DataScientist Logistik (w/m/d)": "data_science",
             "Expert, Analytics & Data Science, Procurement RX": "data_science",
-            "Team Lead Marketing Analytics": "analytics_bi",
+            "Senior Product Analytics Specialist": "analytics_bi",
             "Junior Consultant BI": "analytics_bi",
             "Sachbearbeiter/in Datenanalytik (w/m/d)": "analytics_bi",
         }
@@ -80,7 +80,6 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Versandmitarbeiter (m/w/d)": "operational_logistics",
             "Technischer Einkäufer (m/w/d)": "purchasing_procurement",
             "Procurement Specialist": "purchasing_procurement",
-            "Cost Controller Construction (m/w/d)": "finance_controlling",
             "HR Payroll & Reporting": "human_resources",
             "People Business Partner": "human_resources",
             "Technical Support Specialist": "customer_technical_support",
@@ -89,7 +88,6 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Produktionsmitarbeiter (m/w/d)": "production_trades",
             "Maschinenführer:in": "production_trades",
             "Account Manager Life Science": "sales_acquisition",
-            "Junior Marketing Manager": "marketing_content",
         }
         for title, family in cases.items():
             with self.subTest(title=title):
@@ -100,9 +98,7 @@ class TestRelevanceClassifier(unittest.TestCase):
     def test_data_and_analytics_targets_override_contextual_noise(self) -> None:
         for title in (
             "Data Analyst - Procurement",
-            "Marketing Analytics Manager",
             "HR Data Analyst",
-            "Data Analytics Controller",
             "Customer Support Data Scientist",
         ):
             with self.subTest(title=title):
@@ -180,10 +176,6 @@ class TestRelevanceClassifier(unittest.TestCase):
 
     def test_existing_noise_families_cover_compounds_without_hiding_adjacent_roles(self) -> None:
         for title, family in {
-            "Finanzcontroller (m/w/d)": "finance_controlling",
-            "Projektcontroller Umweltberatung": "finance_controlling",
-            "Business Partner SCO Controlling": "finance_controlling",
-            "Marketingmanager:in": "marketing_content",
             "Senior Social Media Performance Manager": "marketing_content",
             "Junior Manager Paid Social": "marketing_content",
         }.items():

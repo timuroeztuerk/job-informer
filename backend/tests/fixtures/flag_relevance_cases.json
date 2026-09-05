@@ -24,9 +24,9 @@
       "title": "Leitende(r) Mitarbeiterin/Mitarbeiter im Bereich Zahlen- und Datenanalyse (m/w/d)",
       "company": "Kassenärztliche Vereinigung Hessen (KVH)",
       "flag_reason": null,
-      "outcome": "target",
-      "rule": null,
-      "review": "No general rule inferred from this single unexplained flag"
+      "outcome": "excluded",
+      "rule": "personal_lead_founding",
+      "review": "Lead roles excluded by the later explicit notes"
     },
     {
       "job_id": "linkedin:4459207025",
@@ -177,18 +177,18 @@
       "title": "MSAT Data Expert (Biologics)",
       "company": "Takeda",
       "flag_reason": null,
-      "outcome": "unmatched",
-      "rule": null,
-      "review": "No general rule inferred from this single unexplained flag"
+      "outcome": "excluded",
+      "rule": "personal_msat",
+      "review": "User explicitly confirmed excluding this role family"
     },
     {
       "job_id": "linkedin:4463624733",
       "title": "Data Engineer – banksteuerndes und aufsichtsrechtliches Reporting (a)",
       "company": "aity AG",
       "flag_reason": null,
-      "outcome": "unmatched",
-      "rule": null,
-      "review": "No general rule inferred from this single unexplained flag"
+      "outcome": "excluded",
+      "rule": "personal_regulatory_reporting",
+      "review": "User explicitly confirmed excluding this role family"
     },
     {
       "job_id": "linkedin:4444438492",
@@ -204,18 +204,18 @@
       "title": "Fraud Manager im Team Detection",
       "company": "DKB | Deutsche Kreditbank AG",
       "flag_reason": null,
-      "outcome": "unmatched",
-      "rule": null,
-      "review": "No general rule inferred from this single unexplained flag"
+      "outcome": "excluded",
+      "rule": "personal_fraud_management",
+      "review": "User explicitly confirmed excluding this role family; fraud data science is distinct"
     },
     {
       "job_id": "linkedin:4463382462",
       "title": "Audit Specialist - Artificial Intelligence (m/w/d)",
       "company": "Schwarz Corporate Solutions",
       "flag_reason": null,
-      "outcome": "unmatched",
-      "rule": null,
-      "review": "No general rule inferred from this single unexplained flag"
+      "outcome": "excluded",
+      "rule": "personal_audit",
+      "review": "User explicitly confirmed excluding this role family"
     },
     {
       "job_id": "linkedin:4461174456",
@@ -276,9 +276,135 @@
       "title": "Cloud FinOps und Tokenverbrauch Analyst (m/w/d)",
       "company": "AXA",
       "flag_reason": null,
+      "outcome": "excluded",
+      "rule": "personal_finops",
+      "review": "User explicitly confirmed excluding this role family"
+    },
+    {
+      "job_id": "https://de.linkedin.com/jobs/view/data-analyst-%e2%80%93-b2b-analytics-f-m-d-at-idealo-internet-gmbh-4281801578?position=19&pagenum=0&refid=yc%2b1rtd6ud6e4rx4zjjdvw%3d%3d&trackingid=7fsc0snmkdddm11uaj4jkw%3d%3d",
+      "title": "Data Analyst – B2B Analytics (f|m|d)",
+      "company": "idealo internet GmbH",
+      "flag_reason": "B2B Analytics is not that important and exciting for me.",
+      "outcome": "excluded",
+      "rule": "personal_commercial_analytics",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4424574760",
+      "title": "GIS Portfolio Expert (w/m/d) U.S. Market",
+      "company": "Siemens",
+      "flag_reason": "Because of the description, it is mostly and electrical engineering jobs",
       "outcome": "unmatched",
       "rule": null,
-      "review": "No general rule inferred from this single unexplained flag"
+      "review": "Archive this posting by explicit review: saved description requires electrical engineering and switchgear expertise. Do not blacklist GIS titles."
+    },
+    {
+      "job_id": "linkedin:4434637079",
+      "title": "Digital Pathologist",
+      "company": "Roche",
+      "flag_reason": "I definitely look for pathology jobs",
+      "outcome": "excluded",
+      "rule": "personal_pathology",
+      "review": "User clarified: exclude pathology roles; original note retained verbatim"
+    },
+    {
+      "job_id": "linkedin:4442630683",
+      "title": "Graduate Quant Researcher - Digital Assets",
+      "company": "IMC Trading",
+      "flag_reason": "No Graduate jobs",
+      "outcome": "excluded",
+      "rule": "personal_graduate",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4460475447",
+      "title": "Ihre Aufgaben",
+      "company": "University Positions",
+      "flag_reason": "no university positions",
+      "outcome": "excluded",
+      "rule": "personal_academic_employer",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4461068488",
+      "title": "HR Controller*in - Personalcontrolling & HR Analytics (m/w/d)",
+      "company": "Universitätsklinikum Heidelberg (UKHD)",
+      "flag_reason": "No controller jobs",
+      "outcome": "excluded",
+      "rule": "personal_controlling",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4461077759",
+      "title": "Wissenschaftliche*r Mitarbeiter*in für den Bereich Foundation Models & Neuromorphic Edge AI",
+      "company": "FZI Forschungszentrum Informatik",
+      "flag_reason": "no wiss  mit jobs",
+      "outcome": "excluded",
+      "rule": "academic_role",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4461141719",
+      "title": "(Senior) Website Analyst – E-Commerce Management (w/m/d)",
+      "company": "IONOS",
+      "flag_reason": "Generally these type of Commerce, marketing or e-commerce jobs are not relevant for me.",
+      "outcome": "excluded",
+      "rule": "personal_commercial_analytics",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4461164843",
+      "title": "Founding Quant Trader / Researcher — Compute Futures",
+      "company": "Vitus Commodities",
+      "flag_reason": "founding job is too senior",
+      "outcome": "excluded",
+      "rule": "personal_lead_founding",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4462083980",
+      "title": "Risikomanagerin und Datenanalystin (m/w/d)",
+      "company": "Eidgenössische Finanzmarktaufsicht FINMA",
+      "flag_reason": "no risk anaylsis",
+      "outcome": "excluded",
+      "rule": "personal_pricing_risk",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4462136997",
+      "title": "Senior / Lead Data Scientist – Applied Statistics & Machine Learning – €100,000 – Hybrid – Frankfurt",
+      "company": "Findr",
+      "flag_reason": "lead job",
+      "outcome": "excluded",
+      "rule": "personal_lead_founding",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4462436774",
+      "title": "Product Owner / Lead Data Scientist - Data Intelligence & AI Enablement (d/m/w)",
+      "company": "Deutsche Bank",
+      "flag_reason": "because of a combination of the title and the job description. Lead data scientist would be too much, and the description is too much devops/mlops",
+      "outcome": "excluded",
+      "rule": "personal_lead_founding",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4463397314",
+      "title": "Insurance Risk & Actuarial Analyst",
+      "company": "Fiat Chrysler Rimaco SA",
+      "flag_reason": "I'm not interested in the risk analysis.",
+      "outcome": "excluded",
+      "rule": "personal_pricing_risk",
+      "review": "Explicit flag note reviewed on September 5"
+    },
+    {
+      "job_id": "linkedin:4463700657",
+      "title": "Ecommerce Data & Analytics Engineer",
+      "company": "Johnson Health Tech North America",
+      "flag_reason": "no ecommerce",
+      "outcome": "excluded",
+      "rule": "personal_commercial_analytics",
+      "review": "Explicit flag note reviewed on September 5"
     }
   ]
 }

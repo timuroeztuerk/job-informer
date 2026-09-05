@@ -1,6 +1,6 @@
 # AI extraction roadmap
 
-Turn saved job postings into useful, traceable information for review and Intelligence. The extraction pipeline is implemented with a temporary 10-job pilot. Product priorities remain in [ROADMAP.md](ROADMAP.md).
+Turn saved job postings into useful, traceable information for review and Intelligence. The extraction pipeline is implemented; each operator request queues up to 100 jobs, advancing through the remaining saved jobs. Product priorities remain in [ROADMAP.md](ROADMAP.md).
 
 ## Agreed processing choices
 
@@ -15,19 +15,11 @@ Turn saved job postings into useful, traceable information for review and Intell
 | Execution | A manually started, persistent local queue. Async network calls run independently of browser requests. LinkedIn retrieval keeps its existing separate pacing. |
 | Structure | Pydantic is the canonical schema; generate the API JSON schema from it and validate results locally. |
 
-GPT-5.4 mini supports Responses and Structured Outputs. Flex is listed for the model; account access and usable throughput still need a live integration check. See the [model specification](https://developers.openai.com/api/docs/models/gpt-5.4-mini), [Flex pricing](https://developers.openai.com/api/docs/pricing?latest-pricing=flex), and [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs).
+The live pilot confirms Responses, Structured Outputs and Flex access. The concurrency ceiling is tested offline; throughput at 100 live requests remains unmeasured. See the [model specification](https://developers.openai.com/api/docs/models/gpt-5.4-mini), [Flex pricing](https://developers.openai.com/api/docs/pricing?latest-pricing=flex), and [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs).
 
-The removable trial block is at the beginning of [store.py](backend/src/ai/store.py):
+Each bulk click queues up to 100 active or favorited jobs with usable saved descriptions, with favorites first, followed by latest sighting and job ID. Cached results and already queued jobs do not consume the batch; later clicks advance to the next jobs. Failed-output retries also select up to 100 at a time. A selected-job action can extract any saved posting individually. Starting the app does not queue work automatically; the operator starts each batch.
 
-```python
-# BEGIN TEMPORARY PILOT — delete this block after reviewing the first 10 jobs.
-PILOT_LIMIT = 10
-# END TEMPORARY PILOT
-```
-
-The same first 10 eligible jobs remain selected across queue actions and restarts. Favorites come first, followed by latest sighting and job ID. Removing the block enables the normal queue; it does not start an archive-wide run automatically.
-
-The first live run completed all 10 jobs, with one retry after an evidence-check failure. The results are available in Jobs for review; the temporary limit remains enabled.
+The first live run completed all 10 jobs, with one retry. Schema 2 reran the same unchanged sources: all 10 completed across 12 attempts, and all 307 saved evidence spans matched. Education is now captured for all 10; the ambiguous experience threshold, remote-possible labels and false seniority conflicts improved. Skill coverage and duplication still need review. Earlier results remain immutable and readable.
 
 Requests use medium reasoning and a 15-minute timeout. The queue owns retries (`max_retries=0` on the SDK client). Flex can be slow or return temporary capacity errors; see [Flex processing](https://developers.openai.com/api/docs/guides/flex-processing).
 
@@ -50,18 +42,19 @@ Each extracted claim needs a source reference and a verbatim quotation. Applicat
 
 ## 2. Pydantic field design
 
-Start with explicit nested models: `Evidence`, `Requirement`, `LanguageRequirement`, `ExperienceRequirement`, `WorkArrangement`, `Conflict`, and `JobExtraction`. Avoid a generic dictionary of arbitrary AI attributes. Use `extra="forbid"`, constrained categories, required keys, and nullable values. Enforce semantic checks after parsing as well as structural validation.
+Use explicit nested models, including `EducationRequirement` and `ExperienceYears`, with `extra="forbid"`, constrained categories, required keys, and nullable values. Enforce semantic checks after parsing as well as structural validation.
 
 | Field group | Useful structure |
 | --- | --- |
-| Skills, tools, programming languages | Original term, canonical term, category, requirement strength, evidence. Preserve alternatives such as “Python or R” rather than making both mandatory. |
+| Skills, tools, programming languages | One concise English concept per item, original-language evidence, separate proficiency and applicability condition. Certifications and clearances have their own categories. Alternative groups distinguish choices from items needed together. |
+| Education | Qualification, explicitly stated degree level, acceptable disciplines, strength, conditions and alternatives. “Studium” does not imply bachelor. |
 | Description language | Any language, with ISO codes ordered by prominence: `de/en`, `en`, `fr`, etc. Use description passages, excluding metadata labels and isolated technical terms. |
 | Applicant languages | Language, stated proficiency wording, explicit CEFR level if supplied, requirement strength, evidence. Do not convert “fluent” into an invented CEFR level. |
-| Experience | Minimum/maximum years where explicit, relevant discipline or technology, requirement strength, evidence. Keep “several years” as wording with unknown numeric bounds. |
-| Work arrangement | Remote/on-site/hybrid, office attendance, geographic restrictions, evidence. “Home office possible” does not establish fully remote work. |
+| Experience | Typed numeric bounds: minimum, maximum, target range, ambiguous minimum or explicit exact duration. “At least 1–2” is an ambiguous threshold; a desired 2–4 years is not an eligibility ceiling. “Several years” has no numeric value. Preserve scope and conditions. |
+| Work arrangement | Remote/on-site/hybrid/remote possible/unspecified, office attendance, geographic wording and conditions. Mobile working alone means remote possible; hybrid needs explicit support. Generic conditional employer policies do not establish the role's mode. |
 | Responsibilities | Specific duties supported by the description, kept separate from candidate requirements and LinkedIn's job-function label. |
 | Seniority and employment | Description-supported claims alongside the preserved LinkedIn criteria, with explicit conflicts. |
-| Education, compensation, benefits | Add after the core outputs have been reviewed. Preserve degree alternatives; original salary amount, currency, period, gross/net basis, and conditions. Do not invent EUR conversions or annualize an unknown period. |
+| Compensation, benefits | Deferred. Preserve original salary amount, currency, period, gross/net basis and conditions when added. Do not invent EUR conversions or annualize an unknown period. |
 
 Use `required`, `preferred`, `mentioned`, `not_required`, and `unclear` for requirement strength. Preserve raw terms and use a small, versioned alias map for safe normalization, such as “PowerBI” to “Power BI”. A list item mentioned in employer marketing is not automatically a candidate requirement.
 
@@ -71,7 +64,7 @@ Keep provenance and validation state outside the model-generated business fields
 
 ## 3. Implemented extraction prompt
 
-The [prompt module](backend/src/ai/prompt.py) is the single implementation. Pydantic owns the schema. The prompt defines source boundaries, negation, alternatives, unknown values, conflicts, and multilingual behavior. It separates description language from applicant language requirements. Old AI output is never supplied as factual input, and posting content is treated as data rather than instructions.
+The [prompt module](backend/src/ai/prompt.py) is the single implementation. Schema 2 adds concrete examples from the pilot, a qualification-coverage check, and conservative conflict rules: preferred experience and broad seniority labels can coexist. Input serialization preserves paragraph order. Description language remains separate from applicant language requirements. Old AI output is never supplied as factual input, and posting content is treated as data rather than instructions.
 
 Add examples for observed output failures. Follow the explicit ambiguity and evidence handling in [GPT-5.4 mini prompting guidance](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.4#prompting-best-practices).
 
@@ -90,13 +83,13 @@ Add examples for observed output failures. Follow the explicit ambiguity and evi
 
 Original sources and personal annotations remain unchanged. The job panel exposes historical parsed fields as unvalidated and the old review status/priority. Dry-run placeholders are excluded. Older saved text has unknown completeness; extract supported statements without claiming the source is complete.
 
-Offline tests cover the fixed 10-job cohort, repeat enqueue, restart recovery, the 100-request ceiling, shared backoff, SDK request settings, malformed/incomplete outputs, quotation validation, metadata changes, prior-result preservation, legacy visibility, and safe evidence rendering. These test output contracts and workflow behavior; there is no separate model benchmark or 80-job evaluation project.
+Offline tests cover 100-job batch progression, retry batches, reuse of completed results, manual archive preservation, repeat enqueue, restart recovery, concurrency, shared backoff, SDK settings, failed outputs, evidence, schema upgrades, source order and safe UI rendering. Responses use the Pydantic-generated strict schema; application validation runs after capturing usage and the draft so rejected business fields do not erase accounting or diagnostics. These test contracts and workflow behavior, not model accuracy.
 
-Review the 10 real outputs in the Jobs panel: description-language ordering, listed criteria, requirement strength, alternatives, numeric experience, missing values, and highlighted evidence. Correct concrete output failures before removing the trial block. Keep extraction independent of automatic archive decisions.
+Sample outputs in the Jobs panel: description-language ordering, listed criteria, requirement strength, alternatives, numeric experience, missing values, and highlighted evidence. Correct concrete output failures before relying on the fields for filters. Keep extraction independent of automatic archive decisions.
 
-## Next steps after the pilot
+## Next steps
 
-1. Review the trial outputs and address observed errors; then remove the temporary limit and queue remaining saved jobs.
+1. The operator will start extraction for the remaining saved jobs. Review skill coverage and education/language claims duplicated into requirements before using skills for archive-wide counts or filters.
 2. Restore Intelligence distributions with extraction coverage and one count per consolidated role. Unknown and conflicting values stay visible and reviewable.
-3. Add education, compensation, and benefits when useful. Preserve salary currency, period, gross/net basis, and conditions without invented conversions.
+3. Add compensation and benefits when useful. Preserve salary currency, period, gross/net basis, and conditions without invented conversions.
 4. Consider new summaries and personal fit ranking separately after the extracted fields are useful in daily review.

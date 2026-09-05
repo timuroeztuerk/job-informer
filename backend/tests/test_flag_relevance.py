@@ -26,6 +26,38 @@ class TestFlagRelevance(unittest.TestCase):
     def test_close_variants_of_reviewed_preferences(self):
         cases = {
             "Senior Data Scientist SAP & AI": "personal_sap",
+            "Lead Data Scientist": "personal_lead_founding",
+            "Senior/Lead Data Engineer": "personal_lead_founding",
+            "Data Science Lead": "personal_lead_founding",
+            "Founding ML Engineer": "personal_lead_founding",
+            "Team Lead Marketing Analytics": "personal_lead_founding",
+            "Graduate Data Analyst": "personal_graduate",
+            "Marketing Analytics Manager": "personal_commercial_analytics",
+            "OnlineMarketing Data Analyst": "personal_commercial_analytics",
+            "Data Scientist - E-Commerce": "personal_commercial_analytics",
+            "B2B Analytics Specialist": "personal_commercial_analytics",
+            "Data Analytics Controller": "personal_controlling",
+            "Data Analyst HR Controlling": "personal_controlling",
+            "Cost Controller Construction (m/w/d)": "personal_controlling",
+            "Finanzcontroller (m/w/d)": "personal_controlling",
+            "Projektcontroller Umweltberatung": "personal_controlling",
+            "Business Partner SCO Controlling": "personal_controlling",
+            "Marketingmanager:in": "personal_commercial_analytics",
+            "Junior Marketing Manager": "personal_commercial_analytics",
+            "Risikomanagerin und Datenanalystin": "personal_pricing_risk",
+            "Insurance Risk & Actuarial Analyst": "personal_pricing_risk",
+            "Liquidity Risk Data Analyst": "personal_pricing_risk",
+            "Data Scientist, Computational Pathology": "personal_pathology",
+            "MSAT Data Scientist": "personal_msat",
+            "Data Analyst - Regulatory Reporting": "personal_regulatory_reporting",
+            "Fraud Detection Manager": "personal_fraud_management",
+            "AI Audit Specialist": "personal_audit",
+            "IT Auditor | Data Scientist": "personal_audit",
+            "Cloud FinOps Data Analyst": "personal_finops",
+            "Cloud Cost Analytics Engineer": "personal_finops",
+            "Wissenschaftliche*r Mitarbeiter*in Data Science": "academic_role",
+            "Wissenschaftliche:r Mitarbeiter:in Data Science": "academic_role",
+            "Wissenschaftliche(r) Mitarbeiter(in) Data Science": "academic_role",
             "Inhouse Consultant SAP Business Analytics": "personal_sap",
             "Consultant SAP Second-Level-Support": "personal_sap",
             "Senior Data Analyst – CRM": "personal_crm",
@@ -63,9 +95,7 @@ class TestFlagRelevance(unittest.TestCase):
             "Senior Data Scientist": "target",
             "Senior Data Engineer": "unmatched",
             "Staff ML Engineer": "unmatched",
-            "Lead Data Scientist": "target",
             "Head of Data Science": "target",
-            "Team Lead Marketing Analytics": "target",
             "Master Data Analyst": "target",
             "Data Scientist (Bachelor/Master)": "target",
             "Bachelor-Absolvent*in Data Scientist": "target",
@@ -86,8 +116,19 @@ class TestFlagRelevance(unittest.TestCase):
             "Senior Biostatistician": "target",
             "Data Scientist, Mathematical Modeling": "target",
             "Research Scientist, Drug Discovery": "unmatched",
-            "Data Analyst HR Controlling": "target",
             "Data Scientist, Finance": "target",
+            "Senior / Staff Data Scientist": "target",
+            "Data Scientist - Technical Leadership": "target",
+            "Data Scientist - Lead Optimization": "target",
+            "Data Analyst - Founder's Office": "target",
+            "Data Scientist - Market Data": "target",
+            "Data Analyst for B2B products": "target",
+            "Geospatial Data Analyst - GIS": "target",
+            "GIS Portfolio Expert (w/m/d) U.S. Market": "unmatched",
+            "Data Engineer - Audit Log Pipeline": "unmatched",
+            "Scientific Data Analyst": "target",
+            "Postgraduate Data Scientist": "target",
+            "Data Scientist - Manufacturing": "target",
         }
         for title, outcome in cases.items():
             with self.subTest(title=title):
@@ -95,6 +136,16 @@ class TestFlagRelevance(unittest.TestCase):
                 result = self.classify(title, company="SAP CRM Pricing Bioinformatics GmbH")
                 self.assertEqual(result.outcome, outcome)
                 self.assertFalse(any(name.startswith("personal_") for name in result.negative_matches))
+
+    def test_employer_opt_out_is_exact_and_manual_choices_win(self):
+        result = self.classify("Ihre Aufgaben", company="University Positions")
+        self.assertEqual(result.outcome, "excluded")
+        self.assertIn("personal_academic_employer", result.negative_matches)
+        for company in ("Berlin University", "University Positions Research GmbH", "Marketing Commerce Group"):
+            self.assertEqual(self.classify("Data Analyst", company=company).outcome, "target")
+        self.assertEqual(self.classify("Data Analyst", company="University Positions", manual_action="keep").outcome, "manual_keep")
+        for title in ("Lead Data Scientist", "MSAT Data Expert", "AI Audit Specialist", "Graduate Data Analyst"):
+            self.assertEqual(self.classify(title, manual_action="keep").outcome, "manual_keep")
 
     def test_preference_precedence_and_audit_evidence(self):
         title = "Principal Data Analyst SAP CRM"

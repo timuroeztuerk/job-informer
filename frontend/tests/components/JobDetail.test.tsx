@@ -5,8 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { archiveJob, restoreJob, setJobFavorite, setJobFlag } from "../../src/api";
 import JobDetail from "../../src/components/JobDetail";
 import type { Job, JobFlag } from "../../src/types";
-vi.mock("../../src/components/JobDescription", () => ({ default: () => null }));
-vi.mock("../../src/components/JobExtraction", () => ({ default: () => null }));
+vi.mock("../../src/components/JobDescription", () => ({ default: ({ jobId, history, children }: { jobId: string; history?: React.ReactNode; children?: React.ReactNode }) => <>{children ?? <p>Description for {jobId}</p>}<details><summary>Job & source history</summary>{history}</details></> }));
+vi.mock("../../src/components/JobExtraction", () => ({ default: ({ jobId }: { jobId: string }) => <p>Insights for {jobId}</p> }));
 
 vi.mock("../../src/api", () => ({
   archiveJob: vi.fn(),
@@ -36,7 +36,8 @@ describe("minimal job details", () => {
       postings: Array.from({ length: 15 }, (_, index) => ({ job_id: `linkedin:${index}`,
         location: `City ${index}, Germany`, url: `https://www.linkedin.com/jobs/view/${index}/` })) }}
       onArchiveChanged={vi.fn()} onFavoriteChanged={vi.fn()} />);
-    expect(screen.getByText("City 0, City 1 +13 more locations · LinkedIn")).toBeInTheDocument();
+    expect(screen.getByText("City 0, City 1 +13 more locations")).toBeInTheDocument();
+    await user.click(screen.getByText("Job & source history"));
     await user.click(screen.getByText("15 matching postings · All locations and links"));
     expect(screen.getByRole("link", { name: "City 14, Germany" })).toHaveAttribute("href", "https://www.linkedin.com/jobs/view/14/");
     expect(screen.getByText(/Review actions apply to all matching postings/)).toBeVisible();
@@ -86,6 +87,7 @@ describe("minimal job details", () => {
     vi.mocked(setJobFlag).mockRejectedValueOnce(new Error("Could not save flag"));
     render(<JobDetail job={{ ...job, is_flagged: true, flag_reason: "Old reason" }}
       onArchiveChanged={vi.fn()} onFavoriteChanged={vi.fn()} />);
+    await user.click(screen.getByText(/Flag reason/));
     const reason = screen.getByRole("textbox");
     await user.clear(reason);
     await user.paste("New reason");
@@ -101,16 +103,20 @@ describe("minimal job details", () => {
     vi.mocked(setJobFlag).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     const props = { onArchiveChanged: vi.fn(), onFavoriteChanged: vi.fn(), onFlagChanged: vi.fn() };
     const { rerender } = render(<JobDetail job={{ ...job, is_flagged: true, flag_reason: "Old reason" }} {...props} />);
+    await user.click(screen.getByText(/Flag reason/));
     await user.type(screen.getByRole("textbox"), " updated");
     await user.click(screen.getByRole("button", { name: "Save reason" }));
     rerender(<JobDetail job={{ ...job, job_id: "another", is_flagged: true, flag_reason: "Another reason" }} {...props} />);
     await act(async () => finish({ job_id: job.job_id, is_flagged: true, flag_reason: "Old reason updated", flagged_at: "2026-09-05T08:00:00Z" }));
+    expect(document.querySelector(".flag-note")).not.toHaveAttribute("open");
+    await user.click(screen.getByText(/Flag reason/));
     expect(screen.getByRole("textbox")).toHaveValue("Another reason");
     expect(screen.queryByText("Reason saved.")).not.toBeInTheDocument();
     expect(props.onFlagChanged).toHaveBeenCalledWith(expect.objectContaining({ job_id: job.job_id }));
   });
 
-  it("shows only useful posting context and clear sighting language", () => {
+  it("keeps tracking context in the bottom history section", async () => {
+    const user = userEvent.setup();
     const onArchiveChanged = vi.fn();
     const onFavoriteChanged = vi.fn();
     const { rerender } = render(
@@ -123,6 +129,8 @@ describe("minimal job details", () => {
 
     expect(screen.getByRole("heading", { name: "Data Scientist" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open LinkedIn" })).toHaveAttribute("href", job.url);
+    expect(screen.getByText(/First seen Jul 9/)).not.toBeVisible();
+    await user.click(screen.getByText("Job & source history"));
     expect(screen.getByText("First seen Jul 9, 2026 · Last seen Jul 12, 2026 · Repeated 3 times")).toBeInTheDocument();
     expect(screen.getByText("Kept as data science: data scientist")).toBeInTheDocument();
     expect(screen.queryByText("Personal notes")).not.toBeInTheDocument();
@@ -139,6 +147,26 @@ describe("minimal job details", () => {
 
     expect(screen.getByText(/Seen once$/)).toBeInTheDocument();
     expect(screen.queryByText(/Repeated 0 times/)).not.toBeInTheDocument();
+  });
+
+  it("opens on the description and loads insights on demand with keyboard-accessible tabs", async () => {
+    const user = userEvent.setup();
+    const props = { onArchiveChanged: vi.fn(), onFavoriteChanged: vi.fn() };
+    const { rerender } = render(<JobDetail job={job} {...props} />);
+    expect(screen.getByRole("tabpanel", { name: "Description" })).toHaveTextContent("Description for job/draft");
+    expect(screen.queryByText(/Insights for/)).not.toBeInTheDocument();
+    screen.getByRole("tab", { name: "Description" }).focus();
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "AI insights" })).toHaveFocus();
+    expect(screen.getByRole("tabpanel", { name: "AI insights" })).toHaveTextContent("Insights for job/draft");
+    expect(screen.queryByText(/Description for/)).not.toBeInTheDocument();
+    rerender(<JobDetail job={{ ...job, job_id: "another" }} {...props} />);
+    expect(screen.getByRole("tabpanel", { name: "AI insights" })).toHaveTextContent("Insights for another");
+    expect(screen.queryByText(/Insights for job\/draft/)).not.toBeInTheDocument();
+    await user.keyboard("{Home}");
+    expect(screen.getByRole("tabpanel", { name: "Description" })).toHaveTextContent("Description for another");
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.getByRole("tab", { name: "AI insights" })).toHaveFocus();
   });
 
   it("reports both archive and restore transitions", async () => {

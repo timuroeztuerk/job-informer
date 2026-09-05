@@ -33,7 +33,7 @@ type SortOption =
   | "title_asc"
   | "title_desc";
 
-const PAGE_SIZE = 5;
+const PAGE_SIZE = 10;
 const archiveFilterOptions: JobArchiveFilter[] = ["exclude", "only", "include"];
 const relevanceFilterOptions: { value: JobRelevanceFilter; label: string }[] = [
   { value: "unmatched", label: "Unmatched" },
@@ -97,24 +97,8 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
   const [reloadToken, setReloadToken] = useState(0);
   const lastQuerySignatureRef = useRef<string | null>(null);
   const advanceIfMissingRef = useRef(false);
-  const [filtersOpen, setFiltersOpen] = useState(
-    () =>
-      !!(
-        readTextParam("search") ||
-        readTextParam("location") ||
-        readTextParam("company") ||
-        readTextParam("role") ||
-        readTextParam("query_group") ||
-        readTextParam("relevance_outcome") ||
-        readTextParam("favorite") ||
-        readTextParam("flagged") ||
-        readTextParam("archived") ||
-        readTextParam("seen_since") ||
-        readTextParam("repeated") ||
-        readTextParam("from") ||
-        readTextParam("to")
-      )
-  );
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   const pageNumber = useMemo(() => Math.floor(offset / PAGE_SIZE) + 1, [offset]);
   const hasNext = useMemo(() => offset + PAGE_SIZE < total, [offset, total]);
@@ -160,6 +144,10 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
     dateTo,
     sort,
   ]);
+
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = 0;
+  }, [querySignature]);
 
   useEffect(() => {
     replaceSearchParams({
@@ -382,13 +370,12 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
   return (
     <section className="panel job-table">
       <div className="table-header">
-        <div>
-          <p className="label">Jobs</p>
-          <h3>
-            {loading && jobs.length === 0
-              ? "Loading jobs…"
-              : `${total ? total.toLocaleString() : "No"} ${recordLabel}`}
-          </h3>
+        <div className="job-list-heading">
+          <h3>Jobs</h3>
+          <span className="job-count" role="status" title={recordLabel}
+            aria-label={loading && jobs.length === 0 ? "Loading jobs…" : `${total.toLocaleString()} ${recordLabel}`}>
+            {loading && jobs.length === 0 ? "…" : total.toLocaleString()}
+          </span>
         </div>
         <label className="tiny sort-control">
           <span>Sort</span>
@@ -413,36 +400,51 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
         </label>
       </div>
 
-      <details
-        className="filter-menu"
-        open={filtersOpen}
-        onToggle={(event) => setFiltersOpen((event.currentTarget as HTMLDetailsElement).open)}
-      >
-        <summary className="filter-menu-toggle">
-          <div>
-            <p className="label">Filters</p>
-            <p className="muted tiny">
-              {activeFilterCount ? `${activeFilterCount} filter${activeFilterCount === 1 ? "" : "s"} applied` : "Search and narrow jobs"}
-            </p>
-          </div>
-          {activeFilterCount > 0 && <span className="filter-menu-badge">{activeFilterCount} active</span>}
-          <span className="filter-menu-action">{filtersOpen ? "Close" : "Open filters"}</span>
-        </summary>
-        <div className="filter-panel">
-          <div className="filter-grid">
-          <label className="filter-field filter-field-wide">
-            <span>Search</span>
-            <input
-              type="search"
-              value={search}
-              className="input"
-              placeholder="Search title, company, or location"
-              onChange={(e) => {
-                setSearch(e.target.value);
+      <label className="job-search">
+        <span className="sr-only">Search</span>
+        <input
+          type="search"
+          value={search}
+          className="input"
+          placeholder="Search title, company, or location"
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setOffset(0);
+          }}
+        />
+      </label>
+      <div className="filter-menu">
+        <div className="job-filter-toolbar">
+          <button className="filter-menu-toggle" type="button" aria-expanded={filtersOpen}
+            aria-controls="job-filter-panel" title="Company, location, role & more"
+            onClick={() => setFiltersOpen((open) => !open)}>
+            <span>Filters{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""}</span>
+            <span aria-hidden="true">{filtersOpen ? "−" : "+"}</span>
+          </button>
+          <div className="job-quick-filters">
+            <label className="favorite-filter">
+              <input
+                type="checkbox" aria-label="Favorites only"
+                checked={favoritesOnly}
+                onChange={(event) => {
+                  setFavoritesOnly(event.target.checked);
+                  setOffset(0);
+                }}
+              />
+              <span>Favorites</span>
+            </label>
+            <label className="favorite-filter">
+              <input type="checkbox" aria-label="Flagged only" checked={flaggedOnly} onChange={(event) => {
+                setFlaggedOnly(event.target.checked);
                 setOffset(0);
-              }}
-            />
-          </label>
+              }} />
+              <span>Flagged</span>
+            </label>
+            {activeFilterCount > 0 && <button className="text-button" type="button" aria-label="Clear filters" onClick={clearFilters}>Clear</button>}
+          </div>
+        </div>
+        <div className="filter-panel" id="job-filter-panel" hidden={!filtersOpen}>
+          <div className="filter-grid">
           <label className="filter-field">
             <span>Job set</span>
             <select
@@ -476,24 +478,6 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
                 <option key={value} value={value}>{label}</option>
               ))}
             </select>
-          </label>
-          <label className="favorite-filter">
-            <input
-              type="checkbox"
-              checked={favoritesOnly}
-              onChange={(event) => {
-                setFavoritesOnly(event.target.checked);
-                setOffset(0);
-              }}
-            />
-            <span>Favorites only</span>
-          </label>
-          <label className="favorite-filter">
-            <input type="checkbox" checked={flaggedOnly} onChange={(event) => {
-              setFlaggedOnly(event.target.checked);
-              setOffset(0);
-            }} />
-            <span>Flagged only</span>
           </label>
           <label className="filter-field">
             <span>Location</span>
@@ -608,16 +592,25 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
           <div className="filter-actions">
             <span className="muted tiny">Results update automatically.</span>
             <div>
-              <button className="ghost sm" type="button" onClick={clearFilters} disabled={loading || activeFilterCount === 0}>
-                Clear filters
-              </button>
               <button className="filter-done" type="button" onClick={() => setFiltersOpen(false)}>
                 Done
               </button>
             </div>
           </div>
         </div>
-      </details>
+      </div>
+
+      {Boolean(company || location || roleFamily || queryGroup || relevanceFilter || dateFrom || dateTo || lastSeenFrom || repeatedOnly || effectiveArchiveFilter !== "exclude") && (
+        <p className="filter-scope muted small">{[
+          company && `Company: ${company}`, location && `Location: ${location}`,
+          roleFamily && `Role: ${formatLabel(roleFamily)}`,
+          queryGroup && `Found via: ${queryGroupOptions.find((item) => item.key === queryGroup)?.name || queryGroup}`,
+          relevanceFilter && formatLabel(relevanceFilter),
+          effectiveArchiveFilter !== "exclude" && (effectiveArchiveFilter === "only" ? "Archived jobs" : "Including archived"),
+          dateFrom && `From ${dateFrom.slice(0, 10)}`, dateTo && `To ${dateTo.slice(0, 10)}`,
+          lastSeenFrom && `Seen since ${lastSeenFrom.slice(0, 10)}`, repeatedOnly && "Seen more than once",
+        ].filter(Boolean).join(" · ")}</p>
+      )}
 
       {selectionError && (
         <div className="error">
@@ -630,7 +623,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
 
       {favoriteError && <div className="error" role="alert">{favoriteError}</div>}
 
-      <div className="table-card">
+      <div className="table-card" ref={listRef}>
         {error ? (
           <div className="error">
             {error}
@@ -642,7 +635,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
           <>
             {loading ? (
               <div className="skeletons">
-                {Array.from({ length: 5 }).map((_, idx) => (
+                {Array.from({ length: PAGE_SIZE }).map((_, idx) => (
                   <div key={idx} className="skeleton-row" />
                 ))}
               </div>
@@ -661,7 +654,6 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
                 {jobs.map((job) => {
                   const repeatCount = Math.max(0, (job.seen_count ?? 1) - 1);
                   const firstSeenAt = job.first_seen_at || job.scraped_at;
-                  const latestSeenAt = job.last_seen_at || job.scraped_at;
                   const salary = meaningfulSalary(job.salary);
                   return (
                     <article
@@ -675,33 +667,20 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
                         onClick={() => selectJob(job)}
                       >
                         <div className="title">{job.title}</div>
-                        <div className="meta">
-                          <span>{job.company}</span>
-                          <span>•</span>
-                          <span>{jobLocation(job)}</span>
+                        <div className="row-meta">
+                          <div className="meta">
+                            <span>{job.company}</span>{"\u00a0· "}
+                            <span>{jobLocation(job)}</span>
+                          </div>
+                          {firstSeenAt && <span className="row-first-seen">First seen {formatDate(firstSeenAt)}</span>}
                         </div>
-                        <div className="tags">
-                          <span className="tag">{job.source}</span>
-                          {(job.posting_count ?? 1) > 1 && <span className="tag soft">{job.posting_count} matching postings</span>}
-                          {job.is_flagged && <span className="tag flagged-tag">Flagged for review</span>}
-                          {job.role_family ? (
-                            <span className="tag soft">{formatLabel(job.role_family)}</span>
-                          ) : null}
-                          {job.archived_at ? (
-                            <span className="tag soft">Archived job · {formatDate(job.archived_at)}</span>
-                          ) : null}
-                          {job.archived_reason ? <span className="tag soft">Reason: {job.archived_reason}</span> : null}
-                          {repeatCount > 0 ? (
-                            <span className="tag soft recurrence-note">
-                              Repeated {repeatCount} {repeatCount === 1 ? "time" : "times"}
-                            </span>
-                          ) : null}
-                          {repeatCount > 0 && latestSeenAt ? (
-                            <span className="tag soft">Latest repeat {formatDate(latestSeenAt)}</span>
-                          ) : null}
-                          {salary ? <span className="tag soft">{salary}</span> : null}
-                          {firstSeenAt ? <span className="tag soft">First seen {formatDate(firstSeenAt)}</span> : null}
-                        </div>
+                        {(repeatCount > 0 || (job.posting_count ?? 1) > 1 || job.is_flagged || job.archived_at || salary) && <div className="row-context">
+                          {repeatCount > 0 && <span>Repeated {repeatCount} {repeatCount === 1 ? "time" : "times"}</span>}
+                          {(job.posting_count ?? 1) > 1 && <span>{job.posting_count} matching postings</span>}
+                          {job.is_flagged && <span className="row-flag">Flagged for review</span>}
+                          {job.archived_at && <span>Archived</span>}
+                          {salary && <span>{salary}</span>}
+                        </div>}
                       </button>
                       <button
                         className={`favorite-toggle ${job.is_favorite ? "is-favorite" : ""}`}
@@ -727,7 +706,7 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
         <button className="ghost" type="button" disabled={offset === 0 || loading} onClick={prevPage}>
           Prev
         </button>
-        <span className="label">Page {pageNumber}</span>
+        <span className="muted small">Page {pageNumber} of {Math.max(1, Math.ceil(total / PAGE_SIZE))}</span>
         <button className="ghost" type="button" disabled={!hasNext || loading} onClick={nextPage}>
           Next
         </button>

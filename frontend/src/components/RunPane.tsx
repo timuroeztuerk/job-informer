@@ -224,17 +224,14 @@ const RunPane = forwardRef<RunPaneHandle, RunPaneProps>(
       };
     }, []);
 
-    const wrapperClassName = ["panel", "run-pane", className].filter(Boolean).join(" ");
-    const statusText = status?.status === "succeeded" ? "complete" : status?.status;
+    const wrapperClassName = ["processing-row", "run-pane", className].filter(Boolean).join(" ");
+    const statusText = status?.status === "succeeded" ? null : status?.status;
 
     return (
       <section className={wrapperClassName} aria-label="LinkedIn collection">
-        <div className="collection-bar">
-          <div className="collection-copy">
-            <div className="collection-heading">
-              <p className="label">LinkedIn collection</p>
-              {statusText && <span className={`pill small ${status?.status}`}>{statusText}</span>}
-            </div>
+        <div className="processing-header">
+          <div className="processing-copy">
+            <h3>LinkedIn collection {statusText && <span className={`pill small ${status?.status}`}>{statusText}</span>}</h3>
             <p className="collection-summary" role="status" aria-live="polite">{runSummary(status)}</p>
             {isRunActive && (
               <p className="current-source">
@@ -244,7 +241,7 @@ const RunPane = forwardRef<RunPaneHandle, RunPaneProps>(
           </div>
           <button
             type="button"
-            className="primary"
+            className="ghost sm"
             disabled={isActionDisabled}
             onClick={() => void startCollection()}
           >
@@ -266,6 +263,8 @@ const RunPane = forwardRef<RunPaneHandle, RunPaneProps>(
         )}
 
         {status?.scope_comparison && (
+          <details className="processing-details">
+          <summary>Last collection details</summary>
           <div className="scope-comparison" aria-label="Country-wide and city search comparison">
             <div className="scope-comparison-heading">
               <p className="label">Country-wide vs retained cities</p>
@@ -297,9 +296,10 @@ const RunPane = forwardRef<RunPaneHandle, RunPaneProps>(
               {status.scope_comparison.countrywide_only_jobs} country-only · {status.scope_comparison.city_only_jobs} city-only
             </p>
           </div>
+          </details>
         )}
 
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" role="alert">{error}</div>}
       </section>
     );
   }

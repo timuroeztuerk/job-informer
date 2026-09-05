@@ -3,7 +3,32 @@ import { fetchJobExtraction } from "../api";
 import type { AIClaim, AIEvidence, AIJobResult } from "../types";
 
 const label = (value: string) => value.replace(/_/g, " ");
-const claimText = (claim: AIClaim) => claim.canonical_term || claim.term || claim.value || claim.language || claim.wording || claim.explanation || claim.code || "";
+const claimText = (claim: AIClaim) => claim.canonical_term || claim.term || claim.qualification || claim.value || claim.language || claim.wording || claim.explanation || claim.code || "";
+
+function experienceText(item: AIClaim): string | null {
+  const years = item.years;
+  if (!years) return null;
+  if (years.kind === "minimum") return `At least ${years.lower} years`;
+  if (years.kind === "maximum") return `At most ${years.upper} years`;
+  if (years.kind === "exact") return `Exactly ${years.lower} years`;
+  if (years.kind === "ambiguous_minimum") return `Minimum threshold stated as ${years.lower}–${years.upper} years; ambiguous`;
+  return `Target range ${years.lower}–${years.upper} years; not an eligibility ceiling`;
+}
+
+function Alternatives({ item, claims }: { item: AIClaim; claims: AIClaim[] }) {
+  if (!item.alternative_group) return null;
+  const peers = claims.filter((other) => other !== item && other.alternative_group === item.alternative_group);
+  const together = peers.filter((other) => item.alternative_option && other.alternative_option === item.alternative_option);
+  const options = new Map<string, string[]>();
+  peers.filter((other) => !together.includes(other)).forEach((other, index) => {
+    const key = other.alternative_option || String(index);
+    options.set(key, [...(options.get(key) || []), claimText(other)]);
+  });
+  return <>
+    {together.length > 0 && <span className="muted small">Together with: {together.map(claimText).join(" + ")}</span>}
+    <span className="muted small">Alternative to: {[...options.values()].map((terms) => terms.join(" + ")).join(" OR ") || "another stated option"}</span>
+  </>;
+}
 
 function Evidence({ items, sources }: { items: AIEvidence[]; sources: Record<string, string> }) {
   return <details className="extraction-evidence"><summary>Show evidence</summary>{items.map((item, i) => {
@@ -39,7 +64,8 @@ const JobExtraction: React.FC<{ jobId: string; refreshToken?: number }> = ({ job
   const fields = saved?.fields;
   const sources = result?.input?.sources || {};
   const groups: Array<[string, AIClaim[]]> = fields ? [
-    ["requirements", fields.requirements], ["languages", fields.languages], ["experience", fields.experience],
+    ["requirements", fields.requirements], ...(fields.education ? [["education", fields.education] as [string, AIClaim[]]] : []),
+    ["languages", fields.languages], ["experience", fields.experience],
     ["work_arrangement", fields.work_arrangement], ["responsibilities", fields.responsibilities],
     ["seniority", fields.seniority], ["employment_type", fields.employment_type],
   ] : [];
@@ -51,24 +77,28 @@ const JobExtraction: React.FC<{ jobId: string; refreshToken?: number }> = ({ job
     {result?.error && <p className="description-notice">{result.error}</p>}
     {Boolean(result?.rejected) && <details className="extraction-group"><summary>Output needing review · Not accepted</summary><pre className="extraction-draft">{JSON.stringify(result!.rejected, null, 2)}</pre></details>}
     {result?.stale && <p className="description-notice">This result uses an earlier source or extraction version. Its original evidence remains available.</p>}
-    {result && !saved && <p className="muted small">No new AI result yet. Use the extraction controls above to process saved jobs.</p>}
+    {result && !saved && <p className="muted small">No new AI result yet. Use Extract AI above to analyze this job’s saved description.</p>}
     {saved && fields && <>
       <p className="muted small">Structure and source quotes checked · Not yet reviewed for accuracy</p>
-      <p className="muted tiny">{new Date(saved.extracted_at).toLocaleString()} · {saved.metadata.model} · {saved.contract.reasoning} · {saved.metadata.service_tier}</p>
-      <p className="muted small">Source posting: {sources.title} · {sources.location}</p>
+      {!fields.education && <p className="muted small">This earlier extraction has no dedicated education field.</p>}
+      <details className="extraction-provenance"><summary>About this extraction</summary>
+        <p className="muted tiny">{new Date(saved.extracted_at).toLocaleString()} · {saved.metadata.model} · {saved.contract.reasoning} · {saved.metadata.service_tier}</p>
+        <p className="muted small">Source posting: {sources.title} · {sources.location}</p>
+      </details>
       {result?.input?.source_quality === "legacy_completeness_unknown" && <p className="description-notice">Based on earlier saved text; its completeness is unknown.</p>}
       {fields.description_languages.length > 0 && <details className="extraction-group"><summary>Description language · <span className="language-code">{fields.description_language}</span></summary>
         {fields.description_languages.map((item) => <div key={item.code}><strong>{item.code}</strong><Evidence items={item.evidence} sources={sources} /></div>)}
       </details>}
       {fields.conflicts.length > 0 && <div className="description-notice"><strong>Conflicting information</strong>{fields.conflicts.map((item, i) => <div key={i}><p>{label(item.field || "")}: {item.explanation}</p><Evidence items={item.evidence} sources={sources} /></div>)}</div>}
-      {groups.map(([name, claims]) => <details className="extraction-group" key={name} open={name === "requirements" && claims.length > 0}>
+      {groups.map(([name, claims]) => <details className="extraction-group" key={name}>
         <summary>{name === "languages" ? "Candidate language requirements" : label(name)} <span className="muted small">· {claims.length || label(fields.states[name] || "not stated")}</span></summary>
         {claims.map((item, i) => <div className="extraction-claim" key={i}><strong>{claimText(item)}</strong>
           <span className="muted small">{[item.strength && label(item.strength), item.proficiency, item.cefr, item.scope,
-            item.office_attendance, item.geographic_restrictions,
+            item.mode && label(item.mode), item.level && label(item.level), item.fields_of_study?.join(" / "),
+            item.condition && `Applies: ${item.condition}`, item.office_attendance, item.geographic_restrictions, experienceText(item),
             item.minimum_years != null ? `Minimum ${item.minimum_years} years` : null,
             item.maximum_years != null ? `Maximum ${item.maximum_years} years` : null].filter(Boolean).join(" · ")}</span>
-          {item.alternative_group && <span className="muted small">Alternative to: {claims.filter((other) => other !== item && other.alternative_group === item.alternative_group).map(claimText).join(" / ") || "another stated option"}</span>}
+          <Alternatives item={item} claims={claims} />
           <Evidence items={item.evidence} sources={sources} />
         </div>)}
         {!claims.length && <p className="muted small">{fields.states[name] === "not_assessable" ? "The saved text is insufficient to assess this field." : "No supported information found. This does not mean there is no requirement."}</p>}

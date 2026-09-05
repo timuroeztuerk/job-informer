@@ -14,7 +14,7 @@ from .filtering import (
 )
 
 
-RULESET_VERSION = "2026-09-05.2"
+RULESET_VERSION = "2026-09-05.3"
 VALID_RELEVANCE_MODES = {"shadow", "enforce"}
 
 CONSULTING_TITLE_PATTERN = (
@@ -140,8 +140,11 @@ ADJACENT_TECHNICAL_RULES: tuple[RelevanceRule, ...] = (
 
 
 # Reviewed personal preferences from the September 5 flagged examples. These
-# match titles only, override target/adjacent signals, and never read flag text
+# match titles, override target/adjacent signals, and never read flag text
 # at runtime. Adding a flag does not silently create a new blacklist rule.
+# The one exact employer opt-out below was explicitly requested in a flag note.
+PERSONAL_EXCLUDED_COMPANIES = {"university positions"}
+
 PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
     RelevanceRule("personal_sap", "SAP-focused roles", (r"\bsap\b",)),
     RelevanceRule(
@@ -167,8 +170,8 @@ PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
         (
             r"\bpricing\b",
             r"\brisk[\s/&,-]+(?:analyst\w*|analytics|analysis|modeller\w*|modeling|modelling|management|manager|consulting|performance)\b",
-            r"\b(?:credit|market|investment|financial|quant(?:itative)?)[\s/-]+risk\b",
-            r"\b(?:preisanalys|risikoanalys|risikomodell|risikomanagement)\w*\b",
+            r"\b(?:credit|market|investment|financial|insurance|liquidity|quant(?:itative)?)[\s/-]+risk\b",
+            r"\b(?:preisanalys|risikoanalys|risikomodell|risikomanag)\w*\b",
         ),
     ),
     RelevanceRule(
@@ -195,6 +198,43 @@ PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
         "personal_hot_forming_science", "hot-forming scientist roles",
         (r"^(?:(?:senior|lead|junior)[\s/-]+)?scientist\b.*\bhot[\s/-]+forming\b",),
     ),
+    RelevanceRule(
+        "personal_lead_founding", "lead or founding roles",
+        (
+            r"\b(?:lead|founding)[\s/-]+(?:data|quant\w*|research\w*|ai|ml|machine|analytics|business|software|product|engineer\w*)\b",
+            r"\b(?:team|tech|technical|chapter|practice|project|engineering|analytics|data[\s/-]+science)[\s/-]+lead\b",
+            r"\bleitend\w*(?:\([a-z]+\))?[\s/-]+mitarbeiter\w*\b",
+        ),
+    ),
+    RelevanceRule("personal_graduate", "graduate roles", (r"\bgraduate[\s/-]+(?:data|quant\w*|research\w*|analyst\w*|scientist\w*|engineer\w*|consultant\w*)\b",)),
+    RelevanceRule(
+        "personal_commercial_analytics", "commerce, marketing or B2B analytics roles",
+        (
+            r"\b(?:e[\s-]?commerce|commerce)\b",
+            r"\b(?:online|digital|performance)?marketing\w*\b",
+            r"\bb2b[\s/-]+(?:analytics|analysis|analyst\w*)\b",
+        ),
+    ),
+    RelevanceRule("personal_controlling", "controller or controlling roles", (r"\b\w*(?:controller|controlling)\w*\b",)),
+    RelevanceRule("personal_pathology", "pathology roles", (r"\bpatholog\w*\b",)),
+    RelevanceRule("personal_msat", "manufacturing science and technology (MSAT) roles", (r"\bmsat\b",)),
+    RelevanceRule(
+        "personal_regulatory_reporting", "bank or regulatory reporting roles",
+        (r"\bbanksteuer\w*\b", r"\b(?:regulatory|prudential|risk|aufsichtsrechtlich\w*)[\s/-]+reporting\b"),
+    ),
+    RelevanceRule(
+        "personal_fraud_management", "fraud management roles",
+        (r"\bfraud[\s/-]+(?:(?:detection|prevention)[\s/-]+)?(?:manager\w*|management|officer\w*|specialist\w*)\b",),
+    ),
+    RelevanceRule(
+        "personal_audit", "audit and revision roles",
+        (
+            r"\baudit(?:ing)?[\s/-]+(?:specialist\w*|manager\w*|analyst\w*|consultant\w*)\b",
+            r"\b(?:internal|it|ai|technical)[\s/-]+audit(?:ing)?\b",
+            r"\b(?:auditor\w*|revisor\w*)\b",
+        ),
+    ),
+    RelevanceRule("personal_finops", "FinOps and cloud cost roles", (r"\bfinops\b", r"\bcloud[\s/-]+(?:cost|kosten)\w*\b")),
 )
 
 
@@ -466,6 +506,12 @@ def classify_relevance(
         return RelevanceResult("manual_keep", None, "manual", "Kept by manual override")
     if manual_action == "archive":
         return RelevanceResult("manual_archive", None, "manual", "Archived by manual override")
+
+    if normalize_text(company) in PERSONAL_EXCLUDED_COMPANIES:
+        return RelevanceResult(
+            "excluded", None, company, f"Excluded by reviewed employer preference: {company}",
+            matches=("personal_academic_employer",), negative_matches=("personal_academic_employer",),
+        )
 
     normalized = normalize_text(title)
     keyword = match_keyword_filter(title, unwanted_keywords or [])

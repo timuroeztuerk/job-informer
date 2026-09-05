@@ -8,7 +8,7 @@ import type { AIJobResult, AIQueueState } from "../../src/types";
 
 vi.mock("../../src/api", () => ({ fetchAIQueue: vi.fn(), fetchJobExtraction: vi.fn(), queueAI: vi.fn(), controlAIQueue: vi.fn() }));
 
-const queue: AIQueueState = { configured: true, paused: false, reason: null, cooldown_until: 0, pilot_limit: 10,
+const queue: AIQueueState = { batch_size: 100, configured: true, paused: false, reason: null, cooldown_until: 0,
   estimated_cost_usd: 0, counts: {}, jobs: [], usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 },
   model: "gpt-5.4-mini", reasoning: "medium", service_tier: "flex" };
 const empty: AIJobResult = { job_id: "linkedin:123", status: null, error: null, stale: false,
@@ -22,7 +22,7 @@ const saved: AIJobResult = { ...empty, status: "succeeded", input: { source_qual
     metadata: { model: "gpt-5.4-mini", service_tier: "flex", latency_ms: 100, usage: {} },
     validation: { schema: true, evidence: true, human_reviewed: false } } };
 
-describe("AI extraction pilot", () => {
+describe("AI extraction", () => {
   beforeEach(() => {
     vi.mocked(fetchAIQueue).mockReset().mockResolvedValue(queue);
     vi.mocked(queueAI).mockReset().mockResolvedValue({ ...queue, added: 10, counts: { queued: 10 }, paused: true });
@@ -30,15 +30,47 @@ describe("AI extraction pilot", () => {
     vi.mocked(fetchJobExtraction).mockReset().mockResolvedValue(empty);
   });
 
-  it("starts only explicitly and displays the fixed pilot limit", async () => {
+  it("offers the next batch of 100 jobs and starts only explicitly", async () => {
     const user = userEvent.setup();
-    render(<ExtractionQueue onChanged={vi.fn()} />);
-    expect(await screen.findByRole("button", { name: "Extract first 10 jobs" })).toBeEnabled();
+    const onActivityChange = vi.fn();
+    render(<ExtractionQueue onChanged={vi.fn()} onActivityChange={onActivityChange} />);
+    expect(await screen.findByRole("button", { name: "Extract next 100" })).toBeEnabled();
     expect(queueAI).not.toHaveBeenCalled();
-    expect(screen.getByText(/same 10 jobs/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Extract first 10 jobs" }));
+    expect(screen.getByText(/Each click queues up to 100/)).not.toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Extract next 100" }));
     expect(queueAI).toHaveBeenCalledOnce();
     expect(queueAI).toHaveBeenCalledWith(false);
+    expect(onActivityChange).toHaveBeenCalledWith("AI paused");
+  });
+
+  it("keeps pause and resume visible while recent jobs, retries and usage are optional", async () => {
+    const user = userEvent.setup();
+    let current: AIQueueState = { ...queue, counts: { succeeded: 2, running: 1, queued: 4, failed: 1 },
+      jobs: [{ job_id: "linkedin:123", title: "Data Scientist", company: "Acme", status: "succeeded" }],
+      usage: { input_tokens: 1000, output_tokens: 2000, reasoning_tokens: 1500, cached_tokens: 0 }, estimated_cost_usd: 0.005 };
+    vi.mocked(fetchAIQueue).mockImplementation(async () => current);
+    vi.mocked(controlAIQueue).mockImplementation(async (action) => {
+      current = { ...current, paused: action === "pause", reason: "Paused by you." };
+      return current;
+    });
+    render(<ExtractionQueue onChanged={vi.fn()} />);
+    expect(await screen.findByRole("button", { name: "Pause AI extraction" })).toBeVisible();
+    expect(screen.getByText("2 ready · 1 processing · 4 queued · 1 need attention")).toBeVisible();
+    expect(screen.getByText("Data Scientist")).not.toBeVisible();
+    expect(screen.getByText("Estimated cost")).not.toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Pause AI extraction" }));
+    expect(await screen.findByRole("button", { name: "Resume AI extraction" })).toBeVisible();
+    expect(screen.getByText("Paused by you.")).toBeVisible();
+    expect(screen.getByText("Retry next 100 failed")).not.toBeVisible();
+    await user.click(screen.getByText("Results & options"));
+    expect(screen.getByRole("link", { name: "Data Scientist" })).toHaveAttribute("href", "/?view=dashboard&job=linkedin%3A123");
+    expect(screen.getByText("$0.0050")).toBeVisible();
+    expect(screen.getByText(/Reasoning is included in output tokens/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Retry next 100 failed" }));
+    expect(queueAI).toHaveBeenCalledWith(true);
+    await user.click(screen.getByText("Results & options"));
+    await user.click(screen.getByRole("button", { name: "Resume AI extraction" }));
+    expect(controlAIQueue).toHaveBeenLastCalledWith("resume");
   });
 
   it("distinguishes document language from requirements and renders evidence as text", async () => {
@@ -47,6 +79,7 @@ describe("AI extraction pilot", () => {
     const { container } = render(<JobExtraction jobId="linkedin:123" />);
     expect(await screen.findByText("de/en")).toBeInTheDocument();
     expect(screen.getByText(/Candidate language requirements/)).toBeInTheDocument();
+    await user.click(screen.getByText("requirements"));
     await user.click(screen.getByText("Show evidence"));
     expect(container.querySelector("mark")).toHaveTextContent("Python");
     expect(container.querySelector("blockquote")).toHaveTextContent("<img src=x>");
@@ -63,6 +96,35 @@ describe("AI extraction pilot", () => {
     await user.click(screen.getByText("Earlier AI results · Unvalidated"));
     expect(screen.getByText("A saved summary")).toBeVisible();
     expect(screen.getByText(/no individual source quotations/)).toBeVisible();
+  });
+
+  it("shows education, conditional thresholds, remote possibility and compound alternatives accurately", async () => {
+    const result = structuredClone(saved);
+    const fields = result.saved!.fields;
+    result.saved!.contract.schema_version = "2";
+    fields.education = [{ qualification: "Bachelor’s degree", level: "bachelor", fields_of_study: ["Computer Science"], strength: "required", evidence: [] }];
+    fields.experience = [
+      { wording: "At least 1–2 years", years: { kind: "ambiguous_minimum", lower: 1, upper: 2 }, condition: "for India", evidence: [] },
+      { wording: "Ideally 2–4 years", years: { kind: "target_range", lower: 2, upper: 4 }, strength: "preferred", evidence: [] },
+      { wording: "5+ years", years: { kind: "minimum", lower: 5, upper: null }, evidence: [] },
+    ];
+    fields.work_arrangement = [{ wording: "Mobile working", mode: "remote_possible", evidence: [] }];
+    fields.requirements = [
+      { term: "Palantir", alternative_group: "tools", alternative_option: "A", evidence: [] },
+      { term: "MSS", alternative_group: "tools", alternative_option: "A", evidence: [] },
+      { term: "Onebrief", alternative_group: "tools", alternative_option: "B", evidence: [] },
+    ];
+    vi.mocked(fetchJobExtraction).mockResolvedValue(result);
+    render(<JobExtraction jobId="linkedin:123" />);
+    expect(await screen.findByText("Bachelor’s degree")).toBeInTheDocument();
+    expect(screen.getByText(/Minimum threshold stated as 1–2 years; ambiguous/)).toHaveTextContent("Applies: for India");
+    expect(screen.getByText(/Target range 2–4 years; not an eligibility ceiling/)).toBeInTheDocument();
+    expect(screen.getByText("At least 5 years")).toBeInTheDocument();
+    expect(screen.queryByText(/Maximum [24] years/)).not.toBeInTheDocument();
+    expect(screen.getByText("remote possible")).toBeInTheDocument();
+    expect(screen.getByText("Together with: MSS")).toBeInTheDocument();
+    expect(screen.getByText("Alternative to: Palantir + MSS")).toBeInTheDocument();
+    expect(screen.queryByText(/no dedicated education/)).not.toBeInTheDocument();
   });
 
   it("does not display an old job response after selection changes", async () => {

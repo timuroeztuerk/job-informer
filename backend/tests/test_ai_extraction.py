@@ -1,4 +1,4 @@
-"""Output, source continuity, pilot isolation, and async queue behavior; no paid evals."""
+"""Output, source continuity, job selection, and async queue behavior; no paid evals."""
 
 import asyncio
 import json
@@ -15,8 +15,8 @@ from pydantic import ValidationError
 
 from backend import api
 from backend.src.ai import store as store_module
-from backend.src.ai.models import JobExtraction, validate_evidence
-from backend.src.ai.prompt import encode
+from backend.src.ai.models import EducationRequirement, ExperienceYears, JobExtraction, Requirement, validate_evidence
+from backend.src.ai.prompt import contract, encode
 from backend.src.ai.service import AIService
 from backend.src.ai.store import AIStore
 from backend.src.utils.database import JobDatabase
@@ -29,11 +29,12 @@ def fixture():
     return {"description_languages": [
         {"code": "de", "evidence": [{"source_ref": "description.1", "quote": "Du entwickelst mit Python"}]},
         {"code": "en", "evidence": [{"source_ref": "description.2", "quote": "We offer flexible working hours"}]},
-    ], "states": {"requirements": "stated", "languages": "not_stated", "experience": "not_stated",
+    ], "states": {"requirements": "stated", "education": "not_stated", "languages": "not_stated", "experience": "not_stated",
                    "work_arrangement": "not_stated", "responsibilities": "not_stated", "seniority": "stated", "employment_type": "stated"},
-        "requirements": [{"term": "Python", "category": "programming_language", "strength": "mentioned", "alternative_group": None,
+        "requirements": [{"term": "Python", "category": "programming_language", "proficiency": None,
+                          "strength": "mentioned", "condition": None, "alternative_group": None, "alternative_option": None,
                           "evidence": [{"source_ref": "description.1", "quote": "Du entwickelst mit Python"}]}],
-        "languages": [], "experience": [], "work_arrangement": [], "responsibilities": [],
+        "education": [], "languages": [], "experience": [], "work_arrangement": [], "responsibilities": [],
         "seniority": [{"value": "Mid-Senior level", "evidence": [{"source_ref": "criteria.0", "quote": "Mid-Senior level"}]}],
         "employment_type": [{"value": "Full-time", "evidence": [{"source_ref": "criteria.1", "quote": "Full-time"}]}],
         "conflicts": []}
@@ -59,7 +60,49 @@ def response(payload=None, status="completed"):
     return SimpleNamespace(id="resp_test", _request_id="req_test", model="gpt-5.4-mini-2026-03-17", service_tier="flex",
                            status=status, usage=SimpleNamespace(input_tokens=100, output_tokens=200,
                            input_tokens_details=SimpleNamespace(cached_tokens=20), output_tokens_details=SimpleNamespace(reasoning_tokens=80)),
-                           output_parsed=JobExtraction.model_validate(payload or fixture()))
+                           output_text=encode(payload or fixture()))
+
+
+class TestExtractionContract(unittest.TestCase):
+    def test_experience_bounds_keep_thresholds_and_target_ranges_distinct(self):
+        for kind, lower, upper in [("minimum", 5, None), ("maximum", None, 3),
+                                   ("target_range", 2, 4), ("ambiguous_minimum", 1, 2), ("exact", 3, 3)]:
+            with self.subTest(kind=kind):
+                self.assertEqual(ExperienceYears(kind=kind, lower=lower, upper=upper).kind, kind)
+        for kind, lower, upper in [("minimum", 1, 2), ("maximum", 1, 2),
+                                   ("target_range", 4, 2), ("ambiguous_minimum", 1, None), ("exact", 1, 2)]:
+            with self.subTest(invalid=kind), self.assertRaises(ValidationError):
+                ExperienceYears(kind=kind, lower=lower, upper=upper)
+
+    def test_education_and_compound_options_preserve_conditions_and_strength(self):
+        context = {"strength": "required", "condition": "for India", "alternative_group": None,
+                   "alternative_option": None, "evidence": [{"source_ref": "description.1", "quote": "Bachelor's degree"}]}
+        education = EducationRequirement(**context, qualification="Bachelor's degree", level="bachelor", fields_of_study=["Computer Science"])
+        payload = fixture()
+        payload["education"] = [education.model_dump()]
+        payload["states"]["education"] = "stated"
+        parsed = JobExtraction.model_validate(payload)
+        self.assertEqual(parsed.education[0].condition, "for India")
+        self.assertEqual(parsed.education[0].strength, "required")
+        with self.assertRaises(ValidationError):
+            EducationRequirement(**{**context, "alternative_group": "degree"}, qualification="Degree", level="degree_unspecified", fields_of_study=[])
+        options = [Requirement(**{**context, "condition": None, "alternative_group": "tools", "alternative_option": option},
+                               term=term, category="tool", proficiency=None)
+                   for term, option in [("Palantir", "A"), ("MSS", "A"), ("Onebrief", "B")]]
+        self.assertEqual(options[0].alternative_option, options[1].alternative_option)
+        self.assertNotEqual(options[1].alternative_option, options[2].alternative_option)
+
+    def test_atomic_names_normalize_without_changing_evidence_or_applicability(self):
+        payload = fixture()
+        payload["requirements"] = [{**payload["requirements"][0], "term": "sql", "category": "tool",
+                                    "proficiency": "advanced", "condition": "for India",
+                                    "evidence": [{"source_ref": "description.1", "quote": "advanced SQL"}]}]
+        sources = {"description.1": "Du entwickelst mit Python; advanced SQL for India", "description.2": "We offer flexible working hours",
+                   "criteria.0": "Mid-Senior level", "criteria.1": "Full-time"}
+        item = validate_evidence(JobExtraction.model_validate(payload), sources)["requirements"][0]
+        self.assertEqual((item["canonical_term"], item["category"]), ("SQL", "programming_language"))
+        self.assertEqual((item["proficiency"], item["condition"]), ("advanced", "for India"))
+        self.assertEqual(item["evidence"][0]["quote"], "advanced SQL")
 
 
 class TestAIStore(unittest.TestCase):
@@ -70,18 +113,113 @@ class TestAIStore(unittest.TestCase):
         self.db = seed(self.path)
         self.store = AIStore(self.path)
 
-    def test_pilot_is_frozen_and_removing_limit_allows_remaining_jobs(self):
-        self.assertEqual(self.store.enqueue(), 10)
-        first = {item["job_id"] for item in self.store.status()["jobs"]}
+    def test_bulk_batches_advance_past_cached_queued_and_ineligible_jobs(self):
+        path = self.path.with_name("batches.db")
+        db = seed(path, count=205)
+        store = AIStore(path)
+        for job_id in ("linkedin:1000", "linkedin:1001"):
+            store.enqueue(job_id)
+        for work in store.claim(2):
+            store.finish(work, payload=fixture())
+        with store.connect() as conn:
+            conn.execute("DELETE FROM description_extractions WHERE source_id IN (SELECT source_id FROM description_sources WHERE job_id='linkedin:1002')")
+            conn.execute("UPDATE jobs SET is_favorite=1 WHERE job_id='linkedin:1204'")
+        db.archive_jobs(["linkedin:1003"], archived_reason="Not a fit")
+        self.assertEqual(store.enqueue(), 100)
+        with store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT job_id FROM ai_work WHERE status='queued' ORDER BY work_id LIMIT 1").fetchone()[0], "linkedin:1204")
+        self.assertEqual(store.enqueue(), 100)
+        self.assertEqual(store.enqueue(), 1)
+        self.assertEqual(store.enqueue(), 0)
+        self.assertEqual(store.status()["counts"], {"succeeded": 2, "queued": 201})
+        self.assertEqual(store.status()["batch_size"], 100)
+        with store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM ai_work WHERE job_id IN ('linkedin:1002','linkedin:1003')").fetchone()[0], 0)
+
+    def test_retry_is_limited_to_100_failed_jobs_per_click(self):
+        path = self.path.with_name("retries.db")
+        seed(path, count=102)
+        store = AIStore(path)
+        store.enqueue()
+        store.enqueue()
+        completed = store.claim(1)[0]
+        store.finish(completed, payload=fixture())
+        with store.connect() as conn:
+            conn.execute("UPDATE ai_work SET status='failed',attempts=5 WHERE status='queued'")
+        self.assertEqual(store.retry_failed(), 100)
+        self.assertEqual(store.status()["counts"], {"succeeded": 1, "queued": 100, "failed": 1})
+        self.assertEqual(store.retry_failed(), 1)
+        self.assertEqual(store.retry_failed(), 0)
+        self.assertEqual(store.status()["counts"], {"succeeded": 1, "queued": 101})
+
+    def test_bulk_queue_reuses_existing_results_and_ignores_legacy_pilot_state(self):
+        for index in range(10):
+            self.store.enqueue(f"linkedin:{1000+index}")
+        for work in self.store.claim(100):
+            self.store.finish(work, payload=fixture())
         with self.store.connect() as conn:
-            conn.execute("UPDATE jobs SET is_favorite=1 WHERE job_id='linkedin:1011'")
+            conn.execute("ALTER TABLE ai_queue_state ADD COLUMN pilot_job_ids TEXT")
+            conn.execute("UPDATE ai_queue_state SET pilot_job_ids=?", (encode([f"linkedin:{1000+i}" for i in range(10)]),))
+        self.store = AIStore(self.path)
+        self.assertEqual(self.store.status()["counts"], {"succeeded": 10})
+        self.assertEqual(self.store.enqueue(), 2)
         self.store.recover()
         self.assertEqual(self.store.enqueue(), 0)
-        self.assertEqual({item["job_id"] for item in self.store.status()["jobs"]}, first)
-        with patch.object(store_module, "PILOT_LIMIT", None):
-            self.assertEqual(self.store.enqueue(), 2)
         with self.store.connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM ai_work").fetchone()[0], 12)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM ai_attempts").fetchone()[0], 10)
+
+    def test_single_job_beyond_the_first_ten_does_not_queue_other_jobs(self):
+        self.assertEqual(self.store.enqueue("linkedin:1011"), 1)
+        self.assertEqual(self.store.enqueue("linkedin:1011"), 0)
+        self.assertEqual(self.store.status()["counts"], {"queued": 1})
+        self.assertEqual(len(self.store.status()["jobs"]), 1)
+        self.assertEqual(self.store.enqueue("linkedin:1000"), 1)
+        self.assertEqual(self.store.status()["counts"], {"queued": 2})
+
+    def test_bulk_skips_archives_and_explicit_extraction_preserves_manual_archive(self):
+        self.db.archive_jobs_with_filter_decisions([{"job_id": "linkedin:1000", "decision_source": "manual",
+            "decision_action": "archive", "filter_name": "manual_archive", "reason": "Not a fit"}])
+        self.assertEqual(self.store.enqueue(), 11)
+        self.assertIsNone(self.store.job_result("linkedin:1000")["status"])
+        self.assertEqual(self.store.enqueue("linkedin:1000"), 1)
+        for work in self.store.claim(100):
+            self.store.finish(work, payload=fixture())
+        self.assertEqual(self.db.get_manual_overrides()["linkedin:1000"], "archive")
+        with self.store.connect() as conn:
+            archived_at, outcome = conn.execute("SELECT archived_at,relevance_outcome FROM jobs WHERE job_id='linkedin:1000'").fetchone()
+        self.assertIsNotNone(archived_at)
+        self.assertEqual(outcome, "manual_archive")
+
+    def test_single_job_retry_leaves_other_failures_and_completed_results_alone(self):
+        self.store.enqueue("linkedin:1000")
+        self.store.enqueue("linkedin:1001")
+        for work in self.store.claim(2):
+            self.store.finish(work, error_kind="output", message="Try again")
+        self.assertEqual(self.store.enqueue("linkedin:1000"), 1)
+        self.assertEqual(self.store.job_result("linkedin:1001")["status"], "failed")
+        work = self.store.claim(1)[0]
+        self.store.finish(work, payload=fixture())
+        result = self.store.job_result("linkedin:1000")["saved"]
+        self.assertEqual(self.store.enqueue("linkedin:1000"), 0)
+        self.assertEqual(self.store.job_result("linkedin:1000")["saved"], result)
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM ai_attempts").fetchone()[0], 3)
+
+    def test_single_job_validates_saved_source_and_resolves_consolidated_members(self):
+        with self.assertRaises(LookupError):
+            self.store.enqueue("missing")
+        with self.store.connect() as conn:
+            conn.execute("DELETE FROM description_extractions WHERE source_id IN (SELECT source_id FROM description_sources WHERE job_id='linkedin:1009')")
+        with self.assertRaisesRegex(ValueError, "Save a usable description"):
+            self.store.enqueue("linkedin:1009")
+        self.assertEqual(self.store.status()["counts"], {})
+        self.store.enqueue("linkedin:1000")
+        with self.store.connect() as conn:
+            conn.execute("INSERT INTO job_consolidations VALUES ('linkedin:1011', 'linkedin:1000', 'description')")
+        self.store.enqueue("linkedin:1011")
+        with self.store.connect() as conn:
+            self.assertEqual({r[0] for r in conn.execute("SELECT DISTINCT job_id FROM ai_work")}, {"linkedin:1000"})
 
     def test_metadata_and_language_evidence_survive_and_metadata_changes_invalidate_cache(self):
         with self.store.connect() as conn:
@@ -95,6 +233,29 @@ class TestAIStore(unittest.TestCase):
         self.assertEqual(payload["description_language"], "de/en")
         evidence = payload["seniority"][0]["evidence"][0]
         self.assertEqual(before["input"]["sources"][evidence["source_ref"]][evidence["start"]:evidence["end"]], evidence["quote"])
+
+    def test_model_receives_paragraphs_in_reading_order_and_version_upgrade_preserves_old_result(self):
+        with self.store.connect() as conn:
+            data = json.loads(conn.execute("SELECT data_json FROM description_extractions LIMIT 1").fetchone()[0])
+            data["description_text"] = "\n".join(f"Paragraph {i}: original text and section context." for i in range(1, 13))
+            conn.execute("UPDATE description_extractions SET data_json=?", (encode(data),))
+        previous_contract = {**contract(), "schema_version": "1"}
+        with patch.object(store_module, "contract", return_value=previous_contract):
+            self.store.enqueue()
+            work = self.store.claim(1)[0]
+            old = fixture()
+            old.pop("education")
+            old["states"].pop("education")
+            self.store.finish(work, payload=old)
+        refs = [key for key in json.loads(work["input_json"])["sources"] if key.startswith("description.")]
+        self.assertEqual(refs, [f"description.{i}" for i in range(1, 13)])
+        self.assertEqual(self.store.enqueue(), 12)
+        self.assertEqual(self.store.status()["counts"], {"queued": 12})
+        result = self.store.job_result(work["job_id"])
+        self.assertTrue(result["stale"])
+        self.assertEqual(result["saved"]["contract"]["schema_version"], "1")
+        self.assertNotIn("education", result["saved"]["fields"])
+        self.assertEqual(result["status"], "queued")
 
     def test_rejects_invented_evidence_inconsistent_states_and_metadata_language_detection(self):
         with self.store.connect() as conn:
@@ -160,17 +321,32 @@ class TestAIService(unittest.IsolatedAsyncioTestCase):
         await self.service.close()
         self.tmp.cleanup()
 
-    async def test_pilot_runs_once_and_reports_usage_and_api_readback(self):
+    async def test_all_saved_jobs_run_only_on_request_and_report_usage_and_api_readback(self):
+        self.assertIsNone(self.service.task)
+        self.assertEqual((await self.service.status())["counts"], {})
         queued = await self.service.queue()
-        self.assertEqual(queued["added"], 10)
+        self.assertEqual(queued["added"], 12)
         await self.service.task
-        self.assertEqual((await self.service.status())["counts"], {"succeeded": 10})
+        self.assertEqual((await self.service.status())["counts"], {"succeeded": 12})
         with patch.object(api, "ai_service", self.service):
             result = await api.get_extraction("linkedin:1000", _=True)
         self.assertEqual(result["saved"]["fields"]["description_language"], "de/en")
         self.assertEqual((await self.service.queue())["added"], 0)
         await self.service.task
-        self.assertEqual((await self.service.status())["usage"]["output_tokens"], 2000)
+        self.assertEqual((await self.service.status())["usage"]["output_tokens"], 2400)
+
+    async def test_single_job_endpoint_respects_pause_and_processes_only_the_selected_job(self):
+        self.service.store.pause()
+        with patch.object(api, "ai_service", self.service):
+            result = await api.request_extraction("linkedin:1000", _=True)
+        await self.service.task
+        self.assertEqual(result["status"], "queued")
+        self.assertTrue(result["queue"]["paused"])
+        self.assertEqual((await self.service.status())["counts"], {"queued": 1})
+        await self.service.control("resume")
+        await self.service.task
+        self.assertEqual((await self.service.status())["counts"], {"succeeded": 1})
+        self.assertEqual((await self.service.status())["usage"]["output_tokens"], 200)
 
     async def test_capacity_retry_is_durable_and_applies_global_backoff(self):
         req = httpx.Request("POST", "https://api.openai.com/v1/responses")
@@ -189,7 +365,9 @@ class TestAIService(unittest.IsolatedAsyncioTestCase):
     async def test_incomplete_and_bad_quotes_are_not_published(self):
         for bad in (response(status="incomplete"), response()):
             if bad.status == "completed":
-                bad.output_parsed.requirements[0].evidence[0].quote = "Made up statement"
+                payload = json.loads(bad.output_text)
+                payload["requirements"][0]["evidence"][0]["quote"] = "Made up statement"
+                bad.output_text = encode(payload)
             async def invalid(work):
                 return bad
             self.service.requester = invalid
@@ -211,6 +389,25 @@ class TestAIService(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.service.store.status()["paused"])
         self.assertEqual(self.service.store.status()["counts"]["interrupted"], 1)
 
+    async def test_rejected_business_output_retains_usage_and_full_draft(self):
+        payload = fixture()
+        payload["states"]["languages"] = "stated"
+        async def invalid(work):
+            return response(payload)
+        self.service.requester = invalid
+        self.service.store.enqueue()
+        work = self.service.store.claim(1)[0]
+        await self.service.process(work)
+        result = self.service.store.job_result(work["job_id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertIsNone(result["saved"])
+        self.assertEqual(result["rejected"]["output"], payload)
+        self.assertEqual(self.service.store.status()["usage"]["output_tokens"], 200)
+        with self.service.store.connect() as conn:
+            attempt = conn.execute("SELECT response_id,estimated_cost_usd FROM ai_attempts WHERE work_id=?", (work["work_id"],)).fetchone()
+        self.assertEqual(attempt[0], "resp_test")
+        self.assertGreater(attempt[1], 0)
+
     async def test_sdk_sends_medium_flex_pydantic_without_output_cap(self):
         self.service.requester = None
         bodies = []
@@ -228,6 +425,7 @@ class TestAIService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bodies[0]["service_tier"], "flex")
         self.assertNotIn("max_output_tokens", bodies[0])
         self.assertTrue(bodies[0]["text"]["format"]["strict"])
+        self.assertEqual(bodies[0]["text"]["format"]["schema"], JobExtraction.model_json_schema())
         self.assertEqual(self.service.store.job_result(work["job_id"])["status"], "succeeded")
 
     async def test_async_pool_has_100_request_ceiling(self):
@@ -247,11 +445,12 @@ class TestAIService(unittest.IsolatedAsyncioTestCase):
             running -= 1
             return response()
         self.service = AIService(path, requester=waiting)
-        with patch.object(store_module, "PILOT_LIMIT", None):
-            await self.service.queue()
+        await self.service.queue()
         await asyncio.wait_for(reached.wait(), timeout=10)
         self.assertEqual(peak, 100)
+        self.assertEqual((await self.service.queue())["added"], 1)
         self.assertEqual(self.service.store.claim(1), [])
         release.set()
         await asyncio.wait_for(self.service.task, timeout=10)
         self.assertEqual((await self.service.status())["counts"], {"succeeded": 101})
+        self.assertEqual(len((await self.service.status())["jobs"]), 20)

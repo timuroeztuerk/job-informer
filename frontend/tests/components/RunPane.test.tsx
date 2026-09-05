@@ -144,12 +144,17 @@ describe("RunPane actions", () => {
     expect(screen.queryByText("run-collection")).not.toBeInTheDocument();
   });
 
-  it("keeps the latest country-versus-city comparison visible", async () => {
+  it("keeps coverage details collapsed while the collection action stays visible", async () => {
+    const user = userEvent.setup();
     vi.mocked(listRuns).mockResolvedValue([comparedRun()]);
 
     render(<RunPane />);
 
-    expect(await screen.findByText("Country-wide vs retained cities")).toBeInTheDocument();
+    expect(await screen.findByText("Country-wide vs retained cities")).not.toBeVisible();
+    expect(screen.getByRole("button", { name: "Collect jobs" })).toBeVisible();
+    expect(screen.getByText("11 observed · 4 new · 2 filtered")).toBeVisible();
+    await user.click(screen.getByText("Last collection details"));
+    expect(screen.getByText("Country-wide vs retained cities")).toBeVisible();
     expect(screen.getByText("Germany + Switzerland")).toBeInTheDocument();
     expect(screen.getByText("Berlin + Stuttgart + Frankfurt + München")).toBeInTheDocument();
     expect(screen.getByText("7 unique jobs")).toBeInTheDocument();

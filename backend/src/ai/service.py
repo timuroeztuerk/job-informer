@@ -82,6 +82,13 @@ class AIService:
     async def status(self):
         return {**await self.db(self.store.status), "configured": self.configured}
 
+    async def queue_job(self, job_id):
+        if not self.configured:
+            raise ValueError("OPENAI_API_KEY is not configured on the backend.")
+        await self.db(self.store.enqueue, job_id)
+        self.start()
+        return await self.db(self.store.job_result, job_id)
+
     async def control(self, action):
         if action == "pause":
             await self.db(self.store.pause)
@@ -97,9 +104,11 @@ class AIService:
             return await self.requester(work)
         if self.client is None:
             self.client = openai.AsyncOpenAI(timeout=900.0, max_retries=0)
-        return await self.client.responses.parse(
+        return await self.client.responses.create(
             model=MODEL, reasoning={"effort": REASONING}, service_tier="flex", store=False,
-            instructions=PROMPT, input=work["input_json"], text_format=JobExtraction,
+            instructions=PROMPT, input=work["input_json"],
+            text={"format": {"type": "json_schema", "name": "JobExtraction", "strict": True,
+                             "schema": JobExtraction.model_json_schema()}},
             # No max_output_tokens: the user's requested uncapped application output.
         )
 
@@ -114,10 +123,13 @@ class AIService:
             metadata = response_metadata(response, time.monotonic()-start)
             if response.status != "completed":
                 raise OutputError("AI response was incomplete; no result was published.")
-            if response.output_parsed is None:
+            if not response.output_text:
                 raise OutputError("AI returned a refusal or no structured result; no result was published.")
-            draft = response.output_parsed.model_dump()
-            parsed = JobExtraction.model_validate(response.output_parsed)
+            # Capture usage and the draft before business validation. SDK auto-parsing
+            # raises first and otherwise loses both when a Pydantic validator rejects output.
+            draft = {"raw_text": response.output_text}
+            draft = json.loads(response.output_text)
+            parsed = JobExtraction.model_validate(draft)
             payload = validate_evidence(parsed, json.loads(work["input_json"])["sources"])
             await self.db(self.store.finish, work, payload=payload, metadata=metadata)
         except asyncio.CancelledError:

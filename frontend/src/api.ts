@@ -259,6 +259,12 @@ export async function fetchJobExtraction(jobId: string): Promise<import("./types
   return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/extraction`), { headers: authHeaders() }));
 }
 
+export async function requestJobExtraction(jobId: string): Promise<import("./types").AIJobResult> {
+  return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/extraction`), {
+    method: "POST", headers: authHeaders(),
+  }));
+}
+
 export async function requestDescription(jobId: string, refresh = false): Promise<JobDescriptionResponse> {
   return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/description`), {
     method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ refresh }),

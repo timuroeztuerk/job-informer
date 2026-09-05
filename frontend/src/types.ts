@@ -55,11 +55,11 @@ export interface JobFlag {
 }
 
 export interface AIQueueState {
+  batch_size: number;
   configured: boolean;
   paused: boolean;
   reason: string | null;
   cooldown_until: number;
-  pilot_limit: number | null;
   estimated_cost_usd: number;
   counts: Record<string, number>;
   jobs: Array<{ job_id: string; title: string; company: string; status: string | null }>;
@@ -83,12 +83,18 @@ export interface AIClaim {
   wording?: string;
   minimum_years?: number | null;
   maximum_years?: number | null;
+  years?: { kind: "minimum" | "maximum" | "target_range" | "ambiguous_minimum" | "exact"; lower: number | null; upper: number | null } | null;
+  qualification?: string;
+  level?: string;
+  fields_of_study?: string[];
+  condition?: string | null;
   scope?: string | null;
   mode?: string;
   office_attendance?: string | null;
   geographic_restrictions?: string | null;
   strength?: string;
   alternative_group?: string | null;
+  alternative_option?: string | null;
   field?: string;
   explanation?: string;
   code?: string;
@@ -110,6 +116,7 @@ export interface AIJobResult {
       description_languages: AIClaim[];
       states: Record<string, string>;
       requirements: AIClaim[];
+      education?: AIClaim[];
       languages: AIClaim[];
       experience: AIClaim[];
       work_arrangement: AIClaim[];

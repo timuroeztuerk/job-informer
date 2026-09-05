@@ -9,15 +9,12 @@ from ..utils.sqlite_connection import open_sqlite
 from ..utils.time_utils import utc_now_iso
 
 
-PILOT_LIMIT: int | None = None
-# BEGIN TEMPORARY PILOT — delete this block after reviewing the first 10 jobs.
-PILOT_LIMIT = 10
-# END TEMPORARY PILOT
+BATCH_SIZE = 100
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_queue_state (
     id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL DEFAULT 0,
-    reason TEXT, cooldown_until REAL NOT NULL DEFAULT 0, pilot_job_ids TEXT
+    reason TEXT, cooldown_until REAL NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO ai_queue_state(id) VALUES(1);
 CREATE TABLE IF NOT EXISTS ai_work (
@@ -88,29 +85,21 @@ class AIStore:
                 "fetched_at": row["fetched_at"], "input": input_data,
                 "fingerprint": digest({"input": input_data, "contract": contract()})}
 
-    def enqueue(self):
+    def enqueue(self, selected_job_id=None):
         added = 0
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            candidates = [r[0] for r in conn.execute("""SELECT j.job_id FROM review_jobs j
+            if selected_job_id is not None:
+                selected = conn.execute("SELECT canonical_job_id FROM job_memberships WHERE job_id=?", (selected_job_id,)).fetchone()
+                if selected is None:
+                    raise LookupError("Job not found.")
+                selected_job_id = selected[0]
+                if self.prepare(conn, selected_job_id) is None:
+                    raise ValueError("Save a usable description for this job before extracting AI information.")
+            candidates = [selected_job_id] if selected_job_id is not None else [r[0] for r in conn.execute("""SELECT j.job_id FROM review_jobs j
                 WHERE LOWER(j.source)='linkedin' AND (j.archived_at IS NULL OR j.is_favorite=1)
                   AND EXISTS (SELECT 1 FROM saved_job_descriptions s WHERE s.job_id=j.job_id)
                 ORDER BY j.is_favorite DESC, j.last_seen_at DESC, j.job_id""")]
-            state = conn.execute("SELECT pilot_job_ids FROM ai_queue_state WHERE id=1").fetchone()
-            if PILOT_LIMIT is not None:
-                if state[0] is None:
-                    # Freeze the cohort: repeated clicks/restarts never advance to the next ten.
-                    cohort = []
-                    for job_id in candidates:
-                        if self.prepare(conn, job_id):
-                            cohort.append(job_id)
-                        if len(cohort) >= PILOT_LIMIT:
-                            break
-                    candidates = cohort
-                    if candidates:
-                        conn.execute("UPDATE ai_queue_state SET pilot_job_ids=? WHERE id=1", (encode(candidates),))
-                else:
-                    candidates = json.loads(state[0])
             for job_id in candidates:
                 prepared = self.prepare(conn, job_id)
                 if prepared is None:
@@ -118,7 +107,17 @@ class AIStore:
                 added += conn.execute("""INSERT OR IGNORE INTO ai_work
                     (job_id,source_id,fingerprint,input_json,contract_json,status,requested_at)
                     VALUES (?,?,?,?,?,'queued',?)""", (job_id, prepared["source_id"], prepared["fingerprint"],
-                    encode(prepared["input"]), encode(contract()), utc_now_iso())).rowcount
+                    # Preserve paragraph order for the model; only fingerprint serialization sorts keys.
+                    json.dumps(prepared["input"], ensure_ascii=False, separators=(",", ":")),
+                    encode(contract()), utc_now_iso())).rowcount
+                if selected_job_id is not None:
+                    # An explicit single-job retry must not restart other failed or completed work.
+                    added += conn.execute("""UPDATE ai_work SET status='queued', attempts=0, next_attempt_at=0,
+                        finished_at=NULL, error_kind=NULL, error_message=NULL WHERE fingerprint=?
+                        AND status IN ('failed','interrupted')""", (prepared["fingerprint"],)).rowcount
+                # Count new work, not candidates: cached or queued jobs do not consume the batch.
+                if added >= BATCH_SIZE:
+                    break
         return added
 
     def recover(self):
@@ -140,7 +139,10 @@ class AIStore:
         with self.connect() as conn:
             # Attempt history stays immutable; this starts a new bounded retry cycle.
             return conn.execute("""UPDATE ai_work SET status='queued', attempts=0, next_attempt_at=0,
-                error_kind=NULL,error_message=NULL WHERE status IN ('failed','interrupted')""").rowcount
+                error_kind=NULL,error_message=NULL WHERE status IN ('failed','interrupted')
+                AND work_id IN (SELECT work_id FROM ai_work WHERE status IN ('failed','interrupted')
+                    AND work_id IN (SELECT MAX(work_id) FROM ai_work GROUP BY job_id)
+                    ORDER BY work_id LIMIT ?)""", (BATCH_SIZE,)).rowcount
 
     def claim(self, limit):
         with self.connect() as conn:
@@ -194,19 +196,20 @@ class AIStore:
 
     def status(self):
         with self.connect() as conn:
-            state = dict(conn.execute("SELECT * FROM ai_queue_state WHERE id=1").fetchone())
-            counts = dict(conn.execute("SELECT status,COUNT(*) FROM ai_work GROUP BY status"))
-            ids = json.loads(state.pop("pilot_job_ids") or "[]")
-            jobs = [dict(r) for r in conn.execute("""SELECT j.job_id,j.title,j.company,
-                (SELECT status FROM ai_work w WHERE w.job_id=j.job_id ORDER BY work_id DESC LIMIT 1) AS status
-                FROM jobs j WHERE j.job_id IN (SELECT value FROM json_each(?))""", (encode(ids),))]
+            state = dict(conn.execute("SELECT paused,reason,cooldown_until FROM ai_queue_state WHERE id=1").fetchone())
+            counts = dict(conn.execute("""SELECT status,COUNT(*) FROM ai_work
+                WHERE work_id IN (SELECT MAX(work_id) FROM ai_work GROUP BY job_id) GROUP BY status"""))
+            jobs = [dict(r) for r in conn.execute("""SELECT j.job_id,j.title,j.company,w.status
+                FROM ai_work w JOIN jobs j USING(job_id)
+                WHERE w.work_id IN (SELECT MAX(work_id) FROM ai_work GROUP BY job_id)
+                ORDER BY COALESCE(w.finished_at,w.requested_at) DESC,w.work_id DESC LIMIT 20""")]
             usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "reasoning_tokens": 0}
             cost = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM ai_attempts").fetchone()[0]
             for row in conn.execute("SELECT usage_json FROM ai_attempts WHERE usage_json IS NOT NULL"):
                 value = json.loads(row[0])
                 for key in usage:
                     usage[key] += int(value.get(key) or 0)
-        return {**state, "paused": bool(state["paused"]), "pilot_limit": PILOT_LIMIT, "jobs": jobs,
+        return {**state, "paused": bool(state["paused"]), "batch_size": BATCH_SIZE, "jobs": jobs,
                 "counts": counts, "usage": usage, "estimated_cost_usd": cost, "model": contract()["model"], "reasoning": "medium", "service_tier": "flex"}
 
     def job_result(self, job_id):

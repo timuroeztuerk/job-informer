@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchDbSummary, fetchJobs, setJobFavorite, setJobFlag, requestDescription, fetchDescription, reparseDescription, queueDescriptions, controlDescriptionQueue } from "../src/api";
+import { fetchDbSummary, fetchJobs, setJobFavorite, setJobFlag, requestDescription, fetchDescription, reparseDescription, queueDescriptions, controlDescriptionQueue, requestJobExtraction } from "../src/api";
 
 describe("API parameter serialization", () => {
   beforeEach(() => {
@@ -35,6 +35,17 @@ describe("API parameter serialization", () => {
     await queueDescriptions();
     expect(new URL(fetchSpy.mock.calls[5][0]).pathname).toBe("/descriptions/queue");
     expect(JSON.parse(fetchSpy.mock.calls[5][1].body)).toEqual({ selection: "all" });
+  });
+  it("requests AI extraction for only the encoded selected job", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", {
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    await requestJobExtraction("job/draft");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(new URL(url).pathname).toBe("/jobs/job%2Fdraft/extraction");
+    expect(request.method).toBe("POST");
   });
   it("serializes filters, date boundaries, pagination, and omitted empty values", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import JobDetail from "./components/JobDetail";
 import JobTable, { JobTableHandle } from "./components/JobTable";
 import RunPane from "./components/RunPane";
@@ -26,7 +26,8 @@ const App: React.FC = () => {
   const handleDescriptionQueueChanged = useCallback(() => setDescriptionRefreshToken((token) => token + 1), []);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<RunStatus | null>(null);
-  const [now, setNow] = useState(new Date());
+  const [descriptionActivity, setDescriptionActivity] = useState("");
+  const [extractionActivity, setExtractionActivity] = useState("");
   const tableRef = useRef<JobTableHandle | null>(null);
   const completedRunIdsRef = useRef(new Set<string>());
 
@@ -54,20 +55,14 @@ const App: React.FC = () => {
     };
 
     loadStats();
-    const nowTimer = window.setInterval(() => setNow(new Date()), 30000);
     const statsTimer = window.setInterval(loadStats, 30000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(nowTimer);
       window.clearInterval(statsTimer);
     };
   }, [dataRefreshToken]);
 
-  const formattedNow = useMemo(
-    () => new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(now),
-    [now]
-  );
   const freshness = stats?.collection_freshness;
   const formatCollectionAge = (ageDays?: number | null) => {
     if (ageDays === null || ageDays === undefined) return "unknown age";
@@ -119,10 +114,6 @@ const App: React.FC = () => {
       <header className="hero">
         <div className="hero-left">
           <h1>Job Informer</h1>
-          <div className="hero-meta">
-            <span className="eyebrow">{formattedNow}</span>
-            <p className="muted small">Collect LinkedIn jobs and review the local archive.</p>
-          </div>
         </div>
         <div className="hero-actions">
           <div
@@ -213,34 +204,40 @@ const App: React.FC = () => {
 
       <main className="layout" hidden={viewMode !== "dashboard"}>
         <div className="main">
-          <RunPane
-            onRunCompleted={handleRunCompleted}
-            onRunStatusChange={setActiveRun}
-          />
+          <details className="workspace-tools">
+            <summary>
+              <span>Collection & processing</span>
+              <span className="workspace-activity" role="status">{[
+                isCollectionRunning ? "Collecting jobs…" : activeRun?.status === "failed" || activeRun?.status === "interrupted" ? `Collection ${activeRun.status}` : "",
+                descriptionActivity, extractionActivity,
+              ].filter(Boolean).join(" · ") || "Collect jobs, fetch descriptions, run AI"}</span>
+            </summary>
+            <div className="workspace-tools-body">
+              <RunPane onRunCompleted={handleRunCompleted} onRunStatusChange={setActiveRun} />
+              <DescriptionQueue refreshToken={descriptionRefreshToken} onChanged={handleDescriptionQueueChanged} onActivityChange={setDescriptionActivity} />
+              <ExtractionQueue onChanged={handleDescriptionQueueChanged} onActivityChange={setExtractionActivity} />
+            </div>
+          </details>
           {viewMode === "dashboard" && (
-            <>
-              <DescriptionQueue refreshToken={descriptionRefreshToken} onChanged={handleDescriptionQueueChanged} />
-              <ExtractionQueue onChanged={handleDescriptionQueueChanged} />
-              <div className="jobs">
-                <JobTable
-                  ref={tableRef}
-                  onSelect={setSelectedJob}
-                  companies={stats?.companies_list || []}
-                  roleFamilies={stats?.role_families_list || []}
-                  queryGroups={stats?.query_groups_list || []}
-                  refreshToken={dataRefreshToken}
-                />
-                <JobDetail
-                  job={selectedJob}
-                  onArchiveChanged={handleArchiveChanged}
-                  onFavoriteChanged={handleFavoriteChanged}
-                  onFlagChanged={handleFlagChanged}
-                  onActionFeedback={setActionFeedback}
-                  descriptionRefreshToken={descriptionRefreshToken}
-                  onDescriptionQueueChanged={handleDescriptionQueueChanged}
-                />
-              </div>
-            </>
+            <div className="jobs">
+              <JobTable
+                ref={tableRef}
+                onSelect={setSelectedJob}
+                companies={stats?.companies_list || []}
+                roleFamilies={stats?.role_families_list || []}
+                queryGroups={stats?.query_groups_list || []}
+                refreshToken={dataRefreshToken}
+              />
+              <JobDetail
+                job={selectedJob}
+                onArchiveChanged={handleArchiveChanged}
+                onFavoriteChanged={handleFavoriteChanged}
+                onFlagChanged={handleFlagChanged}
+                onActionFeedback={setActionFeedback}
+                descriptionRefreshToken={descriptionRefreshToken}
+                onDescriptionQueueChanged={handleDescriptionQueueChanged}
+              />
+            </div>
           )}
         </div>
       </main>

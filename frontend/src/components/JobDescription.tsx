@@ -1,18 +1,30 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { fetchDescription, reparseDescription, requestDescription } from "../api";
 import type { JobDescriptionResponse } from "../types";
 
 const date = (value: string) => new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
-interface Props { jobId: string; refreshToken?: number; onQueueChanged?: () => void }
+interface Props {
+  jobId: string;
+  refreshToken?: number;
+  onQueueChanged?: () => void;
+  actionTarget?: HTMLElement | null;
+  criteriaTarget?: HTMLElement | null;
+  history?: React.ReactNode;
+  children?: React.ReactNode;
+  view?: string;
+}
 
-const JobDescription: React.FC<Props> = ({ jobId, refreshToken = 0, onQueueChanged }) => {
+const JobDescription: React.FC<Props> = ({ jobId, refreshToken = 0, onQueueChanged, actionTarget, criteriaTarget, history, children, view = "description" }) => {
   const [result, setResult] = useState<JobDescriptionResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const mounted = useRef(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = 0; }, [jobId, view]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     let cancelled = false;
@@ -54,30 +66,34 @@ const JobDescription: React.FC<Props> = ({ jobId, refreshToken = 0, onQueueChang
   const earlierCollection = saved?.source_kind === "legacy_text";
   const latest = result?.attempts[0];
   const pending = latest?.status === "queued" || latest?.status === "fetching";
-  return <section className="job-description" aria-labelledby="job-description-title">
-    <div className="description-heading"><h3 id="job-description-title">Original description</h3>
-      <button type="button" className="ghost sm" disabled={busy || loading || pending} onClick={() => void act()}>
-        {busy ? "Working…" : latest?.status === "fetching" ? "Fetching…" : latest?.status === "queued" ? "Queued" : saved ? "Refresh source" : latest?.error_kind ? "Retry description" : "Fetch description"}
-      </button>
-    </div>
+  const sourceAction = <button type="button" className="ghost sm source-button" disabled={busy || loading || pending} onClick={() => void act()}>
+    {busy ? "Working…" : latest?.status === "fetching" ? "Fetching…" : latest?.status === "queued" ? "Queued" : saved ? "Refresh source" : latest?.error_kind ? "Retry description" : "Fetch description"}
+  </button>;
+  const criteria = saved && saved.data.criteria.length > 0 && <dl className="description-criteria" aria-label="Listed job criteria">
+    {saved.data.criteria.map((item, index) => <div key={`${item.key}-${index}`} title={`${item.label}: ${item.value}`}>
+      <dt className="sr-only">{item.label}</dt><dd>{item.value}</dd>
+    </div>)}
+  </dl>;
+  return <section className="job-description" aria-label={view === "description" ? "Original description" : "AI insights and source history"}>
+    {actionTarget === undefined ? sourceAction : actionTarget && createPortal(sourceAction, actionTarget)}
+    {criteriaTarget === undefined ? criteria : criteriaTarget && createPortal(criteria, criteriaTarget)}
     {loading && <p className="muted small">Loading saved description…</p>}
     {error && <div className="description-error" role="alert"><p>{error}</p><button type="button" className="ghost sm" onClick={() => setReloadToken((token) => token + 1)}>Reload saved description</button></div>}
-    {pending && <p className="description-notice">{latest?.status === "fetching" ? "Retrieving the public LinkedIn posting…" : result?.queue.paused ? "Saved in the queue. Use Resume descriptions above to continue." : "Queued for retrieval. You can keep reviewing other jobs."}</p>}
+    {pending && <p className="description-notice">{latest?.status === "fetching" ? "Retrieving the public LinkedIn posting…" : result?.queue.paused ? "Saved in the queue. Open Collection & processing to resume descriptions." : "Queued for retrieval. You can keep reviewing other jobs."}</p>}
     {latest?.error_message && !pending && <p className="description-notice">{latest.error_message}{saved ? " Showing the last saved description." : ""}</p>}
     {!loading && !saved && !pending && <p className="muted small">Fetch the public posting to save its full description and listed job criteria for later analysis.</p>}
-    {saved && <>
-      <p className="muted small">{earlierCollection ? "Saved during an earlier collection" : "Saved"} · {date(saved.fetched_at)}{latest?.status === "unchanged" && latest.http_status ? " · Source unchanged" : ""}</p>
-      {earlierCollection && <p className="muted small">This saved text is ready to read. Refresh only to check the live posting.</p>}
-      {saved.data.criteria.length > 0 && <dl className="description-criteria" aria-label="Listed job criteria">{saved.data.criteria.map((item, index) => <div key={`${item.key}-${index}`}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>}
-      <div className="description-copy">{saved.data.description_text}</div>
-    </>}
-    {result && (result.source_versions > 0 || result.attempts.length > 0) && <details className="description-history">
-      <summary>Saved source & retrieval history</summary>
-      <p>{result.source_versions} saved source {result.source_versions === 1 ? "version" : "versions"}. Original source content is retained for future extraction.</p>
+    <div className="description-scroll" ref={scrollRef} role="region" aria-label={view === "description" ? "Description text and source history" : "AI insights and history"} tabIndex={0}>
+    {children ?? (saved && <div className="description-copy">{saved.data.description_text}</div>)}
+    {(history || (result && (result.source_versions > 0 || result.attempts.length > 0))) && <details className="description-history">
+      <summary>Job & source history</summary>
+      {history}
+      {result && <p>{result.source_versions} saved source {result.source_versions === 1 ? "version" : "versions"}. Original source content is retained for future extraction.</p>}
       {saved && <p>{earlierCollection ? `Earlier saved text connected on ${date(saved.extracted_at)}.` : `Parser ${saved.extractor_version} · Schema ${saved.schema_version} · Parsed ${date(saved.extracted_at)}`}</p>}
-      {result.reparse_available && <button type="button" className="ghost sm" disabled={busy || pending} onClick={() => void act(true)}>Reparse saved source</button>}
-      <ol>{result.attempts.map((attempt) => <li key={attempt.fetch_id}><strong>{attempt.status.replace(/_/g, " ")}</strong> · {date(attempt.finished_at || attempt.requested_at)}{attempt.http_status ? ` · HTTP ${attempt.http_status}` : ""}{attempt.error_message && <span>{attempt.error_message}</span>}</li>)}</ol>
+      {result?.reparse_available && <button type="button" className="ghost sm" disabled={busy || pending} onClick={() => void act(true)}>Reparse saved source</button>}
+      <ol>{result?.attempts.map((attempt) => <li key={attempt.fetch_id}><strong>{attempt.status.replace(/_/g, " ")}</strong> · {date(attempt.finished_at || attempt.requested_at)}{attempt.http_status ? ` · HTTP ${attempt.http_status}` : ""}{attempt.error_message && <span>{attempt.error_message}</span>}</li>)}</ol>
     </details>}
+    {saved && <p className="description-saved">Original description · {earlierCollection ? "Saved during an earlier collection" : "Saved"} · {date(saved.fetched_at)}{latest?.status === "unchanged" && latest.http_status ? " · Source unchanged" : ""}</p>}
+    </div>
   </section>;
 };
 

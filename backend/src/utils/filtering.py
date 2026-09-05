@@ -49,7 +49,7 @@ ACADEMIC_ROLE_PATTERNS = [
     r"\bscientific[\s/-]+employee\b",
     r"\bresearch fellow\b",
     r"\bdoktorand(?:in)?\b",
-    r"\bwissenschaftlich\w*\*?n?\s+mitarbeiter\w*\b",
+    r"\bwissenschaftlich\w*(?:[*/:_-][a-z]+|\([a-z]+\))?\s+mitarbeiter\w*\b",
     r"\bwiss\.?\s+(?:ma|mitarbeit\w*)\b",
     r"\bwissenschaftlich\w*\s+(?:position|postition)\w*\b",
     r"\bforschungsassistenz\w*\b",

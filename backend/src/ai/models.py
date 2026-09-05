@@ -18,21 +18,36 @@ Strength = Literal["required", "preferred", "mentioned", "not_required", "unclea
 State = Literal["stated", "not_stated", "conflicting", "not_assessable"]
 
 
-class Requirement(Structure):
-    term: str = Field(min_length=1)
-    category: Literal["skill", "tool", "programming_language"]
+class QualifiedClaim(Structure):
     strength: Strength
-    alternative_group: str | None = Field(description="Same non-null ID for alternatives, e.g. Python OR R.")
+    condition: str | None = Field(description="Explicit applicability condition, e.g. for India; null if unconditional.")
+    alternative_group: str | None = Field(description="Shared ID for an explicit OR choice; null otherwise.")
+    alternative_option: str | None = Field(description="Within an OR group, items in the same option are required together. Null without a group.")
     evidence: list[Evidence] = Field(min_length=1)
 
+    @model_validator(mode="after")
+    def paired_alternative(self):
+        if (self.alternative_group is None) != (self.alternative_option is None):
+            raise ValueError("An alternative needs both a group and an option.")
+        return self
 
-class LanguageRequirement(Structure):
-    language: str
+
+class Requirement(QualifiedClaim):
+    term: str = Field(min_length=1, description="Concise English name of ONE concept; retain product names. No proficiency adjectives or lists.")
+    category: Literal["skill", "tool", "programming_language", "certification", "clearance", "other"]
+    proficiency: str | None = Field(description="Explicit proficiency wording, kept out of the term.")
+
+
+class EducationRequirement(QualifiedClaim):
+    qualification: str = Field(min_length=1, description="Stated qualification, in the source language; one alternative per item.")
+    level: Literal["vocational", "bachelor", "master", "doctorate", "degree_unspecified", "other"]
+    fields_of_study: list[str] = Field(description="Explicitly acceptable disciplines; [] when unspecified. Do not infer a degree level from Studium.")
+
+
+class LanguageRequirement(QualifiedClaim):
+    language: str = Field(description="English language name, e.g. German or Japanese; proficiency and evidence retain source wording.")
     proficiency: str | None
     cefr: Literal["A1", "A2", "B1", "B2", "C1", "C2"] | None
-    strength: Strength
-    alternative_group: str | None
-    evidence: list[Evidence] = Field(min_length=1)
 
 
 class DescriptionLanguage(Structure):
@@ -40,26 +55,37 @@ class DescriptionLanguage(Structure):
     evidence: list[Evidence] = Field(min_length=1)
 
 
-class ExperienceRequirement(Structure):
-    wording: str
-    minimum_years: float | None = Field(ge=0)
-    maximum_years: float | None = Field(ge=0)
-    scope: str | None
-    strength: Strength
-    evidence: list[Evidence] = Field(min_length=1)
+class ExperienceYears(Structure):
+    kind: Literal["minimum", "maximum", "target_range", "ambiguous_minimum", "exact"]
+    lower: float | None = Field(ge=0)
+    upper: float | None = Field(ge=0)
 
     @model_validator(mode="after")
     def ordered_range(self):
-        if self.minimum_years is not None and self.maximum_years is not None and self.minimum_years > self.maximum_years:
-            raise ValueError("Minimum experience exceeds maximum.")
+        if self.kind == "minimum" and (self.lower is None or self.upper is not None):
+            raise ValueError("A minimum needs a lower bound and no upper bound.")
+        if self.kind == "maximum" and (self.upper is None or self.lower is not None):
+            raise ValueError("A maximum needs an upper bound and no lower bound.")
+        if self.kind in {"target_range", "ambiguous_minimum", "exact"}:
+            if self.lower is None or self.upper is None or self.lower > self.upper:
+                raise ValueError("A range needs ordered lower and upper bounds.")
+            if self.kind == "exact" and self.lower != self.upper:
+                raise ValueError("An exact duration needs equal bounds.")
         return self
 
 
+class ExperienceRequirement(QualifiedClaim):
+    wording: str
+    years: ExperienceYears | None = Field(description="Only explicit numbers. 'At least 1–2' is ambiguous_minimum, 'ideally 2–4' target_range, '5+' minimum. Several years => null.")
+    scope: str | None
+
+
 class WorkArrangement(Structure):
-    mode: Literal["remote", "on_site", "hybrid", "unspecified"]
+    mode: Literal["remote", "on_site", "hybrid", "remote_possible", "unspecified"] = Field(description="Hybrid requires an explicit hybrid label or office/remote split. Mobile working alone is remote_possible.")
     wording: str
     office_attendance: str | None
     geographic_restrictions: str | None
+    condition: str | None
     evidence: list[Evidence] = Field(min_length=1)
 
 
@@ -69,13 +95,14 @@ class Claim(Structure):
 
 
 class Conflict(Structure):
-    field: Literal["requirements", "languages", "experience", "work_arrangement", "responsibilities", "seniority", "employment_type"]
-    explanation: str
+    field: Literal["requirements", "education", "languages", "experience", "work_arrangement", "responsibilities", "seniority", "employment_type"]
+    explanation: str = Field(description="Why two explicit claims cannot both hold for the same scope. Broad seniority labels, preferences and different locations are not contradictions by themselves.")
     evidence: list[Evidence] = Field(min_length=2)
 
 
 class FieldStates(Structure):
     requirements: State
+    education: State
     languages: State
     experience: State
     work_arrangement: State
@@ -88,6 +115,7 @@ class JobExtraction(Structure):
     description_languages: list[DescriptionLanguage] = Field(description="Actual description languages, dominant first. Ignore isolated borrowed terms and metadata labels.")
     states: FieldStates
     requirements: list[Requirement]
+    education: list[EducationRequirement]
     languages: list[LanguageRequirement]
     experience: list[ExperienceRequirement]
     work_arrangement: list[WorkArrangement]
@@ -114,7 +142,13 @@ class JobExtraction(Structure):
 
 
 ALIASES = {"powerbi": "Power BI", "power bi": "Power BI", "python": "Python", "sql": "SQL",
-           "r": "R", "pytorch": "PyTorch", "tensorflow": "TensorFlow", "scikit-learn": "scikit-learn"}
+           "r": "R", "pytorch": "PyTorch", "tensorflow": "TensorFlow", "scikit-learn": "scikit-learn",
+           "t-sql": "T-SQL", "transact-sql": "T-SQL", "transact-sql (t-sql)": "T-SQL",
+           "excel": "Excel", "microsoft excel": "Excel", "ms excel": "Excel",
+           "aws": "AWS", "amazon web services": "AWS", "azure": "Azure", "microsoft azure": "Azure",
+           "gcp": "GCP", "google cloud platform": "GCP", "java": "Java", "scala": "Scala"}
+LANGUAGES = {"Python", "SQL", "T-SQL", "R", "Java", "Scala"}
+TOOLS = {"Power BI", "Excel", "AWS", "Azure", "GCP", "PyTorch", "TensorFlow", "scikit-learn"}
 
 
 def validate_evidence(parsed: JobExtraction, sources: dict[str, str]) -> dict:
@@ -138,5 +172,9 @@ def validate_evidence(parsed: JobExtraction, sources: dict[str, str]) -> dict:
     visit(payload)
     for item in payload["requirements"]:
         item["canonical_term"] = ALIASES.get(item["term"].strip().casefold(), item["term"].strip())
+        if item["canonical_term"] in LANGUAGES:
+            item["category"] = "programming_language"
+        elif item["canonical_term"] in TOOLS:
+            item["category"] = "tool"
     payload["description_language"] = "/".join(item["code"] for item in payload["description_languages"]) or "und"
     return payload

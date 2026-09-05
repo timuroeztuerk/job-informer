@@ -276,6 +276,14 @@ class TestRelevanceWorkflow(unittest.TestCase):
                 }]
             )
 
+            db.put_into_sql(jobs, observed_at="2026-09-05T08:00:00Z")
+            db = JobDatabase(Path(tmp_dir) / "jobs.db")
+            self.assertEqual(db.get_manual_overrides()["linkedin:13"], "archive")
+            with db._get_connection() as conn:  # noqa: SLF001
+                archived_at, seen_count = conn.execute("SELECT archived_at,seen_count FROM jobs WHERE job_id='linkedin:13'").fetchone()
+            self.assertIsNotNone(archived_at)
+            self.assertEqual(seen_count, 2)
+
             preview = build_relevance_preview(
                 db,
                 active_only=False,
