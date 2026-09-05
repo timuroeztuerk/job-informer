@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { archiveJob, restoreJob, setJobFavorite, setJobFlag } from "../api";
 import type { Job, JobFlag } from "../types";
 import JobDescription from "./JobDescription";
+import JobExtraction from "./JobExtraction";
+import { jobLocation } from "../jobPresentation";
 
 interface JobDetailProps {
   job: Job | null;
@@ -143,7 +145,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onFavorite
         <div>
           <p className="company">{job.company}</p>
           <h2>{job.title}</h2>
-          <p className="muted">{job.location} · LinkedIn</p>
+          <p className="muted">{jobLocation(job)} · LinkedIn</p>
         </div>
         <div className="detail-actions">
           <button
@@ -192,6 +194,20 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onFavorite
 
       {error && <div className="error" role="alert">{error}</div>}
 
+      {(job.posting_count ?? 1) > 1 && (
+        <details className="consolidated-postings">
+          <summary>{job.posting_count} matching postings · All locations and links</summary>
+          <p className="muted small">Shown as one job. Review actions apply to all matching postings.</p>
+          <ul>
+            {job.postings?.map((posting) => (
+              <li key={posting.job_id}>
+                {posting.url ? <a href={posting.url} target="_blank" rel="noreferrer">{posting.location}</a> : posting.location}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
       {job.is_flagged && (
         <form className="flag-review" onSubmit={(event) => { event.preventDefault(); void saveFlag(true, flagReason); }}>
           <div>
@@ -217,6 +233,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onFavorite
       </p>
 
       {explanation && <p className="muted small relevance-line">{explanation}</p>}
+      <JobExtraction key={`ai-${job.job_id}`} jobId={job.job_id} refreshToken={descriptionRefreshToken} />
       <JobDescription key={job.job_id} jobId={job.job_id} refreshToken={descriptionRefreshToken} onQueueChanged={onDescriptionQueueChanged} />
     </aside>
   );

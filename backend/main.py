@@ -23,7 +23,6 @@ from src.utils.run_progress import update_api_run_progress  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect LinkedIn jobs once")
-    parser.add_argument("--run-once", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--config", help="Path to an optional .env file")
     parser.add_argument("--keywords", help="Comma-separated LinkedIn search titles")
     parser.add_argument("--locations", help="Comma-separated search locations")
@@ -38,12 +37,11 @@ def run_job_search_once(config: Config) -> None:
         event="Collection settings loaded",
     )
     scraper = JobScraper(config)
-    summary = scraper.get_search_summary()
     logger.info(
         "Starting LinkedIn collection: keywords={}, locations={}, time_range={}",
-        ", ".join(summary["keywords"]),
-        ", ".join(summary["locations"]),
-        summary["time_range"],
+        ", ".join(config.get_keywords_list()),
+        ", ".join(config.get_locations_list()),
+        config.search_time_range,
     )
 
     success = scraper.execute_job_search()
@@ -79,7 +77,7 @@ def main() -> None:
             config.search_locations = args.locations
         if args.time_range:
             config.search_time_range = args.time_range
-        config.validate_for_mode("run-once")
+        config.validate()
         (ROOT / "data").mkdir(exist_ok=True)
         run_job_search_once(config)
     except Exception as exc:

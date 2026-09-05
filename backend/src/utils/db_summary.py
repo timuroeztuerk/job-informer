@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from collections import Counter
 from typing import Any
 
@@ -145,22 +146,25 @@ def build_db_summary(db: JobDatabase, *, window: str = "all", as_of: Any | None 
         cursor = conn.execute(
             f"""
             SELECT j.job_id, j.title, COALESCE(NULLIF(j.company, ''), 'Unknown') AS company,
-                   j.location, j.source, j.url, j.is_favorite,
+                   j.location, j.postings_json, j.posting_count, j.source, j.url, j.is_favorite,
                    COALESCE(j.scraped_at, j.created_at) AS scraped_at,
                    COALESCE(j.first_seen_at, j.scraped_at, j.created_at) AS first_seen_at,
                    COALESCE(j.last_seen_at, j.scraped_at, j.created_at) AS last_seen_at,
                    COALESCE(j.seen_count, 1) AS seen_count, j.role_family, j.relevance_outcome
-            FROM jobs j WHERE {active_clause}
+            FROM review_jobs j WHERE {active_clause}
             """, params,
         )
         columns = [column[0] for column in cursor.description]
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        for row in rows:
+            row["postings"] = json.loads(row.pop("postings_json"))
         query_group_rows = conn.execute(
             f"""
-            SELECT DISTINCT jqm.job_id, cq.query_group_key,
+            SELECT DISTINCT m.canonical_job_id, cq.query_group_key,
                    COALESCE(qg.display_name, cq.query_group_key)
             FROM job_query_matches jqm
-            INNER JOIN jobs j ON j.job_id = jqm.job_id
+            INNER JOIN job_memberships m ON m.job_id = jqm.job_id
+            INNER JOIN review_jobs j ON j.job_id = m.canonical_job_id
             INNER JOIN collection_queries cq
                 ON cq.collection_query_id = jqm.collection_query_id
             LEFT JOIN query_groups qg ON qg.query_group_key = cq.query_group_key
@@ -169,22 +173,23 @@ def build_db_summary(db: JobDatabase, *, window: str = "all", as_of: Any | None 
         ).fetchall()
         all_active_jobs = int(
             conn.execute(
-                "SELECT COUNT(*) FROM jobs WHERE archived_at IS NULL AND LOWER(source) = 'linkedin'"
+                "SELECT COUNT(*) FROM review_jobs WHERE archived_at IS NULL AND LOWER(source) = 'linkedin'"
             ).fetchone()[0]
         )
         archived_jobs = int(
             conn.execute(
-                f"SELECT COUNT(*) FROM jobs j WHERE {scope_clause} AND j.archived_at IS NOT NULL", params,
+                f"SELECT COUNT(*) FROM review_jobs j WHERE {scope_clause} AND j.archived_at IS NOT NULL", params,
             ).fetchone()[0]
         )
         automatic_archives = int(conn.execute(
-            f"SELECT COUNT(*) FROM jobs j WHERE {scope_clause} AND {AUTO_ARCHIVED_SQL}", params,
+            f"SELECT COUNT(*) FROM review_jobs j WHERE {scope_clause} AND {AUTO_ARCHIVED_SQL}", params,
         ).fetchone()[0])
         collection_validation = build_collection_validation(conn, as_of=reference)
 
     total = len(rows)
     companies = Counter(row["company"] for row in rows)
-    locations = Counter(primary_location(row["location"]) for row in rows)
+    locations = Counter(location for row in rows for location in {
+        primary_location(posting["location"]) for posting in row["postings"]})
     sources = Counter(row["source"] for row in rows)
     role_families = Counter(row["role_family"] or "unclassified" for row in rows)
     query_groups = Counter(str(row[1]) for row in query_group_rows)

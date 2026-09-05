@@ -11,12 +11,13 @@ import hashlib
 import json
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 import requests
 
 from ..utils.time_utils import utc_now
+from ..utils.data_utils import normalize_job_url
 
 EXTRACTOR = "linkedin_public_job"
 EXTRACTOR_VERSION = "1.0.0"
@@ -33,7 +34,8 @@ class DescriptionError(Exception):
 
 
 def source_url(job_id: str) -> str:
-    match = re.fullmatch(r"linkedin:([0-9]{1,20})", job_id)
+    identity = job_id if job_id.startswith("linkedin:") else normalize_job_url(job_id, "LinkedIn")
+    match = re.fullmatch(r"linkedin:([0-9]{1,20})", identity)
     if not match:
         raise ValueError("Description retrieval requires a canonical LinkedIn posting ID.")
     return f"https://www.linkedin.com/jobs/view/{match[1]}/"
@@ -59,6 +61,7 @@ def _text(node) -> str:
 def parse_description(body: bytes, job_id: str) -> dict:
     """Schema 1: original text, explicit criteria, and evidence locations."""
     expected = source_url(job_id)
+    posting_id = expected.rstrip("/").rsplit("/", 1)[1]
     soup = BeautifulSoup(body, "lxml")
     canonical = soup.select_one('link[rel="canonical"]')
     identity_confirmed = False
@@ -66,12 +69,12 @@ def parse_description(body: bytes, job_id: str) -> dict:
         canonical_url = urlparse(str(canonical["href"]))
         path = canonical_url.path
         match = re.search(r"/jobs/view/(?:[^/]*-)?([0-9]+)/?", path)
-        if not canonical_url.hostname or not (canonical_url.hostname == "linkedin.com" or canonical_url.hostname.endswith(".linkedin.com")) or not match or match[1] != job_id.split(":")[1]:
+        if not canonical_url.hostname or not (canonical_url.hostname == "linkedin.com" or canonical_url.hostname.endswith(".linkedin.com")) or not match or match[1] != posting_id:
             raise DescriptionError("identity_mismatch", "LinkedIn returned a different posting or a non-job page.")
         identity_confirmed = True
     identity = soup.select_one('[data-semaphore-content-urn^="urn:li:jobPosting:"]')
     if identity:
-        if identity.get("data-semaphore-content-urn") != f"urn:li:jobPosting:{job_id.split(':')[1]}":
+        if identity.get("data-semaphore-content-urn") != f"urn:li:jobPosting:{posting_id}":
             raise DescriptionError("identity_mismatch", "The returned posting does not match this job.")
         identity_confirmed = True
     node = soup.select_one(".show-more-less-html__markup")
@@ -94,7 +97,7 @@ def parse_description(body: bytes, job_id: str) -> dict:
                 identifier = identifier.get("value") if isinstance(identifier, dict) else identifier
                 url = str(obj.get("url", ""))
                 url_match = re.search(r"/jobs/view/(?:[^/]*-)?([0-9]+)/?(?:\?|$)", url)
-                if str(identifier) != job_id.split(":")[1] and (not url_match or url_match[1] != job_id.split(":")[1]):
+                if str(identifier) != posting_id and (not url_match or url_match[1] != posting_id):
                     continue
                 if isinstance(obj.get("description"), str):
                     description_text = _text(obj["description"])
@@ -164,11 +167,20 @@ def fetch_source(job_id: str, previous: dict | None = None) -> FetchedSource:
             headers["If-None-Match"] = previous["etag"]
         if previous.get("last_modified"):
             headers["If-Modified-Since"] = previous["last_modified"]
+    url = source_url(job_id)
     try:
-        with requests.get(source_url(job_id), headers=headers, timeout=(5, 15), stream=True, allow_redirects=False) as response:
+        with requests.get(url, headers=headers, timeout=(5, 15), stream=True, allow_redirects=False) as response:
             code = response.status_code
             if code == 304 and previous:
                 return FetchedSource(status=304)
+            if 300 <= code < 400:
+                target = urlparse(urljoin(url, response.headers.get("Location") or ""))
+                if (target.scheme == "https" and target.hostname
+                        and (target.hostname == "linkedin.com" or target.hostname.endswith(".linkedin.com"))
+                        and target.path.startswith("/jobs/")
+                        and "expired_jd_redirect" in parse_qs(target.query).get("trk", [])):
+                    raise DescriptionError("not_found", "This posting has expired and is no longer publicly available.",
+                                           http_status=code)
             if code in {401, 403, 429, 999} or 300 <= code < 400:
                 raise DescriptionError("rate_limited" if code == 429 else "blocked",
                                        "LinkedIn rate limited retrieval." if code == 429 else "LinkedIn denied or redirected this request.",

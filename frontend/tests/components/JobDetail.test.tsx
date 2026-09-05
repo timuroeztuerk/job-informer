@@ -6,6 +6,7 @@ import { archiveJob, restoreJob, setJobFavorite, setJobFlag } from "../../src/ap
 import JobDetail from "../../src/components/JobDetail";
 import type { Job, JobFlag } from "../../src/types";
 vi.mock("../../src/components/JobDescription", () => ({ default: () => null }));
+vi.mock("../../src/components/JobExtraction", () => ({ default: () => null }));
 
 vi.mock("../../src/api", () => ({
   archiveJob: vi.fn(),
@@ -29,6 +30,18 @@ const job: Job = {
 };
 
 describe("minimal job details", () => {
+  it("keeps every matching city link in a compact expandable group", async () => {
+    const user = userEvent.setup();
+    render(<JobDetail job={{ ...job, posting_count: 15,
+      postings: Array.from({ length: 15 }, (_, index) => ({ job_id: `linkedin:${index}`,
+        location: `City ${index}, Germany`, url: `https://www.linkedin.com/jobs/view/${index}/` })) }}
+      onArchiveChanged={vi.fn()} onFavoriteChanged={vi.fn()} />);
+    expect(screen.getByText("City 0, City 1 +13 more locations · LinkedIn")).toBeInTheDocument();
+    await user.click(screen.getByText("15 matching postings · All locations and links"));
+    expect(screen.getByRole("link", { name: "City 14, Germany" })).toHaveAttribute("href", "https://www.linkedin.com/jobs/view/14/");
+    expect(screen.getByText(/Review actions apply to all matching postings/)).toBeVisible();
+  });
+
   beforeEach(() => {
     vi.mocked(archiveJob).mockReset().mockResolvedValue(undefined);
     vi.mocked(restoreJob).mockReset().mockResolvedValue(undefined);

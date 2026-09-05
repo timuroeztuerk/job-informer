@@ -11,6 +11,7 @@ vi.mock("../src/api", () => ({
 }));
 vi.mock("../src/components/JobDetail", () => ({ default: () => null }));
 vi.mock("../src/components/DescriptionQueue", () => ({ default: () => null }));
+vi.mock("../src/components/ExtractionQueue", () => ({ default: () => null }));
 vi.mock("../src/components/JobTable", async () => {
   const React = await import("react");
   return { default: React.forwardRef(() => null) };
@@ -22,11 +23,6 @@ vi.mock("../src/components/RunPane", async () => {
 vi.mock("../src/components/SummaryPage", () => ({ default: () => null }));
 
 const emptyStats: JobStats = {
-  total_jobs: 0,
-  jobs_by_source: {},
-  top_companies: {},
-  recent_jobs_7_days: 0,
-  date_range: { earliest: null, latest: null },
   database: {
     status: "ready",
     instance_name: "job-informer-desktop",

@@ -7,6 +7,7 @@ import React, {
   useState,
 } from "react";
 import { fetchJob, fetchJobs, setJobFavorite } from "../api";
+import { jobLocation } from "../jobPresentation";
 import type { Job, JobArchiveFilter, JobRelevanceFilter, QueryGroupOption } from "../types";
 import { readEnumParam, readPositiveIntegerParam, readTextParam, replaceSearchParams } from "../urlState";
 
@@ -677,10 +678,11 @@ const JobTable = forwardRef<JobTableHandle, JobTableProps>(
                         <div className="meta">
                           <span>{job.company}</span>
                           <span>•</span>
-                          <span>{job.location}</span>
+                          <span>{jobLocation(job)}</span>
                         </div>
                         <div className="tags">
                           <span className="tag">{job.source}</span>
+                          {(job.posting_count ?? 1) > 1 && <span className="tag soft">{job.posting_count} matching postings</span>}
                           {job.is_flagged && <span className="tag flagged-tag">Flagged for review</span>}
                           {job.role_family ? (
                             <span className="tag soft">{formatLabel(job.role_family)}</span>

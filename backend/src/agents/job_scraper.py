@@ -1133,15 +1133,3 @@ class JobScraper:
             )
             logger.error(f"Error in job search: {e}")
             return False
-
-    def get_search_summary(self) -> dict:
-        """Get summary of search configuration"""
-        return {
-            'keywords': self.config.get_keywords_list(),
-            'locations': self.config.get_locations_list(),
-            'time_range': getattr(self.config, 'search_time_range', 'day'),
-            'user_agent': self.config.user_agent[:50] + "..." if len(self.config.user_agent) > 50 else self.config.user_agent,
-            'request_delay': self.config.request_delay,
-            'max_retries': self.config.max_retries,
-            'linkedin_max_search_pages': self.config.linkedin_max_search_pages,
-        }

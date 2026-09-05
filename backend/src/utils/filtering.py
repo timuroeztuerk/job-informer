@@ -100,11 +100,6 @@ def match_keyword_filter(title: str, unwanted_keywords: List[str]) -> Optional[s
     return None
 
 
-def should_filter_by_keywords(title: str, unwanted_keywords: List[str]) -> bool:
-    """Centralized keyword filtering logic with word boundaries for specificity."""
-    return match_keyword_filter(title, unwanted_keywords) is not None
-
-
 def match_company_filter(company: str, unwanted_companies: List[str]) -> Optional[str]:
     """Return the matched company blacklist token when present."""
     if not company or not unwanted_companies:
@@ -118,11 +113,6 @@ def match_company_filter(company: str, unwanted_companies: List[str]) -> Optiona
             return unwanted_company
 
     return None
-
-
-def should_filter_by_company(company: str, unwanted_companies: List[str]) -> bool:
-    """Centralized company filtering logic."""
-    return match_company_filter(company, unwanted_companies) is not None
 
 
 def match_study_title_pattern(title: str) -> Optional[str]:

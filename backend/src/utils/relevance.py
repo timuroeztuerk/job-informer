@@ -602,33 +602,12 @@ def decision_for_result(
     if result.outcome in {"manual_keep", "manual_archive"}:
         return None
 
-    if result.outcome == "excluded":
-        decision_details = dict(details or {})
-        decision_details.update(
-            {
-                "outcome": result.outcome,
-                "role_family": result.role_family,
-                "ruleset_version": result.ruleset_version,
-                "matches": list(result.matches),
-                "positive_matches": list(result.positive_matches),
-                "negative_matches": list(result.negative_matches),
-            }
-        )
-        return {
-            "job_id": job_id,
-            "decision_source": "rule",
-            "decision_action": "archive" if mode == "enforce" else "shadow",
-            "filter_name": "scope_exclusion",
-            "matched_value": result.matched_value,
-            "reason": result.reason,
-            "details": decision_details,
-        }
-
-    should_archive = result.outcome == "unrelated" or (
+    should_archive = result.outcome in {"excluded", "unrelated"} or (
         result.outcome == "unmatched" and include_unmatched
     )
     action = "archive" if mode == "enforce" and should_archive else "keep" if result.outcome == "target" else "shadow"
     filter_name = {
+        "excluded": "scope_exclusion",
         "target": "target_role",
         "unrelated": "unrelated_role",
         "unmatched": "no_target_role",

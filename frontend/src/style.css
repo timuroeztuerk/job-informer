@@ -62,11 +62,6 @@ textarea:focus-visible,
   box-shadow: var(--shadow-panel);
 }
 
-.panel.highlight {
-  border-color: #bae6fd;
-  box-shadow: 0 18px 50px rgba(14, 165, 233, 0.12);
-}
-
 .label {
   margin: 0;
   color: var(--muted);
@@ -1096,8 +1091,29 @@ button.market-metric:hover { border-color: #93c5fd; background: #fafdff; }
 .description-criteria dd { color: #334155; font-size: 12px; margin: 0; overflow-wrap: anywhere; }
 .description-notice { padding: 10px 12px; background: #fff8e6; color: #92400e; border-radius: 8px; font-size: 12px; line-height: 1.5; }
 .description-error { margin: 10px 0; color: #b91c1c; font-size: 12px; }
+.job-extraction { margin: 22px 0; padding-top: 16px; border-top: 1px solid var(--border); }
+.extraction-draft { max-height: 400px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.language-code { text-transform: none !important; }
+.extraction-group { border-top: 1px solid var(--border); padding: 10px 0; }
+.extraction-group > summary { cursor: pointer; font-size: 13px; text-transform: capitalize; }
+.extraction-claim { margin: 12px 0; font-size: 13px; }
+.extraction-claim > span, .extraction-cohort li > span { display: block; margin-top: 3px; }
+.extraction-evidence { margin: 5px 0; font-size: 12px; }
+.extraction-evidence > summary, .extraction-cohort > summary { cursor: pointer; color: #475569; }
+.extraction-evidence blockquote { margin: 8px 0; padding: 8px 12px; border-left: 2px solid #cbd5e1; white-space: pre-wrap; overflow-wrap: anywhere; }
+.extraction-evidence mark { background: #fef3c7; color: inherit; }
+.extraction-cohort { margin-top: 10px; font-size: 12px; }
+.extraction-cohort ul { padding-left: 20px; }
+.extraction-cohort li { margin: 8px 0; }
+.legacy-fields { font-size: 12px; }
+.legacy-fields dt { color: #64748b; text-transform: capitalize; margin-top: 10px; }
+.legacy-fields dd { margin: 3px 0; overflow-wrap: anywhere; }
 .description-history { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 14px; font-size: 11px; color: #64748b; }
 .description-history summary { cursor: pointer; color: #475569; font-weight: 600; }
 .description-history ol { padding-left: 18px; }
 .description-history li { padding: 5px 0; }
 .description-history li span { display: block; margin-top: 3px; }
+.consolidated-postings { margin: 16px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.consolidated-postings summary { cursor: pointer; font-weight: 600; }
+.consolidated-postings ul { margin: 8px 0 0; padding-left: 20px; }
+.consolidated-postings li + li { margin-top: 6px; }

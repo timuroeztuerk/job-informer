@@ -40,10 +40,10 @@ class DescriptionService:
 
     def reparse(self, job_id):
         self.store.require_job(job_id)
-        source = self.store.latest_source(job_id)
+        source = self.store.latest_source(job_id, group=True)
         if source is None:
             raise ValueError("Fetch the original description first.")
-        data = parse_description(source["body"], job_id)
+        data = parse_description(source["body"], source["job_id"])
         self.store.save_extraction(source["source_id"], data)
         return self.store.job_description(job_id)
 

@@ -19,9 +19,12 @@ import pandas as pd
 from loguru import logger
 
 from .data_utils import build_normalized_key, normalize_job_url
+from .job_consolidation import initialize_consolidation, rebuild_consolidation, member_job_ids
 from .sqlite_connection import connect_sqlite, open_sqlite
 from .time_utils import normalize_utc_iso, utc_now_iso
-from ..descriptions.schema import SCHEMA as DESCRIPTION_SCHEMA
+from ..descriptions.schema import initialize_schema as initialize_description_schema
+from ..descriptions.legacy import import_legacy_descriptions
+from ..ai.store import initialize_schema as initialize_ai_schema
 
 
 DEFAULT_DB_PATH = str(Path(__file__).resolve().parents[2] / "data" / "jobs.db")
@@ -247,10 +250,13 @@ class JobDatabase:
             )
 
             self._ensure_jobs_columns(conn)
-            conn.executescript(DESCRIPTION_SCHEMA)
+            initialize_description_schema(conn)
+            initialize_ai_schema(conn)
+            import_legacy_descriptions(conn)
             self._ensure_scrape_run_columns(conn)
             self._create_indexes_and_guards(conn)
             self._backfill_observation_fields(conn)
+            initialize_consolidation(conn)
             conn.commit()
 
     def _ensure_jobs_columns(self, conn: sqlite3.Connection) -> None:
@@ -644,24 +650,26 @@ class JobDatabase:
             row = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (normalized_id,)).fetchone()
             if row is None:
                 return False
+            members = member_job_ids(conn, normalized_id)
             conn.execute(
                 """
                 UPDATE jobs
                 SET archived_at = NULL, archived_reason = NULL,
                     relevance_outcome = 'manual_keep', role_family = NULL,
                     relevance_reason = ?, relevance_evaluated_at = ?
-                WHERE job_id = ?
+                WHERE job_id IN (SELECT job_id FROM job_memberships WHERE canonical_job_id =
+                    (SELECT canonical_job_id FROM job_memberships WHERE job_id = ?))
                 """,
                 (reason, utc_now_iso(), normalized_id),
             )
             self.record_filter_decisions(
                 [{
-                    "job_id": normalized_id,
+                    "job_id": member,
                     "decision_source": decision_source,
                     "decision_action": "restore",
                     "filter_name": "manual_restore",
                     "reason": reason,
-                }],
+                } for member in members],
                 conn=conn,
             )
             conn.commit()
@@ -674,7 +682,9 @@ class JobDatabase:
             return False
         with self._get_connection() as conn:
             cursor = conn.execute(
-                "UPDATE jobs SET is_favorite = ? WHERE job_id = ?",
+                """UPDATE jobs SET is_favorite = ? WHERE job_id IN (
+                    SELECT job_id FROM job_memberships WHERE canonical_job_id =
+                    (SELECT canonical_job_id FROM job_memberships WHERE job_id = ?))""",
                 (1 if is_favorite else 0, normalized_id),
             )
             conn.commit()
@@ -691,7 +701,9 @@ class JobDatabase:
                     is_flagged = ?,
                     flag_reason = CASE WHEN ? THEN COALESCE(?, flag_reason) ELSE NULL END,
                     flagged_at = CASE WHEN ? THEN COALESCE(flagged_at, ?) ELSE NULL END
-                WHERE job_id = ? AND LOWER(source) = 'linkedin'
+                WHERE job_id IN (SELECT job_id FROM job_memberships WHERE canonical_job_id =
+                    (SELECT canonical_job_id FROM job_memberships WHERE job_id = ?))
+                    AND LOWER(source) = 'linkedin'
                 """,
                 (int(is_flagged), is_flagged, reason.strip() if reason is not None else None,
                  is_flagged, utc_now_iso(), job_id),
@@ -699,7 +711,8 @@ class JobDatabase:
             if not cursor.rowcount:
                 return None
             row = conn.execute(
-                "SELECT job_id, is_flagged, flag_reason, flagged_at FROM jobs WHERE job_id = ?",
+                """SELECT job_id, is_flagged, flag_reason, flagged_at FROM review_jobs
+                    WHERE job_id = (SELECT canonical_job_id FROM job_memberships WHERE job_id = ?)""",
                 (job_id,),
             ).fetchone()
             conn.commit()
@@ -1212,10 +1225,12 @@ class JobDatabase:
         inserted_count = 0
         observed_count = 0
         with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.cursor()
             identity_index: dict[str, str] = {}
             for row in cursor.execute(
-                "SELECT job_id, title, company, source, url, normalized_key FROM jobs ORDER BY rowid"
+                """SELECT job_id, title, company, source, url, normalized_key FROM jobs
+                    ORDER BY CASE WHEN normalized_key LIKE 'linkedin:%' THEN 0 ELSE 1 END, rowid"""
             ):
                 for alias in self._job_identity_aliases(
                     job_id=row[0], title=row[1], company=row[2], source=row[3],
@@ -1332,6 +1347,7 @@ class JobDatabase:
                     normalized_key=job["normalized_key"],
                 ):
                     identity_index.setdefault(alias, canonical_id)
+            rebuild_consolidation(conn)
             conn.commit()
 
         if scrape_run_id:

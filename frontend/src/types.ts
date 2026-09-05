@@ -43,6 +43,8 @@ export interface Job {
   relevance_evaluated_at?: string | null;
   query_groups?: string[];
   query_matches?: JobQueryMatch[];
+  posting_count?: number;
+  postings?: { job_id: string; location: string; url?: string; first_seen_at?: string; last_seen_at?: string }[];
 }
 
 export interface JobFlag {
@@ -50,6 +52,78 @@ export interface JobFlag {
   is_flagged: boolean;
   flag_reason: string | null;
   flagged_at: string | null;
+}
+
+export interface AIQueueState {
+  configured: boolean;
+  paused: boolean;
+  reason: string | null;
+  cooldown_until: number;
+  pilot_limit: number | null;
+  estimated_cost_usd: number;
+  counts: Record<string, number>;
+  jobs: Array<{ job_id: string; title: string; company: string; status: string | null }>;
+  usage: { input_tokens: number; output_tokens: number; cached_tokens: number; reasoning_tokens: number };
+  model: string;
+  reasoning: string;
+  service_tier: string;
+  added?: number;
+}
+
+export interface AIEvidence { source_ref: string; quote: string; start: number; end: number }
+export interface AIClaim {
+  evidence: AIEvidence[];
+  term?: string;
+  canonical_term?: string;
+  category?: string;
+  value?: string;
+  language?: string;
+  proficiency?: string | null;
+  cefr?: string | null;
+  wording?: string;
+  minimum_years?: number | null;
+  maximum_years?: number | null;
+  scope?: string | null;
+  mode?: string;
+  office_attendance?: string | null;
+  geographic_restrictions?: string | null;
+  strength?: string;
+  alternative_group?: string | null;
+  field?: string;
+  explanation?: string;
+  code?: string;
+}
+
+export interface AIJobResult {
+  rejected?: unknown;
+  job_id: string;
+  status: string | null;
+  error: string | null;
+  stale: boolean;
+  queue: { paused: boolean; cooldown_until: number };
+  source: { source_id: number; job_id: string; source_url: string; fetched_at: string } | null;
+  input: { sources: Record<string, string>; source_quality: string; criteria: Array<{ label: string; value: string }> } | null;
+  saved: {
+    extracted_at: string;
+    fields: {
+      description_language: string;
+      description_languages: AIClaim[];
+      states: Record<string, string>;
+      requirements: AIClaim[];
+      languages: AIClaim[];
+      experience: AIClaim[];
+      work_arrangement: AIClaim[];
+      responsibilities: AIClaim[];
+      seniority: AIClaim[];
+      employment_type: AIClaim[];
+      conflicts: AIClaim[];
+    };
+    contract: { model: string; reasoning: string; schema_version: string };
+    metadata: { model: string; service_tier: string; latency_ms: number; usage: Record<string, number> };
+    validation: { schema: boolean; evidence: boolean; human_reviewed: boolean };
+  } | null;
+  legacy: { model: string; version: number; created_at: string; fields: Record<string, unknown> } | null;
+  legacy_review: { status: string; priority: string } | null;
 }
 
 export interface DescriptionQueueState {
@@ -66,6 +140,7 @@ export interface DescriptionQueueState {
 export interface JobDescriptionResponse {
   job_id: string;
   saved: {
+    source_kind?: "public_page" | "legacy_text";
     source_id: number;
     source_url: string;
     fetched_at: string;
@@ -251,13 +326,6 @@ export interface CollectionFreshness {
 }
 
 export interface JobStats {
-  total_jobs: number;
-  archived_jobs?: number;
-  jobs_by_source: Record<string, number>;
-  top_companies: Record<string, number>;
-  recent_jobs_7_days: number;
-  date_range: { earliest: string | null; latest: string | null };
-  sources_list?: string[];
   companies_list?: string[];
   role_families_list?: string[];
   query_groups_list?: QueryGroupOption[];

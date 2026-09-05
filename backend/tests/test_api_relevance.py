@@ -316,7 +316,22 @@ class TestApiRelevance(unittest.TestCase):
                 scope_comparison = api._scope_comparison_for_api_run("api-run")  # noqa: SLF001
                 api.delete_job("linkedin:2", _=True)
                 archived = _list_jobs(archived="only")
+                archived_stats = api.job_stats(_=True)
                 api.restore_job("linkedin:2", _=True)
+                restored_stats = api.job_stats(_=True)
+
+            # The compact stats endpoint still supplies the live filter options
+            # and database status used by the Jobs page.
+            self.assertEqual(archived_stats["companies_list"], ["ACME"])
+            self.assertEqual(archived_stats["role_families_list"], ["data_science"])
+            self.assertEqual(archived_stats["query_groups_list"], [{"key": "data_science", "name": "Data science"}])
+            self.assertEqual(archived_stats["database"]["active_jobs"], 1)
+            self.assertEqual(restored_stats["companies_list"], ["ACME", "Beta"])
+            # Manual restoration clears the automatic role classification.
+            self.assertEqual(restored_stats["role_families_list"], ["data_science"])
+            self.assertEqual(len(restored_stats["query_groups_list"]), 2)
+            self.assertEqual(restored_stats["database"]["active_jobs"], 2)
+            self.assertEqual(restored_stats["collection_freshness"]["source"], "job_observation")
 
             self.assertEqual([item["job_id"] for item in by_role["items"]], ["linkedin:2"])
             self.assertIs(by_role["items"][0]["is_favorite"], False)

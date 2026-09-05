@@ -32,6 +32,9 @@ describe("API parameter serialization", () => {
     expect(JSON.parse(fetchSpy.mock.calls[1][1].body)).toEqual({ refresh: true });
     expect(JSON.parse(fetchSpy.mock.calls[3][1].body)).toEqual({ selection: "retry", limit: 10 });
     expect(fetchSpy.mock.calls[4][1].method).toBe("POST");
+    await queueDescriptions();
+    expect(new URL(fetchSpy.mock.calls[5][0]).pathname).toBe("/descriptions/queue");
+    expect(JSON.parse(fetchSpy.mock.calls[5][1].body)).toEqual({ selection: "all" });
   });
   it("serializes filters, date boundaries, pagination, and omitted empty values", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(

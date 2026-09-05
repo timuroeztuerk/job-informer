@@ -12,10 +12,10 @@ from typing import Optional
 from dotenv import dotenv_values, load_dotenv
 
 from ..utils.collection_scope import CITY_SEARCH_LOCATIONS, COUNTRYWIDE_SEARCH_LOCATIONS
+from ..utils.relevance import VALID_RELEVANCE_MODES
 
 
 VALID_TIME_RANGES = {"day", "week", "month"}
-VALID_RELEVANCE_MODES = {"shadow", "enforce"}
 DEFAULT_TIME_RANGE = "day"
 BASE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_LOG_FILE = str(BASE_DIR / "logs" / "job_informer.log")
@@ -125,9 +125,7 @@ class Config:
             jobs_db_path=jobs_db_path,
         )
 
-    def validate_for_mode(self, mode: str) -> None:
-        if mode != "run-once":
-            raise ValueError(f"Unsupported mode: {mode}")
+    def validate(self) -> None:
         errors: list[str] = []
         if not self.search_keywords.strip():
             errors.append("SEARCH_KEYWORDS is required")
@@ -139,9 +137,6 @@ class Config:
             errors.append("RELEVANCE_MODE must be one of: shadow, enforce")
         if errors:
             raise ValueError(f"Configuration validation failed: {', '.join(errors)}")
-
-    def validate(self) -> None:
-        self.validate_for_mode("run-once")
 
     def get_keywords_list(self) -> list[str]:
         return [value.strip() for value in self.search_keywords.split(",") if value.strip()]
@@ -162,24 +157,3 @@ class Config:
 
     def get_unwanted_companies_list(self) -> list[str]:
         return self._normalized_list(self.unwanted_companies)
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "search_keywords": self.search_keywords,
-            "search_locations": self.search_locations,
-            "search_time_range": self.search_time_range,
-            "unwanted_keywords": self.unwanted_keywords,
-            "unwanted_companies": self.unwanted_companies,
-            "request_delay": self.request_delay,
-            "max_retries": self.max_retries,
-            "user_agent": self.user_agent,
-            "max_total_jobs": self.max_total_jobs,
-            "min_new_jobs_to_continue": self.min_new_jobs_to_continue,
-            "quiet_progress": self.quiet_progress,
-            "linkedin_max_search_pages": self.linkedin_max_search_pages,
-            "relevance_mode": self.relevance_mode,
-            "archive_unmatched_jobs": self.archive_unmatched_jobs,
-            "log_level": self.log_level,
-            "log_file": self.log_file,
-            "jobs_db_path": self.jobs_db_path,
-        }

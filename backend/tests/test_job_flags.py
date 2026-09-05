@@ -130,6 +130,7 @@ class TestJobFlags(unittest.TestCase):
 
     def test_existing_database_receives_empty_flags_without_changing_jobs(self):
         with self.db._get_connection() as conn:
+            conn.execute("DROP VIEW review_jobs")
             for column in ["is_flagged", "flag_reason", "flagged_at"]:
                 conn.execute(f"ALTER TABLE jobs DROP COLUMN {column}")
             conn.commit()

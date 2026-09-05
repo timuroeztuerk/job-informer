@@ -3,6 +3,7 @@ import { fetchDbSummary, getApiErrorMessage, listRuns } from "../api";
 import type { CountStat, DbSummary, IntelligenceWindow, RunSummary } from "../types";
 import { readEnumParam, replaceSearchParams } from "../urlState";
 import CollectionEvidence from "./CollectionEvidence";
+import { jobLocation } from "../jobPresentation";
 
 interface SummaryPageProps { className?: string; onOpenDashboard: () => void }
 const windows: { value: IntelligenceWindow; label: string }[] = [
@@ -176,9 +177,9 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className, onOpenDashboard })
           <section className="market-panel" aria-labelledby="recurring-title">
             <div className="market-section-heading"><div><p className="label">Recurring jobs</p><h3 id="recurring-title">Back in your searches</h3></div><button type="button" className="market-text-link" onClick={() => openJobs({ repeated: "1", sort: "seen_count_desc" })}>View all <Arrow /></button></div>
             {summary.recurring_jobs.length ? <div className="market-recurring-list">{summary.recurring_jobs.map((job) => <button type="button" key={job.job_id} className="market-recurring-row" onClick={() => openJobs({ job: job.job_id, repeated: "1", sort: "seen_count_desc" })}>
-              <span className="market-repeat-badge"><strong>{number(job.seen_count || 1)}</strong><small>sightings</small></span><span className="market-recurring-copy"><strong>{job.title}</strong><span>{job.company} · {job.location}</span><small>Last seen {formatDate(job.last_seen_at)}</small></span><Arrow />
+              <span className="market-repeat-badge"><strong>{number(job.seen_count || 1)}</strong><small>sightings</small></span><span className="market-recurring-copy"><strong>{job.title}</strong><span>{job.company} · {jobLocation(job)}</span><small>Last seen {formatDate(job.last_seen_at)}</small></span><Arrow />
             </button>)}</div> : <p className="market-no-repeats muted">No repeat sightings in this sample yet. Subsequent collections will surface returning postings here.</p>}
-            <p className="market-footnote">Sightings count all recorded encounters with the same posting, including multiple runs on one day.</p>
+            <p className="market-footnote">Matching postings count as one job. Each collection run counts once, including multiple runs on one day.</p>
           </section>
         </div>
       </>}

@@ -4,6 +4,7 @@ import JobTable, { JobTableHandle } from "./components/JobTable";
 import RunPane from "./components/RunPane";
 import SummaryPage from "./components/SummaryPage";
 import DescriptionQueue from "./components/DescriptionQueue";
+import ExtractionQueue from "./components/ExtractionQueue";
 import { API_BASE, fetchStats, getApiErrorMessage } from "./api";
 import type { Job, JobFlag, JobStats, RunStatus } from "./types";
 import { readTextParam, replaceSearchParams } from "./urlState";
@@ -219,6 +220,7 @@ const App: React.FC = () => {
           {viewMode === "dashboard" && (
             <>
               <DescriptionQueue refreshToken={descriptionRefreshToken} onChanged={handleDescriptionQueueChanged} />
+              <ExtractionQueue onChanged={handleDescriptionQueueChanged} />
               <div className="jobs">
                 <JobTable
                   ref={tableRef}

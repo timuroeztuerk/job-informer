@@ -29,7 +29,7 @@ describe("original descriptions", () => {
     vi.mocked(requestDescription).mockReset().mockResolvedValue({ ...empty, queue: { ...queue, paused: true, queued: 1 }, attempts: [attempt] });
     vi.mocked(reparseDescription).mockReset().mockResolvedValue(saved);
     vi.mocked(fetchDescriptionQueue).mockReset().mockResolvedValue(queue);
-    vi.mocked(queueDescriptions).mockReset().mockResolvedValue({ ...queue, added: 10, queued: 10 });
+    vi.mocked(queueDescriptions).mockReset().mockResolvedValue({ ...queue, added: 35, queued: 35 });
     vi.mocked(controlDescriptionQueue).mockReset().mockResolvedValue({ ...queue, paused: true });
   });
 
@@ -61,6 +61,24 @@ describe("original descriptions", () => {
     expect(onQueueChanged).toHaveBeenCalledOnce();
   });
 
+  it("shows earlier collected text immediately and refreshes only on request", async () => {
+    const legacy: JobDescriptionResponse = { ...saved, reparse_available: false,
+      saved: { ...saved.saved!, source_kind: "legacy_text", extractor: "legacy_job_text",
+        fetched_at: "2025-08-12T09:00:00Z", data: { ...saved.saved!.data, criteria: [] } } };
+    vi.mocked(fetchDescription).mockResolvedValue(legacy);
+    const user = userEvent.setup();
+    const { container } = render(<JobDescription jobId="linkedin:123" />);
+    expect(await screen.findByText(/Saved during an earlier collection/)).toBeInTheDocument();
+    expect(screen.getByText(/Build reliable models/)).toBeInTheDocument();
+    expect(container.querySelector("img, script")).toBeNull();
+    expect(requestDescription).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Fetch description" })).not.toBeInTheDocument();
+    await user.click(screen.getByText("Saved source & retrieval history"));
+    expect(screen.queryByRole("button", { name: "Reparse saved source" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Refresh source" }));
+    expect(requestDescription).toHaveBeenCalledWith("linkedin:123", true);
+  });
+
   it("retains the saved description and offers refresh after a failed attempt", async () => {
     vi.mocked(fetchDescription).mockResolvedValue({ ...saved, attempts: [{ ...attempt, status: "failed", error_kind: "network", error_message: "Request timed out." }] });
     const user = userEvent.setup();
@@ -81,16 +99,16 @@ describe("original descriptions", () => {
     expect(screen.queryByText(/Build reliable models/)).not.toBeInTheDocument();
   });
 
-  it("shows queue progress, handles pause, and keeps batches explicit", async () => {
+  it("queues all remaining descriptions explicitly and keeps pause available", async () => {
     vi.mocked(fetchDescriptionQueue).mockResolvedValue({ ...queue, queued: 2 });
     const user = userEvent.setup();
     const onChanged = vi.fn();
     const { unmount } = render(<DescriptionQueue refreshToken={0} onChanged={onChanged} />);
     await screen.findByText("1 saved · 2 queued");
     expect(queueDescriptions).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Fetch next 10" }));
-    expect(queueDescriptions).toHaveBeenCalledWith("next");
-    expect(await screen.findByRole("status")).toHaveTextContent("10 descriptions added");
+    await user.click(screen.getByRole("button", { name: "Fetch all" }));
+    expect(queueDescriptions).toHaveBeenCalledWith("all");
+    expect(await screen.findByRole("status")).toHaveTextContent("35 descriptions added");
     await user.click(screen.getByRole("button", { name: "Pause descriptions" }));
     expect(controlDescriptionQueue).toHaveBeenCalledWith("pause");
     expect(await screen.findByRole("button", { name: "Resume descriptions" })).toBeEnabled();

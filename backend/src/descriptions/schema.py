@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS description_fetches (
     job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE RESTRICT,
     source_url TEXT NOT NULL,
     requested_at TEXT NOT NULL,
+    refresh INTEGER NOT NULL DEFAULT 0 CHECK(refresh IN (0,1)),
     started_at TEXT,
     finished_at TEXT,
     status TEXT NOT NULL CHECK(status IN ('queued','fetching','succeeded','unchanged','failed','interrupted')),
@@ -51,3 +52,22 @@ CREATE TABLE IF NOT EXISTS description_queue_state (
 );
 INSERT OR IGNORE INTO description_queue_state(id) VALUES(1);
 """
+
+
+def initialize_schema(conn):
+    conn.executescript(SCHEMA)
+    if "refresh" not in {row[1] for row in conn.execute("PRAGMA table_info(description_fetches)")}:
+        conn.execute("ALTER TABLE description_fetches ADD COLUMN refresh INTEGER NOT NULL DEFAULT 0 CHECK(refresh IN (0,1))")
+        # The old enqueue code only queued a saved public description when an
+        # explicit refresh was requested. Preserve those pending refreshes.
+        conn.execute("""UPDATE description_fetches SET refresh=1
+            WHERE status IN ('queued','fetching') AND EXISTS (
+                SELECT 1 FROM description_sources s JOIN description_extractions e USING(source_id)
+                WHERE s.job_id=description_fetches.job_id AND e.extractor='linkedin_public_job'
+                  AND e.extracted_at <= description_fetches.requested_at)""")
+    conn.execute("""CREATE VIEW IF NOT EXISTS saved_job_descriptions AS
+        SELECT member.job_id, s.source_id, s.fetched_at, e.extractor
+        FROM description_sources s JOIN description_extractions e USING(source_id)
+        JOIN job_memberships owner ON owner.job_id=s.job_id
+        JOIN job_memberships member ON member.canonical_job_id=owner.canonical_job_id
+        WHERE e.extractor IN ('linkedin_public_job', 'legacy_job_text')""")

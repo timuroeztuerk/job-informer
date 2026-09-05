@@ -51,6 +51,7 @@ const JobDescription: React.FC<Props> = ({ jobId, refreshToken = 0, onQueueChang
     }
   };
   const saved = result?.saved;
+  const earlierCollection = saved?.source_kind === "legacy_text";
   const latest = result?.attempts[0];
   const pending = latest?.status === "queued" || latest?.status === "fetching";
   return <section className="job-description" aria-labelledby="job-description-title">
@@ -65,14 +66,15 @@ const JobDescription: React.FC<Props> = ({ jobId, refreshToken = 0, onQueueChang
     {latest?.error_message && !pending && <p className="description-notice">{latest.error_message}{saved ? " Showing the last saved description." : ""}</p>}
     {!loading && !saved && !pending && <p className="muted small">Fetch the public posting to save its full description and listed job criteria for later analysis.</p>}
     {saved && <>
-      <p className="muted small">Saved {date(saved.fetched_at)} · LinkedIn{latest?.status === "unchanged" ? " · Source unchanged" : ""}</p>
+      <p className="muted small">{earlierCollection ? "Saved during an earlier collection" : "Saved"} · {date(saved.fetched_at)}{latest?.status === "unchanged" && latest.http_status ? " · Source unchanged" : ""}</p>
+      {earlierCollection && <p className="muted small">This saved text is ready to read. Refresh only to check the live posting.</p>}
       {saved.data.criteria.length > 0 && <dl className="description-criteria" aria-label="Listed job criteria">{saved.data.criteria.map((item, index) => <div key={`${item.key}-${index}`}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>}
       <div className="description-copy">{saved.data.description_text}</div>
     </>}
     {result && (result.source_versions > 0 || result.attempts.length > 0) && <details className="description-history">
       <summary>Saved source & retrieval history</summary>
       <p>{result.source_versions} saved source {result.source_versions === 1 ? "version" : "versions"}. Original source content is retained for future extraction.</p>
-      {saved && <p>Parser {saved.extractor_version} · Schema {saved.schema_version} · Parsed {date(saved.extracted_at)}</p>}
+      {saved && <p>{earlierCollection ? `Earlier saved text connected on ${date(saved.extracted_at)}.` : `Parser ${saved.extractor_version} · Schema ${saved.schema_version} · Parsed ${date(saved.extracted_at)}`}</p>}
       {result.reparse_available && <button type="button" className="ghost sm" disabled={busy || pending} onClick={() => void act(true)}>Reparse saved source</button>}
       <ol>{result.attempts.map((attempt) => <li key={attempt.fetch_id}><strong>{attempt.status.replace(/_/g, " ")}</strong> · {date(attempt.finished_at || attempt.requested_at)}{attempt.http_status ? ` · HTTP ${attempt.http_status}` : ""}{attempt.error_message && <span>{attempt.error_message}</span>}</li>)}</ol>
     </details>}

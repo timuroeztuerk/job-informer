@@ -16,6 +16,7 @@ from backend.src.descriptions import linkedin
 from backend.src.descriptions.linkedin import DescriptionError, FetchedSource, parse_description
 from backend.src.descriptions.service import DescriptionService
 from backend.src.descriptions.store import DescriptionStore
+from backend.src.descriptions.legacy import LEGACY_EXTRACTOR
 from backend.src.utils.database import JobDatabase
 from backend.src.utils.database_backup import create_database_backup, verify_sqlite_database
 
@@ -32,6 +33,28 @@ def page(job_id="123", copy="Build <strong>reliable</strong> models."):
 
 
 class TestDescriptionParsing(unittest.TestCase):
+    def test_expired_listing_redirect_is_unavailable_without_following_it(self):
+        for location, expected in [
+            ("https://de.linkedin.com/jobs/analyst-stellen?trk=expired_jd_redirect", "not_found"),
+            ("/jobs/search?trk=expired_jd_redirect", "not_found"),
+            ("https://www.linkedin.com/jobs/view/data-scientist-123", "blocked"),
+            ("https://www.linkedin.com/login?trk=expired_jd_redirect", "blocked"),
+            ("https://linkedin.com.example.org/jobs/search?trk=expired_jd_redirect", "blocked"),
+        ]:
+            response = Mock(status_code=301, headers={"Location": location})
+            response.__enter__ = Mock(return_value=response)
+            response.__exit__ = Mock(return_value=None)
+            with self.subTest(location=location), patch.object(linkedin.requests, "get", return_value=response) as get:
+                with self.assertRaises(DescriptionError) as error:
+                    linkedin.fetch_source("linkedin:123")
+                self.assertEqual(error.exception.kind, expected)
+                self.assertEqual(error.exception.http_status, 301)
+                if expected == "not_found":
+                    self.assertIsNone(error.exception.retry_after)
+                self.assertEqual(get.call_count, 1)
+                self.assertFalse(get.call_args.kwargs["allow_redirects"])
+                response.iter_content.assert_not_called()
+
     def test_preserves_readable_text_and_explicit_criteria_without_page_chrome(self):
         parsed = parse_description(page(), "linkedin:123")
         self.assertEqual(parsed["description_text"], "Build reliable models.\n• Python & SQL\n• Zürich team")
@@ -102,6 +125,101 @@ class TestDescriptionWorkflow(unittest.TestCase):
         self.store.enqueue(["linkedin:123"], refresh=refresh)
         self.service.process_one()
         return self.store.job_description("linkedin:123")
+
+    def legacy_text(self, job_id="linkedin:123", text="Earlier description.\nPython & SQL, Zürich."):
+        with self.store.connect() as conn:
+            if "description" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+                conn.execute("ALTER TABLE jobs ADD COLUMN description TEXT")
+            conn.execute("UPDATE jobs SET description=? WHERE job_id=?", (text, job_id))
+        return text
+
+    def test_legacy_text_import_is_exact_idempotent_and_does_not_fabricate_fetches(self):
+        text = self.legacy_text(text="  Earlier description.\n• Python & SQL, Zürich.\n<script>plain text</script>  ")
+        self.legacy_text("linkedin:789", "FETCH_FAILED")
+        self.db.set_job_flag("linkedin:123", True, "My review")
+        self.db.set_job_favorite("linkedin:123", True)
+        with self.store.connect() as conn:
+            before = tuple(conn.execute("SELECT * FROM jobs WHERE job_id='linkedin:123'").fetchone())
+        for _ in range(2):
+            JobDatabase(self.path)
+        result = self.store.job_description("linkedin:123")
+        self.assertEqual(result["saved"]["source_kind"], "legacy_text")
+        self.assertEqual(result["saved"]["data"]["description_text"], text)
+        self.assertEqual(result["saved"]["data"]["criteria"], [])
+        self.assertEqual(result["saved"]["extractor"], LEGACY_EXTRACTOR)
+        self.assertEqual(result["source_versions"], 1)
+        self.assertFalse(result["reparse_available"])
+        self.assertEqual(result["attempts"], [])
+        self.assertNotIn("linkedin:123", self.store.unfetched_candidates())
+        self.assertEqual(self.store.enqueue(["linkedin:123"]), 0)
+        self.assertEqual(self.store.queue_status()["saved_jobs"], 1)
+        self.assertIsNone(self.store.job_description("linkedin:789")["saved"])
+        self.assertIn("linkedin:789", self.store.unfetched_candidates())
+        with self.store.connect() as conn:
+            self.assertEqual(tuple(conn.execute("SELECT * FROM jobs WHERE job_id='linkedin:123'").fetchone()), before)
+            self.assertEqual(conn.execute("SELECT body FROM description_sources").fetchone()[0], text.encode())
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM description_extractions").fetchone()[0], 1)
+            self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.fetcher.assert_not_called()
+
+    def test_import_reuses_pending_fetches_but_keeps_explicit_refreshes(self):
+        self.legacy_text()
+        self.legacy_text("linkedin:456")
+        self.store.enqueue(["linkedin:123"])
+        self.store.enqueue(["linkedin:456"], refresh=True)
+        self.store.enqueue(["linkedin:789"])
+        JobDatabase(self.path)
+        self.store.recover()
+        cached = self.store.job_description("linkedin:123")["attempts"][0]
+        self.assertEqual(cached["status"], "unchanged")
+        self.assertIsNone(cached["started_at"])
+        self.assertIsNone(cached["http_status"])
+        self.assertIn("No network request", cached["error_message"])
+        self.assertEqual(self.store.queue_status()["queued"], 2)
+        self.store.resume()
+        self.assertEqual(self.store.claim()["job_id"], "linkedin:456")
+        self.fetcher.assert_not_called()
+
+    def test_public_text_wins_over_import_and_failed_refresh_keeps_it(self):
+        public = self.retrieve()["saved"]
+        self.legacy_text()
+        JobDatabase(self.path)
+        self.assertEqual(self.store.job_description("linkedin:123")["saved"], public)
+        self.assertEqual(self.store.job_description("linkedin:123")["source_versions"], 2)
+        self.fetcher.side_effect = DescriptionError("not_found", "Expired", http_status=301)
+        self.assertEqual(self.retrieve(refresh=True)["saved"], public)
+        self.assertEqual(self.store.failed_candidates(), ["linkedin:123"])
+        with patch.object(api, "description_service", self.service), patch.object(self.service, "start"):
+            self.assertEqual(api.queue_descriptions(api.DescriptionBatchRequest(selection="retry"), _=True)["added"], 1)
+
+    def test_legacy_text_is_readable_through_aliases_and_without_a_fetchable_id(self):
+        self.legacy_text("linkedin:789", "\n \t ")
+        with self.store.connect() as conn:
+            conn.execute("""INSERT INTO jobs (job_id,title,company,location,source,url,description,
+                scraped_at,first_seen_at,last_seen_at) VALUES
+                ('de.linkedin.com/jobs/view/123','Data Scientist','Company 123','Berlin','LinkedIn',
+                 'https://de.linkedin.com/jobs/view/123','Saved alias text','2026-07-12','2026-07-12','2026-07-12')""")
+            conn.execute("UPDATE jobs SET job_id='old-unfetchable',description='Saved local text' WHERE job_id='linkedin:456'")
+        JobDatabase(self.path)
+        self.assertEqual(self.store.job_description("linkedin:123")["saved"]["data"]["description_text"], "Saved alias text")
+        self.assertNotIn("linkedin:123", self.store.unfetched_candidates())
+        self.assertEqual(self.store.enqueue(["linkedin:123", "old-unfetchable"]), 0)
+        self.assertEqual(self.store.job_description("old-unfetchable")["saved"]["data"]["description_text"], "Saved local text")
+        self.assertIsNone(self.store.job_description("linkedin:789")["saved"])
+        with self.assertRaises(ValueError):
+            self.store.enqueue(["old-unfetchable"], refresh=True)
+
+    def test_upgrade_preserves_refresh_intent_and_newer_text_for_existing_queue(self):
+        self.retrieve()
+        self.store.enqueue(["linkedin:123"], refresh=True)
+        with self.store.connect() as conn:
+            conn.execute("ALTER TABLE description_fetches DROP COLUMN refresh")
+        self.legacy_text()
+        JobDatabase(self.path)
+        self.store.recover()
+        self.assertEqual(self.store.queue_status()["queued"], 1)
+        self.store.resume()
+        self.assertEqual(self.store.claim()["refresh"], 1)
 
     def test_cache_deduplication_history_and_annotations_survive_refresh_and_reopen(self):
         self.db.set_job_flag("linkedin:123", True, "Personal example")
@@ -183,13 +301,61 @@ class TestDescriptionWorkflow(unittest.TestCase):
             self.store.resume()
         self.assertEqual(self.fetcher.call_count, 1)
 
+    def test_expired_refresh_preserves_saved_text_and_continues_to_the_next_job(self):
+        original = self.retrieve()["saved"]
+        self.store.enqueue(["linkedin:123", "linkedin:456"], refresh=True)
+        self.fetcher.side_effect = [
+            DescriptionError("not_found", "This posting has expired.", http_status=301),
+            FetchedSource(200, page("456")),
+        ]
+        self.assertTrue(self.service.process_one())
+        state = self.store.queue_status()
+        self.assertFalse(state["paused"])
+        self.assertIsNone(state["cooldown_until"])
+        self.assertEqual(state["queued"], 1)
+        result = self.store.job_description("linkedin:123")
+        self.assertEqual(result["saved"], original)
+        self.assertEqual(result["attempts"][0]["error_kind"], "not_found")
+        self.assertTrue(self.service.process_one())
+        self.assertEqual(self.store.job_description("linkedin:456")["attempts"][0]["status"], "succeeded")
+
     def test_batch_prioritizes_favorites_and_skips_previous_attempts_and_archived_jobs(self):
         with self.store.connect() as conn:
             conn.execute("UPDATE jobs SET archived_at='2026-09-05',is_favorite=1 WHERE job_id='linkedin:789'")
             conn.execute("UPDATE jobs SET archived_at='2026-09-05' WHERE job_id='linkedin:456'")
-        self.assertEqual(self.store.next_candidates(), ["linkedin:789", "linkedin:123"])
+        self.assertEqual(self.store.unfetched_candidates(), ["linkedin:789", "linkedin:123"])
         self.store.enqueue(["linkedin:123"])
-        self.assertEqual(self.store.next_candidates(), ["linkedin:789"])
+        self.assertEqual(self.store.unfetched_candidates(), ["linkedin:789"])
+
+    def test_fetch_all_queues_beyond_batch_limits_without_repeating_attempts_or_resuming(self):
+        self.retrieve()  # Saved descriptions stay out of the new queue.
+        self.fetcher.reset_mock()
+        self.db.put_into_sql(pd.DataFrame([
+            {"job_id": f"linkedin:{number}", "title": "Data Scientist", "company": "ACME",
+             "source": "LinkedIn", "location": "Berlin", "url": f"https://www.linkedin.com/jobs/view/{number}/"}
+            for number in range(1000, 1035)
+        ]), observed_at="2026-09-05T08:00:00Z")
+        with self.store.connect() as conn:
+            conn.execute("UPDATE jobs SET archived_at='2026-09-05' WHERE job_id IN ('linkedin:456','linkedin:789')")
+            conn.execute("UPDATE jobs SET is_favorite=1 WHERE job_id='linkedin:789'")
+        self.store.enqueue(["linkedin:1000", "linkedin:1001"])
+        failed = self.store.claim()
+        self.store.finish(failed["fetch_id"], "failed", error_kind="network")
+        self.store.pause()
+
+        with patch.object(api, "description_service", self.service), patch.object(self.service, "start"):
+            result = api.queue_descriptions(api.DescriptionBatchRequest(selection="all"), _=True)
+            self.assertEqual(result["added"], 34)
+            self.assertEqual(result["queued"], 35)  # Includes the earlier pending job.
+            self.assertTrue(result["paused"])
+            self.assertEqual(api.queue_descriptions(api.DescriptionBatchRequest(), _=True)["added"], 0)
+        with self.store.connect() as conn:
+            queued = [r[0] for r in conn.execute("SELECT job_id FROM description_fetches WHERE status='queued' ORDER BY fetch_id")]
+        self.assertEqual(queued[:2], ["linkedin:1001", "linkedin:789"])
+        self.assertEqual(set(queued), {"linkedin:789", *(f"linkedin:{n}" for n in range(1001, 1035))})
+        self.assertEqual(self.store.failed_candidates(), ["linkedin:1000"])
+        self.assertFalse(self.service.process_one())
+        self.fetcher.assert_not_called()
 
     def test_api_validation_and_routes_leave_missing_jobs_and_unknown_urls_unfetched(self):
         with patch.object(api, "description_service", self.service), patch.object(self.service, "start"):
@@ -199,8 +365,11 @@ class TestDescriptionWorkflow(unittest.TestCase):
             with self.assertRaises(HTTPException) as error:
                 api.request_description("linkedin:missing", api.DescriptionRequest(), _=True)
             self.assertEqual(error.exception.status_code, 404)
+            with self.assertRaises(LookupError):
+                self.store.enqueue(["linkedin:789", "linkedin:missing"])
+            self.assertEqual(self.store.job_description("linkedin:789")["attempts"], [])
             with self.assertRaises(ValidationError):
-                api.DescriptionBatchRequest(limit=10000)
+                api.DescriptionBatchRequest(selection="retry", limit=10000)
             api.control_description_queue("pause", _=True)
             self.assertTrue(api.description_queue(_=True)["paused"])
         self.fetcher.assert_not_called()

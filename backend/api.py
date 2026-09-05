@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Minimal HTTP API so the Vue frontend can trigger scrapes and read jobs.
-"""
+"""Local API for collection, job review, descriptions, and Intelligence."""
 
 from __future__ import annotations
 
@@ -32,6 +30,8 @@ sys.path.insert(0, str(ROOT))
 from src.utils.database import JobDatabase  # noqa: E402
 from src.descriptions.service import DescriptionService  # noqa: E402
 from src.descriptions.linkedin import DescriptionError  # noqa: E402
+from src.ai.service import AIService  # noqa: E402
+from src.utils.job_consolidation import canonical_job_id, member_job_ids  # noqa: E402
 from src.utils.collection_scope import build_collection_scope_comparison  # noqa: E402
 from src.utils.db_summary import build_db_summary, compute_collection_freshness  # noqa: E402
 from src.utils.locations import primary_location  # noqa: E402
@@ -84,6 +84,7 @@ REQUIRED_DB_TABLES = frozenset(
         "relevance_validation_labels",
         "scrape_runs",
         "description_sources", "description_extractions", "description_fetches", "description_queue_state",
+        "ai_work", "ai_attempts", "ai_queue_state",
     }
 )
 
@@ -170,10 +171,11 @@ def database_readiness(
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    global job_db, run_store, description_service
+    global job_db, run_store, description_service, ai_service
     job_db = JobDatabase(APP_SETTINGS.db_path)
     description_service = DescriptionService(job_db.db_path)
     description_service.store.recover()
+    ai_service = AIService(job_db.db_path)
     run_store = RunStore(APP_SETTINGS.run_store_db_path)
     readiness = database_readiness()
     logger.info(
@@ -187,6 +189,7 @@ async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        await ai_service.close()
         description_service.close()
         for record in list(RUNS.values()):
             if record.process.poll() is None:
@@ -200,6 +203,7 @@ async def app_lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         job_db = None
         run_store = None
         description_service = None
+        ai_service = None
 
 
 app = FastAPI(title="Job Informer API", version="0.1.0", lifespan=app_lifespan)
@@ -229,6 +233,13 @@ def readiness_check(response: Response) -> dict:
 job_db: Optional[JobDatabase] = None
 run_store: Optional["RunStore"] = None
 description_service: Optional[DescriptionService] = None
+ai_service: Optional[AIService] = None
+
+
+def _ai() -> AIService:
+    if ai_service is None:
+        raise HTTPException(status_code=503, detail="AI extraction is not initialized yet.")
+    return ai_service
 
 
 def _descriptions() -> DescriptionService:
@@ -302,25 +313,6 @@ class RunProgress(BaseModel):
     events: list[RunProgressEvent] = Field(default_factory=list)
 
 
-class RunStatus(BaseModel):
-    run_id: str
-    mode: str
-    status: str
-    return_code: Optional[int] = None
-    log_tail: str = ""
-    started_at: datetime
-    finished_at: Optional[datetime] = None
-    keywords: Optional[str] = None
-    locations: Optional[str] = None
-    time_range: Optional[str] = None
-    trigger: str = "manual"
-    pid: Optional[int] = None
-    metrics: Optional[dict[str, int]] = None
-    query_coverage: Optional[list[dict[str, Any]]] = None
-    scope_comparison: Optional[dict[str, Any]] = None
-    progress: Optional[RunProgress] = None
-
-
 class RunSummary(BaseModel):
     run_id: str
     mode: str
@@ -337,6 +329,10 @@ class RunSummary(BaseModel):
     query_coverage: Optional[list[dict[str, Any]]] = None
     scope_comparison: Optional[dict[str, Any]] = None
     progress: Optional[RunProgress] = None
+
+
+class RunStatus(RunSummary):
+    log_tail: str = ""
 
 
 class RunStore:
@@ -583,33 +579,6 @@ class RunStore:
                 )
             conn.commit()
             return len(rows)
-
-    def latest_successful_collection(self) -> Optional[dict]:
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                """
-                SELECT * FROM api_runs
-                WHERE mode = 'run-once' AND status = 'succeeded'
-                ORDER BY datetime(finished_at) DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        return {key: row[key] for key in row.keys()} if row else None
-
-    def latest_collection_attempt(self) -> Optional[dict]:
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                """
-                SELECT * FROM api_runs
-                WHERE mode = 'run-once'
-                ORDER BY datetime(started_at) DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        return {key: row[key] for key in row.keys()} if row else None
-
 
 def _metrics_for_api_run(run_id: str) -> Optional[dict[str, int]]:
     if not run_id:
@@ -861,7 +830,7 @@ RUNS: dict[str, RunRecord] = {}
 @app.post("/runs", response_model=RunStatus)
 def start_run(payload: RunRequest, _: bool = Depends(require_token)) -> RunStatus:
     """
-    Start `python main.py --run-once` in the background.
+    Start one manual collection in the background.
     Optional overrides: keywords, locations, time_range.
     """
     return _launch_run(payload, trigger="manual")
@@ -894,7 +863,7 @@ def _launch_run(payload: RunRequest, *, trigger: str) -> RunStatus:
             detail=f"Run {active['run_id']} is already {active['status']}; wait for it to finish.",
         )
 
-    cmd = [sys.executable, "-u", str(ROOT / "main.py"), "--run-once"]
+    cmd = [sys.executable, "-u", str(ROOT / "main.py")]
     if payload.keywords:
         cmd += ["--keywords", payload.keywords]
     if payload.locations:
@@ -1047,7 +1016,9 @@ def list_jobs(
         clauses.append("(j.title LIKE ? OR j.company LIKE ? OR j.location LIKE ?)")
         params.extend([like, like, like])
     if location:
-        clauses.append("primary_location(j.location) = ?" if location_primary else "j.location LIKE ?")
+        match = "primary_location(p.location) = ?" if location_primary else "p.location LIKE ?"
+        clauses.append(f"""EXISTS (SELECT 1 FROM job_memberships m JOIN jobs p USING(job_id)
+            WHERE m.canonical_job_id = j.job_id AND {match})""")
         params.append(primary_location(location) if location_primary else f"%{location}%")
     if source:
         clauses.append("j.source = ?")
@@ -1077,7 +1048,7 @@ def list_jobs(
                 FROM job_query_matches jqm_filter
                 INNER JOIN collection_queries cq_filter
                     ON cq_filter.collection_query_id = jqm_filter.collection_query_id
-                WHERE jqm_filter.job_id = j.job_id
+                WHERE jqm_filter.job_id IN (SELECT job_id FROM job_memberships WHERE canonical_job_id = j.job_id)
                   AND cq_filter.query_group_key = ?
             )
             """
@@ -1130,14 +1101,16 @@ def list_jobs(
                     j.relevance_reason,
                     j.relevance_ruleset_version,
                     j.relevance_evaluated_at,
+                    j.posting_count,
+                    j.postings_json,
                     (
                         SELECT GROUP_CONCAT(DISTINCT cq.query_group_key)
                         FROM job_query_matches jqm
                         INNER JOIN collection_queries cq
                             ON cq.collection_query_id = jqm.collection_query_id
-                        WHERE jqm.job_id = j.job_id
+                        WHERE jqm.job_id IN (SELECT job_id FROM job_memberships WHERE canonical_job_id = j.job_id)
                     ) AS query_groups_csv
-                FROM jobs j
+                FROM review_jobs j
                 WHERE {where_clause}
                 ORDER BY {order_by}
                 LIMIT ? OFFSET ?
@@ -1146,7 +1119,7 @@ def list_jobs(
 
             count_query = f"""
                 SELECT COUNT(*)
-                FROM jobs j
+                FROM review_jobs j
                 WHERE {where_clause}
             """
             total = conn.execute(count_query, params).fetchone()[0]
@@ -1164,8 +1137,35 @@ class DescriptionRequest(BaseModel):
     refresh: bool = False
 
 
+class AIRequest(BaseModel):
+    retry: bool = False
+
+
+@app.get("/ai/queue")
+async def ai_queue(_: bool = Depends(require_token)) -> dict:
+    return await _ai().status()
+
+
+@app.post("/ai/queue")
+async def queue_ai(request: AIRequest, _: bool = Depends(require_token)) -> dict:
+    with _description_errors():
+        return await _ai().queue(request.retry)
+
+
+@app.post("/ai/queue/{action}")
+async def control_ai(action: Literal["pause", "resume"], _: bool = Depends(require_token)) -> dict:
+    with _description_errors():
+        return await _ai().control(action)
+
+
+@app.get("/jobs/{job_id:path}/extraction")
+async def get_extraction(job_id: str, _: bool = Depends(require_token)) -> dict:
+    with _description_errors():
+        return await _ai().db(_ai().store.job_result, job_id)
+
+
 class DescriptionBatchRequest(BaseModel):
-    selection: Literal["next", "retry"] = "next"
+    selection: Literal["all", "retry"] = "all"
     limit: int = Field(default=10, ge=1, le=20)
 
 
@@ -1178,7 +1178,7 @@ def description_queue(_: bool = Depends(require_token)) -> dict:
 def queue_descriptions(request: DescriptionBatchRequest, _: bool = Depends(require_token)) -> dict:
     service = _descriptions()
     with _description_errors():
-        jobs = service.store.next_candidates(request.limit) if request.selection == "next" else service.store.failed_candidates(request.limit)
+        jobs = service.store.unfetched_candidates() if request.selection == "all" else service.store.failed_candidates(request.limit)
         added = service.enqueue(jobs, refresh=request.selection == "retry")
     return {**service.store.queue_status(), "added": added}
 
@@ -1221,8 +1221,9 @@ def get_job(
     """Return a single job by id."""
     try:
         with open_jobs_db() as conn:
+            job_id = canonical_job_id(conn, job_id)
             row = conn.execute(
-                "SELECT * FROM jobs WHERE job_id = ? AND LOWER(source) = 'linkedin'",
+                "SELECT * FROM review_jobs WHERE job_id = ? AND LOWER(source) = 'linkedin'",
                 (job_id,),
             ).fetchone()
             query_matches = conn.execute(
@@ -1240,7 +1241,7 @@ def get_job(
                     ON cq.collection_query_id = jqm.collection_query_id
                 INNER JOIN scrape_runs sr ON sr.scrape_run_id = cq.scrape_run_id
                 LEFT JOIN query_groups qg ON qg.query_group_key = cq.query_group_key
-                WHERE jqm.job_id = ?
+                WHERE jqm.job_id IN (SELECT job_id FROM job_memberships WHERE canonical_job_id = ?)
                 GROUP BY cq.query_group_key, qg.display_name, cq.query_text, cq.location
                 ORDER BY datetime(MAX(sr.observed_at)) DESC, cq.query_group_key, cq.query_text
                 LIMIT 50
@@ -1265,18 +1266,20 @@ def delete_job(job_id: str, _: bool = Depends(require_token)) -> Response:
         db = _require_job_db()
         with open_jobs_db() as conn:
             existing = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            members = member_job_ids(conn, job_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Job not found")
 
         archive_summary = db.archive_jobs_with_filter_decisions(
             [
                 {
-                    "job_id": job_id,
+                    "job_id": member,
                     "decision_source": "manual",
                     "decision_action": "archive",
                     "filter_name": "manual_archive",
                     "reason": "Archived manually via API",
                 }
+                for member in members
             ],
             default_reason="Archived manually via API",
         )
@@ -1294,7 +1297,7 @@ def restore_job(job_id: str, _: bool = Depends(require_token)) -> Response:
     """Restore a previously archived job to the active set."""
     try:
         with open_jobs_db() as conn:
-            row = conn.execute("SELECT archived_at FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            row = conn.execute("SELECT archived_at FROM review_jobs WHERE job_id = ?", (canonical_job_id(conn, job_id),)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Job not found")
         if row["archived_at"] in (None, ""):
@@ -1348,27 +1351,9 @@ def update_job_favorite(
 
 @app.get("/stats")
 def job_stats(_: bool = Depends(require_token)) -> dict:
-    """Lightweight wrapper around JobDatabase summary for dashboards."""
+    """Return filter options, collection freshness, and database readiness."""
     try:
         with open_jobs_db() as conn:
-            counts = conn.execute(
-                """
-                SELECT
-                    SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN archived_at IS NULL AND datetime(scraped_at) > datetime('now', '-7 days') THEN 1 ELSE 0 END),
-                    MIN(CASE WHEN archived_at IS NULL THEN datetime(scraped_at) END),
-                    MAX(CASE WHEN archived_at IS NULL THEN datetime(scraped_at) END)
-                FROM jobs
-                WHERE LOWER(source) = 'linkedin'
-                """
-            ).fetchone()
-            sources = [
-                r[0]
-                for r in conn.execute(
-                    "SELECT DISTINCT source FROM jobs WHERE archived_at IS NULL AND LOWER(source) = 'linkedin' ORDER BY source"
-                ).fetchall()
-            ]
             companies = [
                 r[0]
                 for r in conn.execute(
@@ -1402,36 +1387,20 @@ def job_stats(_: bool = Depends(require_token)) -> dict:
                     """
                 ).fetchall()
             ]
-            company_rows = conn.execute(
-                """
-                SELECT company, COUNT(*)
-                FROM jobs
-                WHERE archived_at IS NULL AND LOWER(source) = 'linkedin'
-                GROUP BY company ORDER BY COUNT(*) DESC LIMIT 10
-                """
-            ).fetchall()
-        summary = {
-            "total_jobs": int(counts[0] or 0),
-            "archived_jobs": int(counts[1] or 0),
-            "recent_jobs_7_days": int(counts[2] or 0),
-            "date_range": {"earliest": counts[3], "latest": counts[4]},
-            "jobs_by_source": {"LinkedIn": int(counts[0] or 0)},
-            "top_companies": dict(company_rows),
+        return {
+            "companies_list": companies,
+            "role_families_list": role_families,
+            "query_groups_list": query_groups,
+            "collection_freshness": compute_collection_freshness(_require_job_db()),
+            "database": database_readiness(),
         }
-        summary["sources_list"] = sources
-        summary["companies_list"] = companies
-        summary["role_families_list"] = role_families
-        summary["query_groups_list"] = query_groups
-        summary["collection_freshness"] = compute_collection_freshness(_require_job_db())
-        summary["database"] = database_readiness()
-        return summary
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to build stats: {exc}") from exc
 
 
 @app.get("/db-summary")
 def db_summary(window: Literal["all", "7d", "30d"] = "all", _: bool = Depends(require_token)) -> dict:
-    """Expose the richer database summary that mirrors the CLI db-summary output."""
+    """Return the collected market and coverage shown in Intelligence."""
     try:
         return build_db_summary(_require_job_db(), window=window)
     except Exception as exc:
@@ -1440,6 +1409,8 @@ def db_summary(window: Literal["all", "7d", "30d"] = "all", _: bool = Depends(re
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     result = {key: row[key] for key in row.keys()}
+    if "postings_json" in result:
+        result["postings"] = json.loads(result.pop("postings_json"))
     if "is_favorite" in result:
         result["is_favorite"] = bool(result["is_favorite"])
     if "is_flagged" in result:

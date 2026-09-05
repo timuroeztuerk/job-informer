@@ -241,6 +241,24 @@ export async function fetchDescription(jobId: string): Promise<JobDescriptionRes
   return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/description`), { headers: authHeaders() }));
 }
 
+export async function fetchAIQueue(): Promise<import("./types").AIQueueState> {
+  return handleJson(await apiFetch(buildUrl("ai/queue"), { headers: authHeaders() }));
+}
+
+export async function queueAI(retry = false): Promise<import("./types").AIQueueState> {
+  return handleJson(await apiFetch(buildUrl("ai/queue"), {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ retry }),
+  }));
+}
+
+export async function controlAIQueue(action: "pause" | "resume"): Promise<import("./types").AIQueueState> {
+  return handleJson(await apiFetch(buildUrl(`ai/queue/${action}`), { method: "POST", headers: authHeaders() }));
+}
+
+export async function fetchJobExtraction(jobId: string): Promise<import("./types").AIJobResult> {
+  return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/extraction`), { headers: authHeaders() }));
+}
+
 export async function requestDescription(jobId: string, refresh = false): Promise<JobDescriptionResponse> {
   return handleJson(await apiFetch(buildUrl(`jobs/${encodeURIComponent(jobId)}/description`), {
     method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ refresh }),
@@ -255,9 +273,10 @@ export async function fetchDescriptionQueue(): Promise<DescriptionQueueState> {
   return handleJson(await apiFetch(buildUrl("descriptions/queue"), { headers: authHeaders() }));
 }
 
-export async function queueDescriptions(selection: "next" | "retry" = "next"): Promise<DescriptionQueueState> {
+export async function queueDescriptions(selection: "all" | "retry" = "all"): Promise<DescriptionQueueState> {
   return handleJson(await apiFetch(buildUrl("descriptions/queue"), {
-    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ selection, limit: 10 }),
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(selection === "all" ? { selection } : { selection, limit: 10 }),
   }));
 }
 
