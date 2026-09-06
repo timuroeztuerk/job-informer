@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { fetchDbSummary, getApiErrorMessage, listRuns } from "../api";
 import type { CountStat, DbSummary, IntelligenceWindow, RunSummary } from "../types";
 import { readEnumParam, replaceSearchParams } from "../urlState";
-import CollectionEvidence from "./CollectionEvidence";
 import { jobLocation } from "../jobPresentation";
 
 interface SummaryPageProps { className?: string; onOpenDashboard: () => void }
@@ -191,10 +190,6 @@ const SummaryPage: React.FC<SummaryPageProps> = ({ className, onOpenDashboard })
       </section>
     </>}
     {!loading && <CollectionSnapshot run={latestRun} error={runError} onOpenJobs={() => openJobs({}, false)} />}
-    {summary?.collection_validation && <CollectionEvidence evidence={summary.collection_validation} onReview={(filter) => openJobs(
-      filter === "flagged" ? { flagged: "1", archived: "include" }
-        : { relevance_outcome: filter, archived: filter === "auto_archived" ? "only" : "" }, false,
-    )} />}
     {summary && <p className="market-endnote">Counts describe your collected LinkedIn sample. They are not estimates of the entire job market. Latest sighting: {formatDate(freshness?.last_collected_at, true)}.</p>}
   </div>;
 };

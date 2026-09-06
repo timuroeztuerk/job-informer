@@ -64,7 +64,7 @@ const DescriptionQueue: React.FC<Props> = ({ refreshToken, onChanged, onActivity
     {error && <div className="description-error" role="alert">{error} <button type="button" className="ghost sm" onClick={() => setReload((value) => value + 1)}>Reload retrieval status</button></div>}
     <details className="processing-details">
       <summary>Retrieval options</summary>
-      <p>Fetch all reuses saved descriptions. It queues favorites first, then active jobs without an earlier attempt.</p>
+      <p>Fetch all reuses saved descriptions. It queues only active jobs without an earlier attempt, with active favorites first. Archived jobs are excluded from fetching and retries.</p>
       <div className="processing-options">
         {primaryAction !== "all" && <button type="button" className="ghost sm" disabled={busy || !state} onClick={() => void act("all")}>Fetch all</button>}
         {Boolean(state?.failed_jobs) && <>

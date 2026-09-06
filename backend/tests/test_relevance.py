@@ -171,7 +171,7 @@ class TestRelevanceClassifier(unittest.TestCase):
 
         self.assert_outcome("Data Warehouse Engineer", "unmatched")
         self.assert_outcome("Sales Analyst", "unmatched")
-        self.assert_outcome("Research Scientist, Drug Discovery", "unmatched")
+        self.assert_outcome("Research Scientist, Information Retrieval", "unmatched")
         self.assert_outcome("Junior Business Developer", "unmatched")
 
     def test_existing_noise_families_cover_compounds_without_hiding_adjacent_roles(self) -> None:
@@ -188,7 +188,7 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Business Analyst",
             "Junior Business Developer",
             "Data Project Manager",
-            "Research Scientist, Drug Discovery",
+            "Research Scientist, Information Retrieval",
         ):
             with self.subTest(title=title):
                 self.assert_outcome(title, "unmatched")
@@ -225,7 +225,6 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Analytics Engineer": "analytics_bi",
             "Business Intelligence Engineer": "analytics_bi",
             "Data Engineer / Data Scientist": "data_science",
-            "Consultant Data Science & ML Engineering": "data_science",
             "EPM Developer/Business Data Analyst": "analytics_bi",
             "Senior Machine Learning Scientist": "data_science",
             "Data / Business Analyst Supply Chain": "analytics_bi",
@@ -242,9 +241,6 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Data Engineer",
             "Research Data Engineer",
             "Consultant Data Engineering",
-            "Senior Consultant Data Engineering / Azure / GCP",
-            "Machine Learning Engineer - Computer Vision",
-            "Staff ML Engineer",
             "AI Delivery Engineer",
             "AI Solutions Engineer",
             "Senior AI Platform Engineer",
@@ -266,6 +262,10 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Backend Engineer",
             "Software Engineer - GPU performance",
             "Validation Engineer",
+            "Senior Consultant Data Engineering / Azure / GCP",
+            "Machine Learning Engineer - Computer Vision",
+            "Staff ML Engineer",
+            "Consultant Data Science & ML Engineering",
         ):
             with self.subTest(title=title):
                 self.assert_outcome(title, "excluded")
@@ -282,7 +282,6 @@ class TestRelevanceClassifier(unittest.TestCase):
             "Senior Consultant Data & Analytics - Process Mining",
             "Technical Consultant Digital Analytics",
             "Data Science & Solutions Consultant",
-            "AI Strategy Consultant – Data, Analytics, Cloud",
         ):
             with self.subTest(title=title):
                 result = classify_relevance(title, unwanted_keywords=UNWANTED)

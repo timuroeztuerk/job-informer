@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { archiveJob, restoreJob, setJobFavorite, setJobFlag } from "../../src/api";
+import { archiveJob, restoreJob, setJobFavorite, setJobFlag, requestJobExtraction } from "../../src/api";
 import JobDetail from "../../src/components/JobDetail";
 import type { Job, JobFlag } from "../../src/types";
 vi.mock("../../src/components/JobDescription", () => ({ default: ({ jobId, history, children }: { jobId: string; history?: React.ReactNode; children?: React.ReactNode }) => <>{children ?? <p>Description for {jobId}</p>}<details><summary>Job & source history</summary>{history}</details></> }));
@@ -13,6 +13,7 @@ vi.mock("../../src/api", () => ({
   restoreJob: vi.fn(),
   setJobFavorite: vi.fn(),
   setJobFlag: vi.fn(),
+  requestJobExtraction: vi.fn(),
 }));
 
 const job: Job = {
@@ -30,6 +31,20 @@ const job: Job = {
 };
 
 describe("minimal job details", () => {
+  it("blocks AI for archived favorites and filtered jobs and enables it after restoration", async () => {
+    const user = userEvent.setup();
+    const props = { onArchiveChanged: vi.fn(), onFavoriteChanged: vi.fn() };
+    const { rerender } = render(<JobDetail {...props} job={{ ...job, is_favorite: true, archived_at: "2026-09-06" }} />);
+    const button = screen.getByRole("button", { name: "Extract AI" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "Restore this job before extracting AI information.");
+    await user.click(button);
+    expect(requestJobExtraction).not.toHaveBeenCalled();
+    rerender(<JobDetail {...props} job={{ ...job, relevance_outcome: "excluded" }} />);
+    expect(screen.getByRole("button", { name: "Extract AI" })).toBeDisabled();
+    rerender(<JobDetail {...props} job={{ ...job, relevance_outcome: "manual_keep" }} />);
+    expect(screen.getByRole("button", { name: "Extract AI" })).toBeEnabled();
+  });
   it("keeps every matching city link in a compact expandable group", async () => {
     const user = userEvent.setup();
     render(<JobDetail job={{ ...job, posting_count: 15,

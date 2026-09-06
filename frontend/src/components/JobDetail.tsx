@@ -62,6 +62,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onFavorite
   }
 
   const archived = Boolean(job.archived_at);
+  const aiInactive = archived || ["excluded", "unrelated", "manual_archive", "auto_archived"].includes(job.relevance_outcome || "");
   const repeatCount = Math.max(0, (job.seen_count ?? 1) - 1);
   const repeatSummary = repeatCount === 0
     ? "Seen once"
@@ -150,7 +151,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onFavorite
   };
 
   const extractAI = async () => {
-    if (aiAction) return;
+    if (aiInactive || aiAction) return;
     const jobId = job.job_id;
     setAIAction(true);
     setError(null);
@@ -224,8 +225,8 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onFavorite
               {archiveAction === "archive" ? "Archiving…" : "Archive"}
             </button>
           )}
-          <button className="ai-extract-button" type="button" disabled={aiAction} onClick={() => void extractAI()}
-            title="Extract this job’s saved description. Current results are reused; failed attempts can be retried.">
+          <button className="ai-extract-button" type="button" disabled={aiInactive || aiAction} onClick={() => void extractAI()}
+            title={aiInactive ? "Restore this job before extracting AI information." : "Extract this job’s saved description. Current results are reused; failed attempts can be retried."}>
             {aiAction ? "Queueing AI…" : "Extract AI"}
           </button>
           <div className="description-action" ref={setSourceActionTarget} />
@@ -270,7 +271,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onFavorite
       )}
 
       <div key={job.job_id} role="tabpanel" id={`job-panel-${activeTab}`} aria-labelledby={`job-tab-${activeTab}`} tabIndex={0}>
-        <JobDescription key={job.job_id} jobId={job.job_id} refreshToken={descriptionRefreshToken} onQueueChanged={onDescriptionQueueChanged}
+        <JobDescription key={job.job_id} jobId={job.job_id} archived={archived} refreshToken={descriptionRefreshToken} onQueueChanged={onDescriptionQueueChanged}
           actionTarget={sourceActionTarget} criteriaTarget={criteriaTarget} view={activeTab} history={<div className="job-history">
           <h3>Posting history</h3>
           <p className="sighting-line">First seen {firstSeen} · Last seen {lastSeen} · {repeatSummary}</p>
@@ -292,7 +293,7 @@ const JobDetail: React.FC<JobDetailProps> = ({ job, onArchiveChanged, onFavorite
         )}
 
         </div>}>
-          {activeTab === "insights" ? <JobExtraction key={`ai-${job.job_id}`} jobId={job.job_id} refreshToken={(descriptionRefreshToken ?? 0) + aiRefresh} /> : undefined}
+          {activeTab === "insights" ? <JobExtraction key={`ai-${job.job_id}`} jobId={job.job_id} inactive={aiInactive} refreshToken={(descriptionRefreshToken ?? 0) + aiRefresh} /> : undefined}
         </JobDescription>
       </div>
     </aside>

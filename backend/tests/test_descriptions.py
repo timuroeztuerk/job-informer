@@ -321,11 +321,106 @@ class TestDescriptionWorkflow(unittest.TestCase):
 
     def test_batch_prioritizes_favorites_and_skips_previous_attempts_and_archived_jobs(self):
         with self.store.connect() as conn:
-            conn.execute("UPDATE jobs SET archived_at='2026-09-05',is_favorite=1 WHERE job_id='linkedin:789'")
+            conn.execute("UPDATE jobs SET is_favorite=1 WHERE job_id='linkedin:789'")
             conn.execute("UPDATE jobs SET archived_at='2026-09-05' WHERE job_id='linkedin:456'")
         self.assertEqual(self.store.unfetched_candidates(), ["linkedin:789", "linkedin:123"])
         self.store.enqueue(["linkedin:123"])
         self.assertEqual(self.store.unfetched_candidates(), ["linkedin:789"])
+        self.db.archive_jobs(["linkedin:789"], archived_reason="Not relevant")
+        self.assertEqual(self.store.unfetched_candidates(), [])
+
+    def test_enqueue_rechecks_active_jobs_including_archived_favorites_and_refreshes(self):
+        candidates = self.store.unfetched_candidates()
+        self.db.set_job_favorite("linkedin:456", True)
+        self.db.archive_jobs(["linkedin:456", "linkedin:789"], archived_reason="Not relevant")
+        self.assertEqual(self.store.enqueue(candidates), 1)
+        self.assertEqual(self.store.enqueue(["linkedin:456", "linkedin:789"], refresh=True), 0)
+        self.assertEqual(self.store.queue_status()["queued"], 1)
+        self.assertTrue(self.service.process_one())
+        self.assertFalse(self.service.process_one())
+        self.fetcher.assert_called_once_with("linkedin:123", None)
+        self.assertEqual(self.store.job_description("linkedin:456")["attempts"], [])
+
+    def test_archiving_queued_jobs_skips_them_and_continues_with_active_jobs(self):
+        self.store.enqueue(["linkedin:456", "linkedin:789", "linkedin:123"])
+        self.db.set_job_favorite("linkedin:456", True)
+        self.db.archive_jobs(["linkedin:456", "linkedin:789"], archived_reason="Not relevant")
+        self.assertEqual(self.store.queue_status()["queued"], 1)
+        self.assertTrue(self.service.process_one())
+        self.assertFalse(self.service.process_one())
+        self.fetcher.assert_called_once_with("linkedin:123", None)
+        for job_id in ["linkedin:456", "linkedin:789"]:
+            attempt = self.store.job_description(job_id)["attempts"][0]
+            self.assertEqual((attempt["status"], attempt["error_kind"]), ("interrupted", "archived"))
+            self.assertIsNone(attempt["started_at"])
+            self.assertIsNotNone(attempt["finished_at"])
+        self.assertEqual(self.store.failed_candidates(), [])
+        self.assertEqual(self.store.queue_status()["failed_jobs"], 0)
+
+    def test_archiving_after_claim_is_checked_before_network_request(self):
+        self.store.enqueue(["linkedin:123"])
+        original_latest_source = self.store.latest_source
+
+        def archive_after_claim(job_id):
+            previous = original_latest_source(job_id)
+            self.db.archive_jobs([job_id], archived_reason="Not relevant")
+            return previous
+
+        with patch.object(self.store, "latest_source", side_effect=archive_after_claim):
+            self.assertTrue(self.service.process_one())
+        self.fetcher.assert_not_called()
+        self.assertEqual(self.store.job_description("linkedin:123")["attempts"][0]["error_kind"], "archived")
+        self.assertEqual(self.store.queue_status()["fetching"], 0)
+        self.assertFalse(self.store.queue_status()["paused"])
+
+    def test_recover_and_resume_remove_archived_pending_work(self):
+        self.store.enqueue(["linkedin:123", "linkedin:456", "linkedin:789"])
+        self.db.archive_jobs(["linkedin:123"], archived_reason="Not relevant")
+        self.store.recover()
+        self.assertTrue(self.store.queue_status()["paused"])
+        self.assertEqual(self.store.queue_status()["queued"], 2)
+        self.assertEqual(self.store.job_description("linkedin:123")["attempts"][0]["error_kind"], "archived")
+        self.db.archive_jobs(["linkedin:456"], archived_reason="Not relevant")
+        self.store.resume()
+        self.assertEqual(self.store.queue_status()["queued"], 1)
+        self.assertEqual(self.store.job_description("linkedin:456")["attempts"][0]["error_kind"], "archived")
+        self.assertEqual(self.store.claim()["job_id"], "linkedin:789")
+        self.fetcher.assert_not_called()
+
+    def test_retry_and_attention_counts_exclude_archived_jobs_until_restored(self):
+        self.store.enqueue(["linkedin:123", "linkedin:456", "linkedin:789"])
+        for _ in range(3):
+            attempt = self.store.claim()
+            self.store.finish(attempt["fetch_id"], "failed", error_kind="network")
+        self.db.set_job_favorite("linkedin:789", True)
+        self.db.archive_jobs(["linkedin:456", "linkedin:789"], archived_reason="Not relevant")
+        self.assertEqual(self.store.failed_candidates(limit=1), ["linkedin:123"])
+        self.assertEqual(self.store.queue_status()["failed_jobs"], 1)
+        with patch.object(api, "description_service", self.service), patch.object(self.service, "start"):
+            result = api.queue_descriptions(api.DescriptionBatchRequest(selection="retry"), _=True)
+        self.assertEqual((result["added"], result["queued"], result["failed_jobs"]), (1, 1, 0))
+        self.db.restore_job("linkedin:789")
+        self.assertEqual(self.store.failed_candidates(), ["linkedin:789"])
+        self.assertEqual(self.store.queue_status()["failed_jobs"], 1)
+        self.fetcher.assert_not_called()
+
+    def test_archived_jobs_reject_direct_fetch_and_refresh_but_keep_saved_text_and_offline_reparse(self):
+        original = self.retrieve()["saved"]
+        self.db.set_job_favorite("linkedin:123", True)
+        self.db.archive_jobs(["linkedin:123", "linkedin:456"], archived_reason="Not relevant")
+        self.fetcher.reset_mock()
+        with patch.object(api, "description_service", self.service), patch.object(self.service, "start"):
+            for job_id in ["linkedin:123", "linkedin:456"]:
+                for refresh in [False, True]:
+                    with self.subTest(job_id=job_id, refresh=refresh), self.assertRaises(HTTPException) as error:
+                        api.request_description(job_id, api.DescriptionRequest(refresh=refresh), _=True)
+                    self.assertEqual(error.exception.status_code, 400)
+                    self.assertIn("Only active jobs", error.exception.detail)
+            self.assertEqual(api.get_description("linkedin:123", _=True)["saved"], original)
+            self.assertEqual(api.reparse_description("linkedin:123", _=True)["saved"], original)
+            self.db.restore_job("linkedin:123")
+            self.assertEqual(api.request_description("linkedin:123", api.DescriptionRequest(refresh=True), _=True)["attempts"][0]["status"], "queued")
+        self.fetcher.assert_not_called()
 
     def test_fetch_all_queues_beyond_batch_limits_without_repeating_attempts_or_resuming(self):
         self.retrieve()  # Saved descriptions stay out of the new queue.
@@ -345,14 +440,14 @@ class TestDescriptionWorkflow(unittest.TestCase):
 
         with patch.object(api, "description_service", self.service), patch.object(self.service, "start"):
             result = api.queue_descriptions(api.DescriptionBatchRequest(selection="all"), _=True)
-            self.assertEqual(result["added"], 34)
-            self.assertEqual(result["queued"], 35)  # Includes the earlier pending job.
+            self.assertEqual(result["added"], 33)
+            self.assertEqual(result["queued"], 34)  # Includes the earlier pending job.
             self.assertTrue(result["paused"])
             self.assertEqual(api.queue_descriptions(api.DescriptionBatchRequest(), _=True)["added"], 0)
         with self.store.connect() as conn:
             queued = [r[0] for r in conn.execute("SELECT job_id FROM description_fetches WHERE status='queued' ORDER BY fetch_id")]
-        self.assertEqual(queued[:2], ["linkedin:1001", "linkedin:789"])
-        self.assertEqual(set(queued), {"linkedin:789", *(f"linkedin:{n}" for n in range(1001, 1035))})
+        self.assertEqual(queued[0], "linkedin:1001")
+        self.assertEqual(set(queued), {f"linkedin:{n}" for n in range(1001, 1035)})
         self.assertEqual(self.store.failed_candidates(), ["linkedin:1000"])
         self.assertFalse(self.service.process_one())
         self.fetcher.assert_not_called()

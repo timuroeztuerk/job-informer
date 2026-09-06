@@ -62,6 +62,31 @@ describe("original descriptions", () => {
     expect(requestDescription).toHaveBeenCalledWith("linkedin:123", true);
   });
 
+  it.each([empty, saved])("blocks source fetching for archived favorites while keeping saved content readable (%#)", async (description) => {
+    vi.mocked(fetchDescription).mockResolvedValue(description);
+    const user = userEvent.setup();
+    const job = { job_id: "linkedin:123", title: "Data Scientist", company: "Acme", location: "Berlin",
+      source: "LinkedIn", is_favorite: true, archived_at: "2026-09-06T08:00:00Z" };
+    const props = { onArchiveChanged: vi.fn(), onFavoriteChanged: vi.fn() };
+    const { rerender } = render(<JobDetail job={job} {...props} />);
+    const button = await screen.findByRole("button", { name: description.saved ? "Refresh source" : "Fetch description" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/Description fetching is limited to active jobs/)).toBeInTheDocument();
+    await user.click(button);
+    expect(requestDescription).not.toHaveBeenCalled();
+    if (description.saved) {
+      expect(screen.getByText(/Build reliable models/)).toBeInTheDocument();
+      await user.click(screen.getByText("Job & source history"));
+      await user.click(screen.getByRole("button", { name: "Reparse saved source" }));
+      expect(reparseDescription).toHaveBeenCalledWith("linkedin:123");
+      expect(requestDescription).not.toHaveBeenCalled();
+    }
+    rerender(<JobDetail job={{ ...job, archived_at: null }} {...props} />);
+    expect(button).toBeEnabled();
+    await user.click(button);
+    expect(requestDescription).toHaveBeenCalledWith("linkedin:123", Boolean(description.saved));
+  });
+
   it("keeps source actions and criteria on AI insights and queues only the selected job", async () => {
     vi.mocked(fetchDescription).mockResolvedValue(saved);
     const user = userEvent.setup();

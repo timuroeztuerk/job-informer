@@ -11,7 +11,6 @@ import pandas as pd
 from loguru import logger
 
 from .database import JobDatabase
-from .collection_validation import build_collection_validation
 from .locations import primary_location
 from .relevance_service import AUTO_ARCHIVED_SQL
 from .time_utils import as_utc_timestamp
@@ -184,7 +183,6 @@ def build_db_summary(db: JobDatabase, *, window: str = "all", as_of: Any | None 
         automatic_archives = int(conn.execute(
             f"SELECT COUNT(*) FROM review_jobs j WHERE {scope_clause} AND {AUTO_ARCHIVED_SQL}", params,
         ).fetchone()[0])
-        collection_validation = build_collection_validation(conn, as_of=reference)
 
     total = len(rows)
     companies = Counter(row["company"] for row in rows)
@@ -231,5 +229,4 @@ def build_db_summary(db: JobDatabase, *, window: str = "all", as_of: Any | None 
                          for item in _count_rows(query_groups, total)],
         "recurring_jobs": [{**row, "is_favorite": bool(row["is_favorite"])} for row in recurring[:5]],
         "collection_freshness": compute_collection_freshness(db, as_of=reference),
-        "collection_validation": collection_validation,
     }

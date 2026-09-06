@@ -1088,24 +1088,6 @@ button.market-metric:hover { border-color: #93c5fd; background: #fafdff; }
 .market-empty, .market-loading { padding: 48px 24px; text-align: center; }
 .market-loading { color: #64748b; border: 1px dashed #cbd5e1; border-radius: 14px; }
 .market-endnote { color: #94a3b8; font-size: 10px; text-align: center; margin: 0; }
-.evidence-next-step { margin: 0 0 10px; font-size: 14px; font-weight: 600; color: #334155; }
-.collection-evidence table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-.collection-evidence caption { text-align: left; font-size: 14px; font-weight: 650; color: #1e293b; padding: 0 0 14px; }
-.collection-evidence th, .collection-evidence td { padding: 11px 14px; border-bottom: 1px solid #edf2f7; text-align: right; vertical-align: top; }
-.collection-evidence th:first-child, .collection-evidence td:first-child { padding-left: 0; text-align: left; }
-.collection-evidence th:last-child, .collection-evidence td:last-child { padding-right: 0; }
-.collection-evidence thead th { color: #64748b; font-size: 11px; font-weight: 500; }
-.collection-evidence tbody th { color: #334155; font-weight: 600; white-space: nowrap; }
-.evidence-city-table { padding: 22px 0 18px; }
-.evidence-history { border-top: 1px solid var(--border); padding: 15px 0; }
-.evidence-history summary { cursor: pointer; color: #475569; font-size: 12px; font-weight: 600; }
-.evidence-history table { margin-top: 12px; }
-.evidence-history th:nth-child(2), .evidence-history td:nth-child(2) { text-align: left; }
-.evidence-history ul { padding-left: 16px; margin: 6px 0 0; font-size: 11px; color: #92400e; }
-.evidence-run-state { font-size: 11px; color: #475569; }
-.evidence-run-state.needs-review { color: #92400e; }
-.evidence-review-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 22px; padding-top: 18px; border-top: 1px solid var(--border); }
-.evidence-review-actions > span { color: #475569; font-size: 12px; margin-right: auto; }
 
 /* Original descriptions */
 .description-heading { display: flex; justify-content: space-between; align-items: center; gap: 14px; }

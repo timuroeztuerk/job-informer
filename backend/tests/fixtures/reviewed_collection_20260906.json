@@ -1,0 +1,1053 @@
+{
+  "review_date": "2026-09-06",
+  "cases": [
+    {
+      "job_id": "linkedin:4456243230",
+      "title": "(Junior) Data Analyst (m/w/d)",
+      "company": "Edenred Deutschland GmbH",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4385079982",
+      "title": "(Senior) Consultant Data Science - AI and Data (w/m/d)",
+      "company": "EY",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4385081825",
+      "title": "(Senior) Consultant Data Science - AI and Data (w/m/d)",
+      "company": "EY",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4339227264",
+      "title": "AI Data Scientist Payments (m/w/d)",
+      "company": "CGI",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4436722181",
+      "title": "Business Intelligence Expert (m/w/d)",
+      "company": "PAYONE",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4462672055",
+      "title": "Business Intelligence Specialist (m/w/d)",
+      "company": "CHEFS CULINAR",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4462388564",
+      "title": "Data Analyst",
+      "company": "Haystack",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4462392549",
+      "title": "Data Analyst",
+      "company": "Haystack",
+      "archive_by_title": false,
+      "reviewed_action": "filter",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4463731753",
+      "title": "Data Analyst",
+      "company": "Haystack",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4450230294",
+      "title": "Data Analyst & Data Engineer (m/w/d) bei investify TECH",
+      "company": "investify TECH",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4463779594",
+      "title": "Data Analyst / Data Science Specialist (m/w/d)",
+      "company": "Molkerei Gropper GmbH & Co. KG",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4462661671",
+      "title": "Data Analyst:in Fundraising (m/w/d)",
+      "company": "DevProofs",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4463727505",
+      "title": "Data Scientist",
+      "company": "Sundayy",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4451201634",
+      "title": "Data Scientist - Manager",
+      "company": "Publicis Sapient",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4464013103",
+      "title": "Data Scientist - Python (Remote)",
+      "company": "Hire Feed",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4461495060",
+      "title": "Senior Consultant Data & Analytics Platforms",
+      "company": "SAMACON",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4454800594",
+      "title": "Senior Data Analyst (Sales & RevOps)",
+      "company": "GetYourGuide",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4456227034",
+      "title": "Senior Data Engineer (d/m/w) – Banking / Data Analytics Personalisierung",
+      "company": "Sparkassen Rating und Risikosysteme",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4436346725",
+      "title": "Senior Data Scientist (f/m/d)",
+      "company": "Moss",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4443977474",
+      "title": "Senior Data Scientist (m/f/d)",
+      "company": "Flix",
+      "archive_by_title": false,
+      "reviewed_action": "filter",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4443979310",
+      "title": "Senior Data Scientist (m/f/d)",
+      "company": "Flix",
+      "archive_by_title": false,
+      "reviewed_action": "filter",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4454541761",
+      "title": "Specialist Data Analytics (m/w/d)",
+      "company": "Amadeus Fire",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "target"
+    },
+    {
+      "job_id": "linkedin:4417010730",
+      "title": "(Junior) Projektleiter:in Oberbauprogramm",
+      "company": "Deutsche Bahn",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4433169511",
+      "title": "AI Transformation Manager (m/w/d)",
+      "company": "XXXLdigital – Part of XXXL Group",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4339874776",
+      "title": "BIM-Modellierer:in 3D mit Erfahrung Bahninfrastruktur",
+      "company": "Deutsche Bahn",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4462380026",
+      "title": "Banking, Corporate Banking, Full Time Analyst, Zurich - Switzerland, 2027 (applicable for 2026 Citi Summer Interns Only)",
+      "company": "Citi",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463773196",
+      "title": "Barmitarbeiter (m/w/d)",
+      "company": "Revo Hospitality Group",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463767671",
+      "title": "Bartender",
+      "company": "Racing Unleashed",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4435446031",
+      "title": "Billing Assistant I&S (m/w/d)",
+      "company": "DSV – Global Transport and Logistics",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4440553694",
+      "title": "Business Analyst (m/w/d) Leistungen 1",
+      "company": "AOK Systems GmbH",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4441992317",
+      "title": "Business Analyst (m/w/d) Querschnitt Leistungen 1",
+      "company": "AOK Systems GmbH",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4435206996",
+      "title": "Business Analyst bAV (all genders)",
+      "company": "adesso SE",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4435217539",
+      "title": "Business Analyst bAV (all genders)",
+      "company": "adesso SE",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4435219559",
+      "title": "Business Analyst bAV (all genders)",
+      "company": "adesso SE",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4435224406",
+      "title": "Business Analyst bAV (all genders)",
+      "company": "adesso SE",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4462353846",
+      "title": "Business Insights Executive (m/w/d)",
+      "company": "BAT",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4445201053",
+      "title": "Business Planning and Performance Manager",
+      "company": "Trans Adriatic Pipeline (TAP) AG",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4436362340",
+      "title": "CNC Maschienenbediener (m/w/d)",
+      "company": "Christian Dior Couture",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463785619",
+      "title": "COUNTER MANAGER PARFUMS (w/m/d)",
+      "company": "Bvlgari",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461456701",
+      "title": "Calculateur Construction",
+      "company": "Snapbau",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4384199762",
+      "title": "Client Advisor 80%-100% (m/w/d) – Bern",
+      "company": "Bucherer AG",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461494561",
+      "title": "DATA MANAGEMENT COORDINATOR (M/W/D)",
+      "company": "sera Group",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4435448743",
+      "title": "DATEV-Spezialist (m/w/d)",
+      "company": "RÖDL",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4462382904",
+      "title": "Data Engineer",
+      "company": "Haystack",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4385080626",
+      "title": "Data Engineer - Digital Health Excellence Center (w/m/d)",
+      "company": "EY",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4385084519",
+      "title": "Data Engineer - Digital Health Excellence Center (w/m/d)",
+      "company": "EY",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4386517214",
+      "title": "Data Engineer - Schwerpunkt Automatisierung",
+      "company": "HDI Group",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461819456",
+      "title": "Data Engineer / Analyst (m/f/d)",
+      "company": "Allianz Digital Health GmbH",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4432378492",
+      "title": "Data Engineering Consultant (w/m/x) - Germany",
+      "company": "Avanade",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4444951669",
+      "title": "Data Engineering Consultant (w/m/x) - Germany",
+      "company": "Avanade",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463740383",
+      "title": "Datenarchitekt (m/w/d)",
+      "company": "HELU KABEL GmbH",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4423128445",
+      "title": "Digitalisierungsmanagerin GIS/BIM (m/w/d)",
+      "company": "50Hertz Transmission GmbH",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4464007309",
+      "title": "Economics Researcher (Remote)",
+      "company": "Hire Feed",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4451263679",
+      "title": "Export Control & Customs (ECC) Expert*in - ATLAS Import (w/m/d)",
+      "company": "Siemens Healthineers",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4451265606",
+      "title": "Export Control & Customs (ECC) Expert*in - Präferenzrecht (w/m/d)",
+      "company": "Siemens Healthineers",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4462635082",
+      "title": "Finance & BI Specialist (m/w/d)",
+      "company": "Rocken®",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4426250092",
+      "title": "Financial Crime Prevention Officer (m/f/d)",
+      "company": "UBS",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4432356384",
+      "title": "Forensic Delay Planner (m/w/d)",
+      "company": "INP Deutschland GmbH",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454568032",
+      "title": "Front Office Agent (m/f/d) - Hilton Mainz",
+      "company": "Hilton",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463790185",
+      "title": "Front Office Agent (m/w/d)",
+      "company": "Revo Hospitality Group",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461821400",
+      "title": "Geophysiker:in (m/w/d) in der Kampfmittelräumung in Bayern",
+      "company": "TAUBER Unternehmensgruppe",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454530451",
+      "title": "Global Manager Inventories",
+      "company": "AB InBev",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454392997",
+      "title": "IFF QC Analyst 3 (all genders)",
+      "company": "Sanofi",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454802621",
+      "title": "IT Experte (m/w/d)",
+      "company": "Michael Page",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461810503",
+      "title": "IT Projektmanager (m/w/d)",
+      "company": "Hallo Welt! GmbH",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463723792",
+      "title": "IT- Mitarbeiter (m/w/d) in der Lebensmittelproduktion, Power Key User in der Lebensmittelproduktion CSB/MES",
+      "company": "CHEFS CULINAR",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461495509",
+      "title": "IT-Projektassistenz (m/w/d)",
+      "company": "IST GmbH Innovation Systems Technology",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4436330262",
+      "title": "IT-Projektleitung und Business Analyse (m/w/d) Finanzieren",
+      "company": "Helvetia Schweiz",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4451294959",
+      "title": "Informatik Allrounder:in 80-100%",
+      "company": "yellowshark® AG",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4462662842",
+      "title": "Information Technology Analyst",
+      "company": "Egotechworld",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4413695752",
+      "title": "Interhome - Founders' Associate [German-speaking] (m/f/d)",
+      "company": "HomeToGo",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4445321493",
+      "title": "International Consumer Banking - Operational Risk Associate (all genders)",
+      "company": "JPMorganChase",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4462384773",
+      "title": "Junior IT Specialist",
+      "company": "Haystack",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454842940",
+      "title": "Junior IT-Anwendungsbetreuer:in",
+      "company": "Deutsche Bahn",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454847834",
+      "title": "Junior IT-Anwendungsbetreuer:in",
+      "company": "Deutsche Bahn",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4456234336",
+      "title": "Junior Portfoliomanager (w/m/d)",
+      "company": "Frankfurter Bankgesellschaft Gruppe",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4445243232",
+      "title": "KIS-Administrator (m/w/d)",
+      "company": "Michael Page",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4428138611",
+      "title": "Kapazitätsmanager Fahrplan & Infrastruktur (m/w/d)",
+      "company": "Flix",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4434395841",
+      "title": "Key User Verwaltungs- und Kundenmanagement (w/m/d) *",
+      "company": "DOREAFAMILIE",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4453565542",
+      "title": "Magaziner:in Verkauf",
+      "company": "Coop",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4453572543",
+      "title": "Magaziner:in Verkauf",
+      "company": "Coop",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4443897407",
+      "title": "Manager FP&A Cocoa Sourcing",
+      "company": "Barry Callebaut Group",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4412863458",
+      "title": "Manager Regulatory Data Management (m/w/d) in Stuttgart",
+      "company": "Deloitte",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4102749658",
+      "title": "Manager Wissensmanagement Tax (m/w/d)",
+      "company": "RÖDL",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463729645",
+      "title": "Marktmanager (m/w/d)",
+      "company": "Dr. Klaus Karg GmbH & Co. KG",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4453703970",
+      "title": "Materialfluss- & Warehouse Process Specialist (m/w/d)",
+      "company": "Adecco",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4451209802",
+      "title": "Mitarbeiter (m/w/d) Probenregistrierung (Labor)",
+      "company": "ALS",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4436361018",
+      "title": "Mitarbeiter Conference & Guest Service (m/w/d) Berlin",
+      "company": "Deloitte",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4384415023",
+      "title": "Mitarbeiter für Prozessoptimierung (m/w/d)",
+      "company": "WITRON Gruppe",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4457305011",
+      "title": "Mitarbeiter*in (w/m/d) für die IT-Abteilung",
+      "company": "Stadt Weinheim",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4428106641",
+      "title": "Mitarbeiter/in Logistik (w/m/d)",
+      "company": "Thales",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463761106",
+      "title": "MitarbeiterIn Sales & Operations (60–100 %)",
+      "company": "MAANA STUDIOS",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454578003",
+      "title": "Night Audit (m/f/d) - Hilton Mainz",
+      "company": "Hilton",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4435236042",
+      "title": "PRADA Outlet Client Advisor (m/f/d)",
+      "company": "Prada Group",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4453592609",
+      "title": "Patchmanagement Expert (w/m/d) IT/OT/AUT",
+      "company": "Siemens Energy",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4444936363",
+      "title": "Performance Manager - Non contract",
+      "company": "Vertiv",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454521253",
+      "title": "Portfolio Strategy & Operations Manager (m/w/d)",
+      "company": "Flatpay",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4453712988",
+      "title": "Product Manager",
+      "company": "Gi Group",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461494593",
+      "title": "Product Manager (Frankfurt)",
+      "company": "Privatize",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4436758597",
+      "title": "Produktionsplaner/in (m/w/d)",
+      "company": "Bruker Corporation",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4453729743",
+      "title": "Produktmanager (w/m/d) für Versorgungswirtschaft - Schwerpunkt deutsche Regulierung",
+      "company": "SAP",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463794611",
+      "title": "Programmierung, Simulation und KI-Datenauswertung",
+      "company": "IPEK - Institut für Produktentwicklung am KIT",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463721938",
+      "title": "Projektleiter (m/w/d)",
+      "company": "OMNINET",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4464003659",
+      "title": "Projektmanager Kundenmanagement (w/m/d) Remote",
+      "company": "PIMA Health Group",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4387818663",
+      "title": "Promoter*in / POS-Promoter*in (m/w/d) für grüne Energie",
+      "company": "Octopus Energy",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4427504887",
+      "title": "Quality Assurance & Sample Technician (m/w/d)",
+      "company": "Givaudan",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4457306256",
+      "title": "Research Assistant in Knowledge Organisation",
+      "company": "ZBW – Leibniz-Informationszentrum Wirtschaft / ZBW – Leibniz Information Centre for Economics",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463769294",
+      "title": "Reservierungsmitarbeiter (m/w/d)",
+      "company": "Revo Hospitality Group",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454528228",
+      "title": "Retention Agent (m/w/d) – Kundenbindung & Portfoliobetreuung",
+      "company": "Flatpay",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454549421",
+      "title": "Revenue Operations Manager – Inside Sales",
+      "company": "GetYourGuide",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4395435898",
+      "title": "SOC Analyst - Hybrid in The Hague or Berlin (f/m/x)",
+      "company": "Eye Security",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4444747478",
+      "title": "SWIFT Specialist 80%-100% (f/m/d)",
+      "company": "Julius Baer",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454535950",
+      "title": "Schichtleiter/in 80 - 100% (w/m/d)",
+      "company": "Hitachi Energy",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4427508188",
+      "title": "Senior Business Analyst Compliance (w/m/d)",
+      "company": "DekaBank",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4427693519",
+      "title": "Senior Consultant AI Engineering (m/w/d)",
+      "company": "Deloitte",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4427694492",
+      "title": "Senior Consultant AI Engineering (m/w/d) in Düsseldorf",
+      "company": "Deloitte",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4399289828",
+      "title": "Senior IT Business Analyst:in (m/w/d)",
+      "company": "Trianel",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454545938",
+      "title": "Senior Meteorologist",
+      "company": "ICEYE",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4428639685",
+      "title": "Senior Product Analyst (m/f/d)",
+      "company": "Flix",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4441841012",
+      "title": "Senior Product Manager - Marketplace Infrastructure & Data (m/f/d)",
+      "company": "HomeToGo",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461498550",
+      "title": "Senior Specialist AI / KI Innovation (m/w/d)",
+      "company": "MGRP",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4454883576",
+      "title": "Social Affiliate Specialist - (DE & AT) - (m/f/d)",
+      "company": "SharkNinja",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4443876776",
+      "title": "Spacecraft Analyst (f/m/d)",
+      "company": "SSC Space",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461487556",
+      "title": "Spezialist Energie & Digitalisierung (m/w/d)",
+      "company": "Alte Försterei Veranstaltungs GmbH & Co. KG",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4444702675",
+      "title": "Strategy & Business Development Professional - Culture & Engagement (d/m/w)",
+      "company": "Schaeffler",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4407820418",
+      "title": "Supply Chain Analyst EMEA (m/w/d)",
+      "company": "ADM",
+      "archive_by_title": false,
+      "reviewed_action": "keep_for_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4463733450",
+      "title": "Supply Systems Analyst.",
+      "company": "Defense Logistics Agency",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4433199737",
+      "title": "Tax Analyst (m/w/d)",
+      "company": "PepsiCo",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4461491962",
+      "title": "Teammitglied (m/w/d) Vollzeit / Teilzeit",
+      "company": "alldrink GmbH",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4457305242",
+      "title": "Technical Security Expert (all genders)",
+      "company": "Faber-Castell Group",
+      "archive_by_title": true,
+      "reviewed_action": "filter",
+      "previous_outcome": "unmatched"
+    },
+    {
+      "job_id": "linkedin:4460161165",
+      "title": "Verkehrs- / Datenwissenschaftler/in (w/m/d) - Verkehrsmodellierung und Datenbearbeitung",
+      "company": "Deutsches Zentrum für Luft-und Raumfahrt e.V.",
+      "archive_by_title": false,
+      "reviewed_action": "secondary_review",
+      "previous_outcome": "unmatched"
+    }
+  ]
+}

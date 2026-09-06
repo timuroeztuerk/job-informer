@@ -1,9 +1,9 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SummaryPage from "../../src/components/SummaryPage";
 import { fetchDbSummary, listRuns } from "../../src/api";
-import type { CollectionValidation, DbSummary, RunSummary } from "../../src/types";
+import type { DbSummary, RunSummary } from "../../src/types";
 
 vi.mock("../../src/api", () => ({
   fetchDbSummary: vi.fn(), listRuns: vi.fn(),
@@ -32,18 +32,6 @@ const run: RunSummary = {
     cities: { locations: ["Berlin"], queries: 1, unique_jobs: 6, pages_attempted: 2, pages_completed: 2, page_completion_percent: 100, request_failures: 0 },
     shared_jobs: 2, countrywide_only_jobs: 2, city_only_jobs: 4, city_jobs_covered_by_countrywide_percent: 33.3,
   },
-};
-
-const evidence: CollectionValidation = {
-  required_days: 3, healthy_days: 2, timezone: "Europe/Berlin",
-  baseline: { keywords: "Data Scientist,Data Analyst", locations: "Germany,Switzerland,Berlin,Stuttgart,Frankfurt,München", time_range: "day" },
-  matching_runs: 3, other_runs: 1,
-  cities: [{ location: "Berlin", sampled_days: 2, days_adding_jobs: 2, unique_jobs: 100, shared_jobs: 25, city_only_jobs: 75 }],
-  runs: [
-    { run_id: "retry", started_at: "2026-09-05T09:00:00Z", date: "2026-09-05", healthy: false, counted: false, concerns: ["Request failures"], pages_attempted: 24, pages_completed: 23, city_only_jobs: 20, city_coverage_percent: 25 },
-    { run_id: "day2", started_at: "2026-09-05T08:00:00Z", date: "2026-09-05", healthy: true, counted: true, concerns: [], pages_attempted: 24, pages_completed: 24, city_only_jobs: 25, city_coverage_percent: 25 },
-    { run_id: "day1", started_at: "2026-09-04T08:00:00Z", date: "2026-09-04", healthy: true, counted: true, concerns: [], pages_attempted: 24, pages_completed: 24, city_only_jobs: 50, city_coverage_percent: 25 },
-  ],
 };
 
 describe("Intelligence market overview", () => {
@@ -159,47 +147,10 @@ describe("Intelligence market overview", () => {
     expect(fetchDbSummary).toHaveBeenCalledTimes(2);
   });
 
-  it("shows comparable days, per-city evidence, and failures without claiming filter validation", async () => {
-    vi.mocked(fetchDbSummary).mockResolvedValue({ ...snapshot, collection_validation: evidence });
-    const user = userEvent.setup();
+  it("keeps collection health and filter review without day-counter targets", async () => {
     render(<SummaryPage onOpenDashboard={vi.fn()} />);
-    const section = await screen.findByRole("region", { name: "Evidence across collection days" });
-    expect(section).toHaveTextContent("2 of 3 days collected");
-    expect(section).toHaveTextContent("1 more separate day");
-    expect(within(section).getByRole("table", { name: "What each retained city adds" })).toHaveTextContent("Berlin2 / 27525.0%");
-    expect(section).toHaveTextContent("Filter quality still needs manual review");
-    await user.click(within(section).getByText("Inspect 3 matching collection attempts"));
-    expect(within(section).getByText("Request failures")).toBeVisible();
-    expect(within(section).getAllByText("Counted day")).toHaveLength(2);
-  });
-
-  it("opens validation audit lists across the archive and clears market drill-down filters", async () => {
-    window.history.replaceState({}, "", "/?view=summary&company=ACME&favorite=1&repeated=1&seen_since=2026-09-01&page=4");
-    vi.mocked(fetchDbSummary).mockResolvedValue({ ...snapshot, collection_validation: evidence });
-    const user = userEvent.setup();
-    render(<SummaryPage onOpenDashboard={vi.fn()} />);
-    await user.click(await screen.findByRole("button", { name: "Review flagged examples ↗" }));
-    let params = new URLSearchParams(window.location.search);
-    expect(params.get("flagged")).toBe("1");
-    expect(params.get("archived")).toBe("include");
-    for (const name of ["company", "favorite", "repeated", "seen_since", "page", "relevance_outcome"]) expect(params.has(name)).toBe(false);
-    await user.click(screen.getByRole("button", { name: "Check automatic archives ↗" }));
-    params = new URLSearchParams(window.location.search);
-    expect(params.get("relevance_outcome")).toBe("auto_archived");
-    expect(params.get("archived")).toBe("only");
-    expect(params.has("flagged")).toBe(false);
-    await user.click(screen.getByRole("button", { name: "Review unmatched jobs ↗" }));
-    params = new URLSearchParams(window.location.search);
-    expect(params.get("relevance_outcome")).toBe("unmatched");
-    expect(params.has("archived")).toBe(false);
-  });
-
-  it("keeps manual review as the next step when three healthy collection days exist", async () => {
-    vi.mocked(fetchDbSummary).mockResolvedValue({ ...snapshot, collection_validation: { ...evidence, healthy_days: 3 } });
-    render(<SummaryPage onOpenDashboard={vi.fn()} />);
-    const section = await screen.findByRole("region", { name: "Evidence across collection days" });
-    expect(section).toHaveTextContent("3 of 3 days collected");
-    expect(section).toHaveTextContent("Review filter quality and city-only roles before moving on");
-    expect(section).not.toHaveTextContent("more separate");
+    expect(await screen.findByRole("heading", { name: "How complete is the latest sample?" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Review this sample" })).toBeInTheDocument();
+    expect(screen.queryByText(/days collected|more separate day|Evidence across collection days/)).not.toBeInTheDocument();
   });
 });

@@ -247,35 +247,6 @@ export interface CollectionScopeComparison {
   per_city?: { location: string; unique_jobs: number; shared_jobs: number; city_only_jobs: number }[];
 }
 
-export interface CollectionValidation {
-  required_days: number;
-  healthy_days: number;
-  timezone: string;
-  baseline: { keywords: string; locations: string; time_range: string } | null;
-  matching_runs: number;
-  other_runs: number;
-  runs: {
-    run_id: string;
-    started_at: string;
-    date: string;
-    healthy: boolean;
-    counted: boolean;
-    concerns: string[];
-    pages_completed: number;
-    pages_attempted: number;
-    city_only_jobs: number | null;
-    city_coverage_percent: number | null;
-  }[];
-  cities: {
-    location: string;
-    sampled_days: number;
-    days_adding_jobs: number;
-    unique_jobs: number;
-    shared_jobs: number;
-    city_only_jobs: number;
-  }[];
-}
-
 export interface RunProgressEvent {
   at: string;
   level: "info" | "warning" | "error";
@@ -387,5 +358,4 @@ export interface DbSummary {
   query_groups?: CountStat[];
   collection_freshness: CollectionFreshness;
   recurring_jobs: Job[];
-  collection_validation?: CollectionValidation;
 }

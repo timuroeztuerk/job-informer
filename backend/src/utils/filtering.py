@@ -8,6 +8,7 @@ from typing import List, Optional
 STUDY_ROLE_PATTERNS = [
     r"\bintern(?:ship)?\b",
     r"\bpraktik(?:ant|um)?\b",
+    r"\b(?:schuler|schul|pflicht|sommer)praktik(?:ant\w*|um)\b",
     r"\bwerks?student\w*\b",
     r"\bwerkstudier\w*\b",
     r"\bworking student\b",
@@ -27,7 +28,7 @@ STUDY_ROLE_PATTERNS = [
     r"\bdissertation\b",
     r"\bdoctoral\b",
     r"\bphd(?: student)?\b",
-    r"\btrainee(?:ship)?\b",
+    r"\btrainee(?:ship|s|programm?\w*)?\b",
     r"\bausbildung\b",
     r"\bduales?(?: studium)?\b",
     r"\bstudium\b",
@@ -49,7 +50,7 @@ ACADEMIC_ROLE_PATTERNS = [
     r"\bscientific[\s/-]+employee\b",
     r"\bresearch fellow\b",
     r"\bdoktorand(?:in)?\b",
-    r"\bwissenschaftlich\w*(?:[*/:_-][a-z]+|\([a-z]+\))?\s+mitarbeiter\w*\b",
+    r"\bwissenschaftlich\w*(?:[*/:_-]+[a-z]+|\([a-z]+\))?\s+mitarbeiter\w*\b",
     r"\bwiss\.?\s+(?:ma|mitarbeit\w*)\b",
     r"\bwissenschaftlich\w*\s+(?:position|postition)\w*\b",
     r"\bforschungsassistenz\w*\b",
@@ -63,7 +64,12 @@ def normalize_text(text: str) -> str:
     if not text:
         return ""
     # Normalize unicode characters (handles accents, special characters)
-    normalized = unicodedata.normalize('NFD', str(text)).encode('ascii', 'ignore').decode('ascii')
+    # Preserve token boundaries before dropping non-ASCII characters. Otherwise
+    # "SOC–Analyst" and non-breaking spaces become unmatchable concatenations.
+    separated = re.sub(r"\s+", " ", str(text)).translate(
+        str.maketrans({dash: "-" for dash in "‐‑‒–—−"})
+    )
+    normalized = unicodedata.normalize('NFD', separated).encode('ascii', 'ignore').decode('ascii')
     return re.sub(r"\s+", " ", normalized.lower()).strip()
 
 
@@ -143,7 +149,7 @@ def match_academic_title_pattern(title: str, company: str = "") -> Optional[str]
             return pattern
     company_normalized = normalize_text(company)
     if re.search(r"\bresearch[\s/-]+(?:assistant|associate)\b", title_normalized) and re.search(
-        r"\b(?:\w*universitat|\w*universitaet|university|hochschule|college|faculty|unsw)\b",
+        r"\b(?:\w*universitat|\w*universitaet|university|hochschule|college|faculty|unsw|leibniz)\b",
         company_normalized,
     ):
         return "academic_company:research_assistant"

@@ -14,7 +14,7 @@ from .filtering import (
 )
 
 
-RULESET_VERSION = "2026-09-05.3"
+RULESET_VERSION = "2026-09-06.1"
 VALID_RELEVANCE_MODES = {"shadow", "enforce"}
 
 CONSULTING_TITLE_PATTERN = (
@@ -118,14 +118,6 @@ ADJACENT_TECHNICAL_RULES: tuple[RelevanceRule, ...] = (
         ),
     ),
     RelevanceRule(
-        "ml_engineering_adjacent",
-        "ml_engineering",
-        (
-            r"\bmachine[\s/-]+learning(?:[\s/-]+\([^)]*\))?(?:[\s/-]+ops)?[\s/-]+engineer\w*\b",
-            r"\bml[\s/-]+engineer\w*\b",
-        ),
-    ),
-    RelevanceRule(
         "ai_engineering_adjacent",
         "ai_engineering",
         (
@@ -145,6 +137,13 @@ ADJACENT_TECHNICAL_RULES: tuple[RelevanceRule, ...] = (
 # The one exact employer opt-out below was explicitly requested in a flag note.
 PERSONAL_EXCLUDED_COMPANIES = {"university positions"}
 
+# Employer context identifies the reviewed shop-floor Client Advisor role; it
+# never excludes other roles at these employers or arbitrary advisory titles.
+RETAIL_ADVISOR_EMPLOYERS = {"bucherer", "bucherer ag", "prada group"}
+RETAIL_ADVISOR_RULE = RelevanceRule(
+    "retail_client_advisor", "retail_hospitality", (r"\bclient[\s/-]+advis(?:or|er)\w*\b",),
+)
+
 PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
     RelevanceRule("personal_sap", "SAP-focused roles", (r"\bsap\b",)),
     RelevanceRule(
@@ -152,8 +151,11 @@ PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
         (r"\bcrm\b", r"\bcustomer[\s/-]+relationship[\s/-]+management\b"),
     ),
     RelevanceRule(
-        "personal_seniority", "director, principal or executive roles",
+        "personal_seniority", "head, director, principal or executive roles",
         (
+            r"\bhead[\s/-]+of\b",
+            r"\b(?:president|prasident|vp|svp|evp)\b(?![\s/-]+office\b)",
+            r"\b(?:gruppen|abteilungs)leiter\w*\b",
             r"\b(?:director|principal)\b(?![\s/-]+(?:office|support)\b)",
             r"\bchief(?:[\s/-]+[a-z]+){0,4}[\s/-]+officer\b(?![\s/-]+office\b)",
             r"^\W*(?:(?:co[\s-]?founder|founder)[\s&/,;:-]+)?(?:ceo|cto|cfo|coo|cdo|cio|cmo|cpo|cso|c[\s-]+level)\b(?![\s/-]+(?:office|services|advisory|analyst|specialist|support)\b)",
@@ -171,6 +173,7 @@ PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
             r"\bpricing\b",
             r"\brisk[\s/&,-]+(?:analyst\w*|analytics|analysis|modeller\w*|modeling|modelling|management|manager|consulting|performance)\b",
             r"\b(?:credit|market|investment|financial|insurance|liquidity|quant(?:itative)?)[\s/-]+risk\b",
+            r"\boperational[\s/-]+risk[\s/-]+(?:associate|officer|analyst|manager)\w*\b",
             r"\b(?:preisanalys|risikoanalys|risikomodell|risikomanag)\w*\b",
         ),
     ),
@@ -183,8 +186,8 @@ PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
         (r"\bbioinformatic(?:ian|s)\b", r"\bbioinformatik\w*\b"),
     ),
     RelevanceRule(
-        "personal_role_labels", "Fachspezialist or Kaufmann roles",
-        (r"\bfachspezialist(?:(?::|/)?in)?\b", r"\bkauf(?:mann|frau)\b"),
+        "personal_role_labels", "Fachspezialist, Fachkraft or Kaufmann roles",
+        (r"\bfachspezialist(?:(?::|/)?in)?\b", r"\bfachkraft\w*\b", r"\bkauf(?:mann|frau)\b"),
     ),
     RelevanceRule(
         "personal_demand_planning", "demand planning roles",
@@ -201,16 +204,19 @@ PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
     RelevanceRule(
         "personal_lead_founding", "lead or founding roles",
         (
-            r"\b(?:lead|founding)[\s/-]+(?:data|quant\w*|research\w*|ai|ml|machine|analytics|business|software|product|engineer\w*)\b",
-            r"\b(?:team|tech|technical|chapter|practice|project|engineering|analytics|data[\s/-]+science)[\s/-]+lead\b",
+            r"\blead\b",
+            r"\bfounding[\s/-]+(?:data|quant\w*|research\w*|ai|ml|machine|analytics|business|software|product|engineer\w*)\b",
             r"\bleitend\w*(?:\([a-z]+\))?[\s/-]+mitarbeiter\w*\b",
         ),
     ),
-    RelevanceRule("personal_graduate", "graduate roles", (r"\bgraduate[\s/-]+(?:data|quant\w*|research\w*|analyst\w*|scientist\w*|engineer\w*|consultant\w*)\b",)),
+    RelevanceRule("personal_graduate", "graduate roles", (
+        r"\bgraduate[\s/-]+(?:data|quant\w*|research\w*|analyst\w*|scientist\w*|engineer\w*|consultant\w*)\b",
+        r"\babsolvent\w*\b",
+    )),
     RelevanceRule(
         "personal_commercial_analytics", "commerce, marketing or B2B analytics roles",
         (
-            r"\b(?:e[\s-]?commerce|commerce)\b",
+            r"\b(?:e[\s-]?commerce|ecom|commerce|merchandising)\b",
             r"\b(?:online|digital|performance)?marketing\w*\b",
             r"\bb2b[\s/-]+(?:analytics|analysis|analyst\w*)\b",
         ),
@@ -232,13 +238,82 @@ PERSONAL_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
             r"\baudit(?:ing)?[\s/-]+(?:specialist\w*|manager\w*|analyst\w*|consultant\w*)\b",
             r"\b(?:internal|it|ai|technical)[\s/-]+audit(?:ing)?\b",
             r"\b(?:auditor\w*|revisor\w*)\b",
+            r"\binternal[\s/-]+controls?\b",
         ),
     ),
     RelevanceRule("personal_finops", "FinOps and cloud cost roles", (r"\bfinops\b", r"\bcloud[\s/-]+(?:cost|kosten)\w*\b")),
+    RelevanceRule(
+        "personal_lab_science", "laboratory, chemistry, biology or physicist roles",
+        (
+            r"\b(?:(?:geo)?physicist|(?:geo)?physiker|chemiker|chemist|biologist|biologe|mikrobiologe|microbiologist)\w*\b",
+            r"\b(?:chemistry|chemie\w*|biology|biologie|microbiology|mikrobiologie)\b",
+            r"\b\w*laborant\w*\b",
+            r"\b(?:lab|laboratory)[\s/-]+(?:compute|technician|analyst|scientist|assistant|manager|automation|data)\b",
+            r"\blabor(?:atorium)?[\s/-]*(?:mitarbeiter|analytik|automation|leiter)\w*\b",
+            r"\blateral[\s/-]+flow[\s/-]+assay\w*\b",
+            r"\b(?:natural[\s/-]+sciences?|naturwissenschaft\w*|molecular|molekular\w*|genomics?|genetik\w*|drug[\s/-]+discovery)\b",
+        ),
+    ),
+    RelevanceRule(
+        "personal_clinical", "medical or clinical roles",
+        (
+            r"\b(?:medical|clinical|klinisch\w*|medizinisch\w*|cardiology|kardiolog\w*|oncolog\w*|onkolog\w*)\b",
+            r"\b(?:physiotherapeut|ergotherapeut|arzt|facharzt)\w*\b",
+        ),
+    ),
+    RelevanceRule(
+        "personal_infrastructure", "cybersecurity, Kubernetes, Cloud or Azure roles",
+        (r"\bcyber[\s-]*security\b", r"\b(?:kubernetes|cloud|azure)\b"),
+    ),
+    RelevanceRule("personal_minijob", "minijobs", (r"\bmini[\s-]*jobs?\b", r"\bgeringfugig\w*\b")),
+    RelevanceRule("personal_career_change", "Quereinsteiger roles", (r"\bquereinsteiger\w*\b",)),
+    RelevanceRule(
+        "personal_software", "software, DevOps, architecture or programming roles",
+        (
+            r"\b(?:software\w*|devops|mlops|java|kotlin|programmierer\w*|programmer\w*)\b",
+            r"\b(?:back|front)[\s-]*end\b",
+            r"\barchitects?(?=\b|_)",
+            r"\barchitekt(?:in|en)?\b",
+            r"\bdatenarchitekt(?:in|en)?\b",
+        ),
+    ),
+    RelevanceRule(
+        "personal_testing", "testing roles",
+        (
+            r"\btest(?:er\w*|ing|en|manager\w*|management|automatisierung|automation)?\b",
+            r"\bverification[\s/-]+(?:ai[\s/-]+)?(?:expert|specialist|manager)\w*\b",
+        ),
+    ),
+    RelevanceRule(
+        "personal_automation_platforms", "robotics, SPS, Dynamics 365, Odoo, n8n or Synera roles",
+        (r"\b(?:robotic\w*|roboter\w*|robotik\w*|sps|odoo|n8n|synera)\b", r"\bdynamics[\s/-]*365\b"),
+    ),
+    RelevanceRule(
+        "personal_fixed_term", "fixed-term contracts",
+        (
+            r"\b(?:fixed[\s-]+term|befristet\w*)\b",
+            r"\b\d+[\s-]*(?:months?|monat(?:en?|s)?)[\s-]*(?:contract|vertrag)\b",
+        ),
+    ),
+    RelevanceRule(
+        "personal_ml_engineering", "machine learning engineering roles",
+        (
+            r"\b(?:machine[\s/-]*learning|ml)(?:[\s/-]+\([^)]*\))?(?:[\s/&-]+(?:data|ai|ops|research|platform|infrastructure)){0,2}[\s/-]+engineer\w*\b",
+            r"\bengineer\w*[\s,:/-]+(?:(?:for|in)[\s/-]+)?(?:machine[\s/-]*learning|ml)\b",
+        ),
+    ),
 )
 
 
 SCOPE_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
+    RelevanceRule(
+        "restricted_intern_conversion",
+        "intern-only conversion programme",
+        (
+            r"\b(?:applicable|open|available)[\s/-]+(?:for|to)\b[^)]{0,100}\binterns?[\s/-]+only\b",
+            r"\b(?:former|returning)[\s/-]+interns?[\s/-]+only\b",
+        ),
+    ),
     RelevanceRule(
         "legacy_placeholder",
         "legacy_placeholder",
@@ -274,8 +349,10 @@ SCOPE_EXCLUSION_RULES: tuple[RelevanceRule, ...] = (
             r"\bmasterclass\b",
             r"\bbootcamp\b",
             r"\b(?:train(?:er|ing)|instructor)\w*\b",
+            r"\b(?:educator|teacher)\w*\b",
             r"\b(?:ausbilder|weiterbildung|schulung)\w*\b",
             r"\blearning[\s/&-]+development\b",
+            r"^(?:(?:senior|junior)[\s/-]+)?learning[\s/-]+specialist\w*\b",
             r"\bpersonalentwickl\w*\b",
             r"\b(?:graduate|rotation|entry|development)[\s/-]+program(?:me)?\b",
             r"\bprogram(?:me)?[\s/-]+data[\s/-]+science\b",
@@ -307,11 +384,13 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
         (
             r"\bteamassistent\w*\b",
             r"\bteamassistenz\w*\b",
+            r"\bit[\s/-]+projektassistenz\w*\b",
             r"\b(?:kaufmannisch\w*[\s/-]+)?assistenz\b",
             r"\bassistenz[\s/-]+der[\s/-]+geschaftsleitung\b",
             r"\bexecutive[\s/-]+assistant\b",
             r"\boffice[\s/-]+assistant\b",
             r"\bsekretari(?:at|atskraft)\b",
+            r"\bassistent\w*[\s/-]+(?:der[\s/-]+)?geschaftsleitung\b",
         ),
     ),
     RelevanceRule(
@@ -324,6 +403,8 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
             r"\b(?:administrative|administration)[\s/-]+(?:assistant|officer|specialist|coordinator)\w*\b",
             r"\bback[\s-]?office\b",
             r"\boffice[\s/-]+manager\w*\b",
+            r"\brechnungspruf\w*\b",
+            r"\bpost[\s/-]+und[\s/-]+posterfassung\b",
         ),
     ),
     RelevanceRule(
@@ -333,10 +414,17 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
             r"\blogistiker\w*\b",
             r"\blogistikmitarbeiter\w*\b",
             r"\bmitarbeiter\w*[\s/-]+(?:in[\s/-]+der[\s/-]+)?logistik\b",
+            r"\bmitarbeiter(?:in|innen|[:*/_]in|/-in|\(in\))?[\s/-]+(?:in[\s/-]+der[\s/-]+)?logistik\b",
             r"\bversandmitarbeiter\w*\b",
             r"\bkommissionierer\w*\b",
             r"\bstockist\b",
             r"\b(?:shipping|logistics?)[\s/-]+(?:clerk|coordinator|operative|worker|associate)\w*\b",
+            r"\bmitarbeiter\b.*\b(?:lager|versand|transportmanagement)\b",
+            r"^(?:package[\s/-]+|material[\s/-]+)?handler(?:\s*\([^)]*\))?$",
+            r"\b(?:global[\s/-]+)?manager[\s/-]+inventor(?:y|ies)\b",
+            r"\binventor(?:y|ies)[\s/-]+manager\w*\b",
+            r"\bwarehouse[\s/-]+process[\s/-]+specialist\w*\b",
+            r"\bkapazitatsmanager\w*[\s/-]+fahrplan\b",
         ),
     ),
     RelevanceRule(
@@ -358,6 +446,21 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
             r"\baccountant\w*\b",
             r"\bbuchhalt\w*\b",
             r"\baccounts?[\s/-]+(?:payable|receivable)\b",
+            r"\bbilling[\s/-]+assistant\w*\b",
+            r"\bdatev[\s/-]+spezialist\w*\b",
+            r"\bfp\s*&\s*a\b",
+            r"\btax[\s/-]+analyst\w*\b",
+            r"\bwissensmanagement[\s/-]+tax\b",
+        ),
+    ),
+    RelevanceRule(
+        "financial_operations_compliance", "financial_operations_compliance",
+        (
+            r"\bexport[\s/-]+control[\s&/-]+customs\b",
+            r"\bfinancial[\s/-]+crime[\s/-]+prevention[\s/-]+officer\w*\b",
+            r"\bportfoliomanager\w*\b",
+            r"\bportfolio[\s/-]+manager\w*\b",
+            r"\bswift[\s/-]+specialist\w*\b",
         ),
     ),
     RelevanceRule(
@@ -376,7 +479,12 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
         "customer_technical_support",
         "customer_technical_support",
         (
-            r"\b(?:it|technical|customer|product|business)[\s/-]+support\b",
+            r"\b(?:it|technical|customer|product|business)[\s/-]+support\w*\b",
+            r"\b(?:l[123]|[123](?:st|nd|rd)?[\s-]+level)[\s/-]+support\w*\b",
+            r"\bcustomer[\s/-]+service[\s/-]+(?:assistant|coordinator|agent|representative|advisor|specialist|manager)\w*\b",
+            r"\bapplication[\s/-]+specialist\b.*\bcustomer[\s/-]+service\b",
+            r"\bcall[\s/-]+cent(?:er|re)\b",
+            r"\bkundenbetreuer\w*\b",
             r"\b(?:service|help|support)[\s/-]*desk\b",
             r"\bkundenservice\b",
             r"\bsupport[\s/-]+(?:agent|specialist|officer)\w*\b",
@@ -387,7 +495,9 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
         "it_operations",
         "it_operations",
         (
-            r"\b(?:database|system|network)[\s/-]+administrator\w*\b",
+            r"\b(?:database|system|network)[\s/-]*administrator\w*\b",
+            r"\b(?:it|cloud|linux)[\s/-]+admin(?:istrator)?\w*\b",
+            r"\badmin(?:istrator)?\b.*\bit[\s/-]+landschaft\b",
             r"\bdatenbankadministrator\w*\b",
             r"\b(?:it|sap|erp|m365)[\s/-]+consultant\w*\b",
             r"\btechnical[\s/-]+consultant\w*[\s/-]+(?:it|sap|erp|m365)\b",
@@ -395,6 +505,14 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
             r"\bit[\s/-]+(?:system|onsite|operations?)[\s/-]+specialist\w*\b",
             r"\bsystembetreuer\w*\b",
             r"\b(?:cybersecurity|security)[\s/-]+analyst\w*\b",
+            r"\bsoc[\s/-]+analyst\w*\b",
+            r"\btechnical[\s/-]+security[\s/-]+expert\w*\b",
+            r"\bpatch[\s-]*management[\s/-]+(?:expert|specialist|spezialist)\w*\b",
+            r"\b(?:it[\s/-]+)?anwendungsbetreuer\w*\b",
+            r"\bkis[\s/-]+admin(?:istrator)?\w*\b",
+            r"\binformatik[\s/-]+allrounder\w*\b",
+            r"\b(?:junior[\s/-]+)?it[\s/-]+specialist\w*\b",
+            r"\bkey[\s/-]+user\b.*\b(?:csb|mes|verwaltungs|kundenmanagement)\b",
         ),
     ),
     RelevanceRule(
@@ -405,7 +523,28 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
             r"\bmaschinenfuhrer\w*\b",
             r"\bfacharbeiter\w*\b",
             r"\b(?:production|manufacturing)[\s/-]+operator\w*\b",
+            r"\b(?:arbeitsvorbereiter|arbeitsplaner|teilereinigung)\w*\b",
+            r"\b(?:forstwirt|gartner|vegetationspfleger)\b",
+            r"\bmittelspannungsschaltanlagen\b",
+            r"\boptical[\s/-]+designer\w*\b",
+            r"\b(?:cnc[\s/-]+)?maschi(?:e)?nenbediener\w*\b",
+            r"\bproduktionsplaner\w*\b",
+            r"\bschichtleiter\w*\b",
         ),
+    ),
+    RelevanceRule(
+        "construction_infrastructure", "construction_infrastructure",
+        (
+            r"\bprojektleiter\w*(?:[:*/]in)?[\s/-]+oberbau\w*\b",
+            r"\bbim[\s/-]+modellierer\w*\b",
+            r"\bdigitalisierungsmanager\w*[\s/-]+gis[\s/-]+bim\b",
+            r"\bcalculateur\w*[\s/-]+construction\b",
+            r"\bforensic[\s/-]+delay[\s/-]+planner\w*\b",
+        ),
+    ),
+    RelevanceRule(
+        "specialist_science", "specialist_science",
+        (r"\bmeteorolog(?:ist|e|in)\w*\b", r"\bspacecraft[\s/-]+analyst\w*\b"),
     ),
     RelevanceRule(
         "physical_warehouse",
@@ -447,13 +586,27 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
             r"\brestaurant[\s/-]+service\b",
             r"\b(?:koch|kochin|cook)\b",
             r"\bhotel[\s/-]+reception\w*\b",
+            r"\bservicemitarbeiter\w*\b",
+            r"\bhauswirtschaft\w*\b",
+            r"\bgastronomie\b",
+            r"\bmitarbeiter[\s/-]+verkauf\b",
+            r"\bcenter[\s/-]+mitarbeiter[\s/-]+esports\b",
+            r"\bbartender\w*\b",
+            r"\bbar[\s-]*mitarbeiter\w*\b",
+            r"\bfront[\s/-]+office[\s/-]+agent\w*\b",
+            r"\bnight[\s/-]+audit(?:or)?\b",
+            r"\breservierungsmitarbeiter\w*\b",
+            r"\bconference[\s&/-]+guest[\s/-]+service\b",
+            r"\bmagaziner\w*\b",
+            r"\bcounter[\s/-]+manager\w*[\s/-]+(?:parfums?|cosmetics?)\b",
+            r"\b(?:outlet|boutique|retail|jewell?ery)[\s/-]+client[\s/-]+advis(?:or|er)\w*\b",
         ),
     ),
     RelevanceRule(
         "sales_acquisition",
         "sales_acquisition",
         (
-            r"\bsales[\s/-]+representative\b",
+            r"\bsales[\s/-]+(?:development[\s/-]+)?representative\b",
             r"\baccount[\s/-]+executive\b",
             r"\bbusiness[\s/-]+development[\s/-]+representative\b",
             r"\bfield[\s/-]+sales\b",
@@ -461,8 +614,27 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
             r"\b(?:sales|account)[\s/-]+manager\w*\b",
             r"\bvertriebs(?:mitarbeiter|spezialist|manager|innendienst)\w*\b",
             r"\bverkaufsinnendienst\w*\b",
+            r"\boffice[\s/-]+mitarbeiter[\s/-]+(?:sales|vertrieb)\b",
             r"\bcustomer[\s/-]+success[\s/-]+(?:manager|specialist)\w*\b",
+            r"\bmarktmanager\w*\b",
+            r"\b(?:pos[\s/-]+)?promoter(?:in|[:*/]in)?\b",
+            r"\bretention[\s/-]+agent\w*\b",
+            r"\binside[\s/-]+sales\b",
+            r"\bmitarbeiter(?:in|innen|[:*/_]in|/-in|\(in\))?[\s/-]+sales[\s&/-]+operations\b",
         ),
+    ),
+    RelevanceRule(
+        "quality_assurance", "quality_assurance",
+        (
+            r"\bquality[\s/-]+assurance[\s/-]+(?:specialist|manager|inspector)\w*\b",
+            r"\bqc[\s/-]+analyst\w*\b",
+            r"\bquality[\s/-]+assurance[\s&/-]+sample[\s/-]+technician\w*\b",
+            r"\bprobenregistrierung\b",
+        ),
+    ),
+    RelevanceRule(
+        "product_information_management", "product_information_management",
+        (r"\bpim[\s/-]+(?:specialist|manager|administrator)\w*\b",),
     ),
     RelevanceRule(
         "marketing_content",
@@ -470,9 +642,11 @@ UNRELATED_RULES: tuple[RelevanceRule, ...] = (
         (
             r"\b\w*marketing(?:manager|specialist|lead)\w*\b",
             r"\b\w*marketing\w*[\s/-]+(?:manager|specialist|lead)\w*\b",
-            r"\b(?:social[\s/-]+media|content)\b.*\b(?:creator|manager|specialist)\w*\b",
+            r"\b(?:social[\s/-]+media|content)\b.*\b(?:creator|manager|specialist|producer|designer)\w*\b",
             r"\b(?:manager|specialist|lead)\w*[\s/-]+(?:paid[\s/-]+social|social[\s/-]+media|content)\b",
             r"\b(?:seo|sea|sem|geo)[\s/&-]+(?:manager|specialist|lead)\w*\b",
+            r"\btravel[\s/-]+deals?[\s/-]+(?:expert|specialist|editor)\w*\b",
+            r"\bsocial[\s/-]+affiliate[\s/-]+specialist\w*\b",
         ),
     ),
     RelevanceRule(
@@ -536,6 +710,8 @@ def classify_relevance(
     adjacent_matches = _all_matches(normalized, ADJACENT_TECHNICAL_RULES)
     scope_matches = _all_matches(normalized, SCOPE_EXCLUSION_RULES)
     unrelated_matches = _all_matches(normalized, UNRELATED_RULES)
+    if normalize_text(company) in RETAIL_ADVISOR_EMPLOYERS:
+        unrelated_matches.extend(_all_matches(normalized, (RETAIL_ADVISOR_RULE,)))
     personal_matches = _all_matches(normalized, PERSONAL_EXCLUSION_RULES)
     if personal_matches:
         primary_rule, matched_value = personal_matches[0]

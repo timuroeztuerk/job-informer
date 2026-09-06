@@ -119,6 +119,8 @@ class AIService:
         try:
             if json.loads(work["contract_json"]) != contract():
                 raise OutputError("Extraction settings changed. Queue the selected jobs again to use the current version.")
+            if not await self.db(self.store.can_process, work):
+                return
             response = await self.request(work)
             metadata = response_metadata(response, time.monotonic()-start)
             if response.status != "completed":

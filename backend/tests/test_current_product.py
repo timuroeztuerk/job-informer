@@ -125,6 +125,7 @@ class TestCurrentSummary(unittest.TestCase):
             self.assertNotIn("trend_summary", summary)
             self.assertNotIn("profile_fit_summary", summary)
             self.assertNotIn("parser_telemetry", summary)
+            self.assertNotIn("collection_validation", summary)
 
 
 if __name__ == "__main__":

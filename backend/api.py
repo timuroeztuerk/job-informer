@@ -1209,6 +1209,7 @@ def get_description(job_id: str, _: bool = Depends(require_token)) -> dict:
 @app.post("/jobs/{job_id:path}/description")
 def request_description(job_id: str, request: DescriptionRequest, _: bool = Depends(require_token)) -> dict:
     with _description_errors():
+        _descriptions().store.require_job(job_id, active_only=True)
         _descriptions().enqueue([job_id], refresh=request.refresh)
         return get_description(job_id, _=True)
 

@@ -11,6 +11,14 @@ from ..utils.time_utils import utc_now_iso
 
 BATCH_SIZE = 100
 
+# Eligibility follows the same consolidated role as the review UI. An old,
+# archived posting may be the canonical ID of a role with an active posting.
+ACTIVE_JOB_IDS = """SELECT m.job_id FROM job_memberships m
+    JOIN review_jobs j ON j.job_id=m.canonical_job_id
+    WHERE j.archived_at IS NULL
+      AND COALESCE(j.relevance_outcome,'') NOT IN ('excluded','unrelated','manual_archive','auto_archived')"""
+INACTIVE_MESSAGE = "AI extraction skipped because this job is filtered or archived. Restore the job before extracting again."
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_queue_state (
     id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL DEFAULT 0,
@@ -54,6 +62,36 @@ class AIStore:
         return open_sqlite(self.db_path, row_factory=sqlite3.Row)
 
     @staticmethod
+    def is_active(conn, job_id):
+        return conn.execute(f"SELECT 1 WHERE ? IN ({ACTIVE_JOB_IDS})", (job_id,)).fetchone() is not None
+
+    @staticmethod
+    def _skip_inactive(conn):
+        # Keep the work and its history, but never claim it again automatically.
+        conn.execute(f"""UPDATE ai_work SET status='interrupted',finished_at=?,
+            next_attempt_at=0,error_kind='inactive',error_message=?
+            WHERE status IN ('queued','retry_wait') AND job_id NOT IN ({ACTIVE_JOB_IDS})""",
+            (utc_now_iso(), INACTIVE_MESSAGE))
+
+    def can_process(self, work):
+        """Recheck eligibility after claiming, immediately before the paid request."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            attempt = conn.execute("""SELECT 1 FROM ai_attempts a JOIN ai_work w USING(work_id)
+                WHERE a.attempt_id=? AND w.work_id=? AND a.status='running' AND w.status='running'""",
+                (work["attempt_id"], work["work_id"])).fetchone()
+            if attempt is None:
+                return False
+            if self.is_active(conn, work["job_id"]):
+                return True
+            now = utc_now_iso()
+            conn.execute("""UPDATE ai_work SET status='interrupted',finished_at=?,next_attempt_at=0,
+                error_kind='inactive',error_message=? WHERE work_id=?""", (now, INACTIVE_MESSAGE, work["work_id"]))
+            conn.execute("""UPDATE ai_attempts SET status='interrupted',finished_at=?,error_kind='inactive',
+                error_message=? WHERE attempt_id=?""", (now, INACTIVE_MESSAGE, work["attempt_id"]))
+            return False
+
+    @staticmethod
     def prepare(conn, job_id):
         row = conn.execute("""SELECT s.source_id, s.job_id, s.source_url, s.fetched_at,
             e.extractor, e.data_json, j.title, j.company, j.location
@@ -94,10 +132,12 @@ class AIStore:
                 if selected is None:
                     raise LookupError("Job not found.")
                 selected_job_id = selected[0]
+                if not self.is_active(conn, selected_job_id):
+                    raise ValueError("Only active jobs can use AI extraction. Restore this job first.")
                 if self.prepare(conn, selected_job_id) is None:
                     raise ValueError("Save a usable description for this job before extracting AI information.")
-            candidates = [selected_job_id] if selected_job_id is not None else [r[0] for r in conn.execute("""SELECT j.job_id FROM review_jobs j
-                WHERE LOWER(j.source)='linkedin' AND (j.archived_at IS NULL OR j.is_favorite=1)
+            candidates = [selected_job_id] if selected_job_id is not None else [r[0] for r in conn.execute(f"""SELECT j.job_id FROM review_jobs j
+                WHERE LOWER(j.source)='linkedin' AND j.job_id IN ({ACTIVE_JOB_IDS})
                   AND EXISTS (SELECT 1 FROM saved_job_descriptions s WHERE s.job_id=j.job_id)
                 ORDER BY j.is_favorite DESC, j.last_seen_at DESC, j.job_id""")]
             for job_id in candidates:
@@ -122,9 +162,11 @@ class AIStore:
 
     def recover(self):
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE ai_work SET status='interrupted', error_kind='interrupted', error_message='Interrupted before completion. Retry when ready.' WHERE status='running'")
             conn.execute("UPDATE ai_attempts SET status='interrupted', finished_at=?, error_kind='interrupted' WHERE status='running'", (utc_now_iso(),))
-            if conn.execute("SELECT 1 FROM ai_work WHERE status IN ('queued','retry_wait','interrupted') LIMIT 1").fetchone():
+            self._skip_inactive(conn)
+            if conn.execute(f"SELECT 1 FROM ai_work WHERE status IN ('queued','retry_wait','interrupted') AND job_id IN ({ACTIVE_JOB_IDS}) LIMIT 1").fetchone():
                 conn.execute("UPDATE ai_queue_state SET paused=1, reason='Resume saved AI work when ready.' WHERE id=1")
 
     def pause(self, reason="AI extraction paused."):
@@ -133,20 +175,25 @@ class AIStore:
 
     def resume(self):
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._skip_inactive(conn)
             conn.execute("UPDATE ai_queue_state SET paused=0, reason=NULL WHERE id=1")
 
     def retry_failed(self):
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             # Attempt history stays immutable; this starts a new bounded retry cycle.
-            return conn.execute("""UPDATE ai_work SET status='queued', attempts=0, next_attempt_at=0,
-                error_kind=NULL,error_message=NULL WHERE status IN ('failed','interrupted')
+            return conn.execute(f"""UPDATE ai_work SET status='queued', attempts=0, next_attempt_at=0,
+                finished_at=NULL,error_kind=NULL,error_message=NULL WHERE status IN ('failed','interrupted')
                 AND work_id IN (SELECT work_id FROM ai_work WHERE status IN ('failed','interrupted')
+                    AND job_id IN ({ACTIVE_JOB_IDS})
                     AND work_id IN (SELECT MAX(work_id) FROM ai_work GROUP BY job_id)
                     ORDER BY work_id LIMIT ?)""", (BATCH_SIZE,)).rowcount
 
     def claim(self, limit):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._skip_inactive(conn)
             state = conn.execute("SELECT * FROM ai_queue_state WHERE id=1").fetchone()
             if state["paused"] or state["cooldown_until"] > time.time():
                 return []
@@ -172,6 +219,11 @@ class AIStore:
             attempt = conn.execute("SELECT status FROM ai_attempts WHERE attempt_id=?", (work["attempt_id"],)).fetchone()
             if not attempt or attempt[0] != "running":
                 return
+            if not self.is_active(conn, work["job_id"]):
+                # A request already sent cannot be unsent. Retain its usage, but
+                # publish no new extraction and schedule no retry for this job.
+                status, payload, retry_delay, global_backoff = "interrupted", None, None, False
+                error_kind, message = "inactive", INACTIVE_MESSAGE
             extraction_id = None
             if payload is not None:
                 document = {"fields": payload, "contract": json.loads(work["contract_json"]), "metadata": metadata,
@@ -197,11 +249,13 @@ class AIStore:
     def status(self):
         with self.connect() as conn:
             state = dict(conn.execute("SELECT paused,reason,cooldown_until FROM ai_queue_state WHERE id=1").fetchone())
-            counts = dict(conn.execute("""SELECT status,COUNT(*) FROM ai_work
-                WHERE work_id IN (SELECT MAX(work_id) FROM ai_work GROUP BY job_id) GROUP BY status"""))
-            jobs = [dict(r) for r in conn.execute("""SELECT j.job_id,j.title,j.company,w.status
+            counts = dict(conn.execute(f"""SELECT status,COUNT(*) FROM ai_work
+                WHERE job_id IN ({ACTIVE_JOB_IDS})
+                  AND work_id IN (SELECT MAX(work_id) FROM ai_work GROUP BY job_id) GROUP BY status"""))
+            jobs = [dict(r) for r in conn.execute(f"""SELECT j.job_id,j.title,j.company,w.status
                 FROM ai_work w JOIN jobs j USING(job_id)
-                WHERE w.work_id IN (SELECT MAX(work_id) FROM ai_work GROUP BY job_id)
+                WHERE w.job_id IN ({ACTIVE_JOB_IDS})
+                  AND w.work_id IN (SELECT MAX(work_id) FROM ai_work GROUP BY job_id)
                 ORDER BY COALESCE(w.finished_at,w.requested_at) DESC,w.work_id DESC LIMIT 20""")]
             usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "reasoning_tokens": 0}
             cost = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM ai_attempts").fetchone()[0]

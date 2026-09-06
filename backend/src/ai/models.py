@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .evidence import resolve_evidence
+
 
 class Structure(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -152,17 +154,13 @@ TOOLS = {"Power BI", "Excel", "AWS", "Azure", "GCP", "PyTorch", "TensorFlow", "s
 
 
 def validate_evidence(parsed: JobExtraction, sources: dict[str, str]) -> dict:
-    """Resolve exact quotations; never repair or invent evidence with another model."""
+    """Resolve quotations to original spans, accepting harmless typography."""
     payload = parsed.model_dump()
 
     def visit(value):
         if isinstance(value, dict):
             if "source_ref" in value and "quote" in value:
-                text = sources.get(value["source_ref"])
-                start = text.find(value["quote"]) if text is not None else -1
-                if start < 0:
-                    raise ValueError(f"Evidence does not match source {value['source_ref']}.")
-                value.update(start=start, end=start + len(value["quote"]))
+                value.update(resolve_evidence(value["source_ref"], value["quote"], sources))
             for child in list(value.values()):
                 visit(child)
         elif isinstance(value, list):

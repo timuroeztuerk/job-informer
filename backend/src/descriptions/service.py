@@ -53,6 +53,8 @@ class DescriptionService:
             return False
         try:
             previous = self.store.latest_source(attempt["job_id"])
+            if not self.store.can_fetch(attempt["fetch_id"]):
+                return True
             response = self.fetcher(attempt["job_id"], previous)
             if response.status == 304:
                 if previous is None:

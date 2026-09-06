@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from bs4.element import Tag
 import pandas as pd
 from loguru import logger
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import urlencode, urljoin
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
@@ -30,6 +30,7 @@ from ..utils.filtering import (
     match_company_filter,
     match_keyword_filter,
     match_study_title_pattern,
+    normalize_text,
 )
 
 TIME_RANGE_TO_SECONDS = {
@@ -230,14 +231,7 @@ class LinkedInSource:
     DEFAULT_MAX_PAGES = 4
     RESULTS_PER_PAGE = 10
 
-    SEARCH_URL_TEMPLATE = (
-        "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?"
-        "keywords={keywords}"
-        "&location={location}"
-        "&f_TPR=r{time_filter_seconds}"
-        "&f_JT=F&start={start}"
-        "&origin=JOB_SEARCH_PAGE_JOB_FILTER&trk=public_jobs_jobs-search-bar_search-submit"
-    )
+    SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
     CARD_CONTAINER_SELECTORS = [
         "div.job-search-card",
@@ -297,13 +291,23 @@ class LinkedInSource:
             record["posted_at"] = self._clean_text(job.get("posted_at"))
         return record
 
+    @staticmethod
+    def _location_parameters(location: str) -> dict[str, str]:
+        parts = tuple(normalize_text(part) for part in location.split(","))
+        if parts[0] in {"munchen", "muenchen", "munich"} and parts[1:] in {
+            (), ("germany",), ("deutschland",), ("bavaria", "germany"), ("bayern", "deutschland"),
+        }:
+            # Verified in LinkedIn's location selector on 2026-09-06. Bare
+            # München returned Nürnberg-area jobs; pin the city on every page.
+            return {"location": "Munich, Bavaria, Germany", "geoId": "100477049"}
+        return {"location": location}
+
     def _build_search_url(self, keywords: str, location: str, time_filter_seconds: int, start: int = 0) -> str:
-        return self.SEARCH_URL_TEMPLATE.format(
-            keywords=quote_plus(keywords),
-            location=quote_plus(location),
-            time_filter_seconds=time_filter_seconds,
-            start=start,
-        )
+        return self.SEARCH_URL + "?" + urlencode({
+            "keywords": keywords, **self._location_parameters(location),
+            "f_TPR": f"r{time_filter_seconds}", "f_JT": "F", "start": start,
+            "origin": "JOB_SEARCH_PAGE_JOB_FILTER", "trk": "public_jobs_jobs-search-bar_search-submit",
+        })
 
     def _extract_cards(self, soup: BeautifulSoup) -> List[Tag]:
         for selector in self.CARD_CONTAINER_SELECTORS:
@@ -349,6 +353,8 @@ class LinkedInSource:
             "source": self.display_name,
             "keyword": keywords,
             "location": location,
+            "search_location": self._location_parameters(location)["location"],
+            "geo_id": self._location_parameters(location).get("geoId"),
             "page_limit": max_pages,
             "page_offsets": [],
             "pages_attempted": 0,

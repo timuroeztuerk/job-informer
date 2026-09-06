@@ -87,6 +87,28 @@ describe("AI extraction", () => {
     expect(screen.getByText(/Not yet reviewed for accuracy/)).toBeInTheDocument();
   });
 
+  it("keeps archived results readable and avoids prompting extraction for inactive jobs", async () => {
+    vi.mocked(fetchJobExtraction).mockResolvedValue(saved);
+    const { rerender } = render(<JobExtraction jobId="linkedin:123" inactive />);
+    expect(await screen.findByText("de/en")).toBeInTheDocument();
+    expect(screen.getByText(/AI extraction is available only for active jobs/)).toBeInTheDocument();
+    vi.mocked(fetchJobExtraction).mockResolvedValue(empty);
+    rerender(<JobExtraction jobId="linkedin:456" inactive />);
+    expect(await screen.findByText("No saved AI result.")).toBeInTheDocument();
+    expect(screen.queryByText(/Use Extract AI above/)).not.toBeInTheDocument();
+  });
+
+  it("highlights original evidence correctly after emoji in the source", async () => {
+    const result = structuredClone(saved);
+    result.input!.sources["description.1"] = "🚀 Python required.";
+    result.saved!.fields.requirements[0].evidence[0] = { source_ref: "description.1", quote: "Python", start: 2, end: 8 };
+    vi.mocked(fetchJobExtraction).mockResolvedValue(result);
+    const { container } = render(<JobExtraction jobId="linkedin:123" />);
+    await screen.findByText("de/en");
+    expect(container.querySelector("mark")?.textContent).toBe("Python");
+    expect(container.querySelector("blockquote p")?.textContent).toBe("🚀 Python required.");
+  });
+
   it("preserves old results and review intent without presenting them as verified", async () => {
     vi.mocked(fetchJobExtraction).mockResolvedValue({ ...empty, legacy_review: { status: "interesting", priority: "high" },
       legacy: { model: "old-model", version: 1, created_at: "2025-01-01", fields: { languages: ["German"], summary: "A saved summary" } } });

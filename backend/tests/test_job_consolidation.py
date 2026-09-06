@@ -94,9 +94,9 @@ class TestJobConsolidation(unittest.TestCase):
         self.add_jobs()
         self.db.set_job_flag("linkedin:1001", True, "Too much consulting")
         self.db.set_job_favorite("linkedin:1000", True)
+        self.describe(1000)
         self.db.archive_jobs(["linkedin:1000"], archived_reason="Earlier choice")
-        for number in [1000, 1001]:
-            self.describe(number)
+        self.describe(1001)
         job = _list_jobs(flagged=True, favorite=True)["items"][0]
         self.assertEqual(job["flag_reason"], "Too much consulting")
         api.delete_job(job["job_id"], _=True)
@@ -130,3 +130,47 @@ class TestJobConsolidation(unittest.TestCase):
         # Legacy IDs can still fetch the exact, safely normalized posting URL.
         from backend.src.descriptions.linkedin import source_url
         self.assertEqual(source_url(legacy), "https://www.linkedin.com/jobs/view/1000/")
+
+    def test_new_repost_inherits_manual_archive_only_after_description_match(self):
+        self.add_jobs(1)
+        self.describe(1000)
+        api.delete_job('linkedin:1000', _=True)
+        frame = self.add_jobs(3)
+        self.assertEqual(_list_jobs()['total'], 2)  # Missing text cannot prove a repost.
+        self.describe(1001)
+        self.describe(1002, COPY + ' A different vacancy with different responsibilities.')
+        self.assertEqual([j['job_id'] for j in _list_jobs()['items']], ['linkedin:1002'])
+        self.assertEqual(self.db.get_manual_overrides()['linkedin:1001'], 'archive')
+        with self.db._get_connection() as conn:
+            before = conn.execute('SELECT COUNT(*) FROM filter_decisions').fetchone()[0]
+            rebuild_consolidation(conn)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM filter_decisions').fetchone()[0], before)
+            inherited = conn.execute("SELECT reason, details_json FROM filter_decisions WHERE job_id='linkedin:1001' AND filter_name='inherited_manual_decision'").fetchone()
+            self.assertIsNotNone(inherited)
+            self.assertIn('inherited_from_decision_id', inherited[1])
+        self.db.put_into_sql(frame, observed_at='2026-09-07T08:00:00Z')
+        from backend.src.utils.relevance_service import apply_relevance_preview, build_relevance_preview
+        apply_relevance_preview(self.db, build_relevance_preview(self.db, active_only=False, reconcile_archive=True))
+        self.assertEqual([j['job_id'] for j in _list_jobs()['items']], ['linkedin:1002'])
+
+    def test_latest_explicit_restore_wins_for_a_later_repost(self):
+        self.add_jobs(1)
+        self.describe(1000)
+        api.delete_job('linkedin:1000', _=True)
+        self.add_jobs(2)
+        self.describe(1001)
+        api.restore_job('linkedin:1001', _=True)
+        self.add_jobs(3)
+        self.describe(1002)
+        self.assertEqual(_list_jobs()['total'], 1)
+        self.assertEqual(self.db.get_manual_overrides(), dict.fromkeys(
+            ['linkedin:1000', 'linkedin:1001', 'linkedin:1002'], 'keep'))
+
+    def test_automatic_archive_does_not_spread_to_new_reposts(self):
+        self.add_jobs(1)
+        self.describe(1000)
+        self.db.archive_jobs(['linkedin:1000'], archived_reason='Old automatic filter')
+        self.add_jobs(2)
+        self.describe(1001)
+        self.assertEqual(_list_jobs()['total'], 1)
+        self.assertEqual(self.db.get_manual_overrides(), {})

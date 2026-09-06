@@ -69,6 +69,36 @@ class _Session:
 
 
 class TestLinkedInCollection(unittest.TestCase):
+    def test_munich_aliases_pin_the_verified_city_on_every_page(self) -> None:
+        for location in ["München", "Mu\u0308nchen", "Muenchen", "Munich", " MÜNCHEN ",
+                         "Munich, Bavaria, Germany", "München, Deutschland"]:
+            with self.subTest(location=location):
+                session = _Session([_Response(200, _page(0, 10)), _Response(200, _page(10, 3))])
+                source = LinkedInSource(session, _config())
+                with patch("backend.src.agents.job_scraper.time.sleep", return_value=None):
+                    source.scrape_jobs("Data Scientist", location, 86400, max_pages=4)
+                for url in session.urls:
+                    query = parse_qs(urlparse(url).query)
+                    self.assertEqual(query["geoId"], ["100477049"])
+                    self.assertEqual(query["location"], ["Munich, Bavaria, Germany"])
+                    self.assertEqual(query["keywords"], ["Data Scientist"])
+                    self.assertEqual(query["f_TPR"], ["r86400"])
+                    self.assertEqual(query["f_JT"], ["F"])
+                self.assertEqual(source.last_query_report["page_offsets"], [0, 10])
+                self.assertEqual(source.last_query_report["location"], location)
+                self.assertEqual(source.last_query_report["geo_id"], "100477049")
+                self.assertEqual(source.last_query_report["search_location"], "Munich, Bavaria, Germany")
+
+    def test_other_locations_are_not_silently_redirected_to_munich(self) -> None:
+        source = LinkedInSource(_Session([]), _config())
+        for location in ["Germany", "Switzerland", "Berlin", "Frankfurt", "Stuttgart", "Munich, North Dakota, United States"]:
+            with self.subTest(location=location):
+                query = parse_qs(urlparse(source._build_search_url("Data Analyst", location, 604800, start=20)).query)
+                self.assertNotIn("geoId", query)
+                self.assertEqual(query["location"], [location])
+                self.assertEqual(query["f_TPR"], ["r604800"])
+                self.assertEqual(query["start"], ["20"])
+
     def test_collects_and_records_more_than_one_page(self) -> None:
         session = _Session([_Response(200, _page(0, 10)), _Response(200, _page(10, 3))])
         source = LinkedInSource(session, _config())

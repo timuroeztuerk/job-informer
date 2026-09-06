@@ -11,6 +11,9 @@ from ..utils.time_utils import utc_now_iso
 from ..utils.job_consolidation import rebuild_consolidation
 
 
+ARCHIVED_MESSAGE = "Retrieval skipped because this job is archived. Restore the job before fetching its description."
+
+
 class DescriptionStore:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -18,11 +21,13 @@ class DescriptionStore:
     def connect(self):
         return open_sqlite(self.db_path, row_factory=sqlite3.Row)
 
-    def require_job(self, job_id: str):
+    def require_job(self, job_id: str, *, active_only=False):
         with self.connect() as conn:
-            row = conn.execute("SELECT job_id FROM jobs WHERE job_id=? AND LOWER(source)='linkedin'", (job_id,)).fetchone()
+            row = conn.execute("SELECT archived_at FROM jobs WHERE job_id=? AND LOWER(source)='linkedin'", (job_id,)).fetchone()
         if row is None:
             raise LookupError("Job not found.")
+        if active_only and row["archived_at"] is not None:
+            raise ValueError("Only active jobs can fetch descriptions. Restore this job first.")
 
     def enqueue(self, job_ids: list[str], *, refresh=False) -> int:
         added = 0
@@ -31,8 +36,12 @@ class DescriptionStore:
             for job_id in dict.fromkeys(job_ids):
                 # Validate and enqueue the whole selection on one connection.
                 # An invalid job rolls back the batch without partial inserts.
-                if not conn.execute("SELECT 1 FROM jobs WHERE job_id=? AND LOWER(source)='linkedin'", (job_id,)).fetchone():
+                job = conn.execute("SELECT archived_at FROM jobs WHERE job_id=? AND LOWER(source)='linkedin'", (job_id,)).fetchone()
+                if job is None:
                     raise LookupError("Job not found.")
+                # A batch candidate may have been archived since selection.
+                if job["archived_at"] is not None:
+                    continue
                 if not refresh and conn.execute("SELECT 1 FROM saved_job_descriptions WHERE job_id=? LIMIT 1", (job_id,)).fetchone():
                     continue
                 url = source_url(job_id)
@@ -44,7 +53,7 @@ class DescriptionStore:
     def unfetched_candidates(self) -> list[str]:
         with self.connect() as conn:
             rows = conn.execute("""SELECT j.job_id FROM jobs j
-                WHERE LOWER(j.source)='linkedin' AND (j.archived_at IS NULL OR j.is_favorite=1)
+                WHERE LOWER(j.source)='linkedin' AND j.archived_at IS NULL
                   AND NOT EXISTS (SELECT 1 FROM description_fetches f WHERE f.job_id=j.job_id)
                   AND NOT EXISTS (SELECT 1 FROM saved_job_descriptions s WHERE s.job_id=j.job_id)
                   AND NOT EXISTS (SELECT 1 FROM job_consolidations c
@@ -65,6 +74,7 @@ class DescriptionStore:
             conn.execute("""UPDATE description_fetches SET status='interrupted', finished_at=?,
                 error_kind='interrupted', error_message='Retrieval was interrupted. Retry this job.'
                 WHERE status='fetching'""", (utc_now_iso(),))
+            self._skip_archived(conn)
             self._reuse_saved(conn)
             if conn.execute("SELECT 1 FROM description_fetches WHERE status='queued' LIMIT 1").fetchone():
                 conn.execute("UPDATE description_queue_state SET paused=1, reason='Resume the saved queue when ready.' WHERE id=1")
@@ -72,10 +82,21 @@ class DescriptionStore:
     def failed_candidates(self, limit=10) -> list[str]:
         with self.connect() as conn:
             return [row[0] for row in conn.execute("""SELECT f.job_id FROM description_fetches f
-                WHERE f.status IN ('failed','interrupted') AND NOT EXISTS
+                JOIN jobs j ON j.job_id=f.job_id
+                WHERE j.archived_at IS NULL AND LOWER(j.source)='linkedin'
+                  AND f.status IN ('failed','interrupted') AND NOT EXISTS
                   (SELECT 1 FROM description_fetches newer WHERE newer.job_id=f.job_id AND newer.fetch_id>f.fetch_id)
                   AND (f.refresh=1 OR NOT EXISTS (SELECT 1 FROM saved_job_descriptions s WHERE s.job_id=f.job_id))
                 ORDER BY f.fetch_id DESC LIMIT ?""", (limit,))]
+
+    @staticmethod
+    def _skip_archived(conn):
+        """Retain queue history while removing archived jobs from pending work."""
+        return conn.execute("""UPDATE description_fetches SET status='interrupted', finished_at=?,
+            error_kind='archived', error_message=?
+            WHERE status='queued' AND EXISTS (
+                SELECT 1 FROM jobs j WHERE j.job_id=description_fetches.job_id AND j.archived_at IS NOT NULL)
+        """, (utc_now_iso(), ARCHIVED_MESSAGE)).rowcount
 
     @staticmethod
     def _reuse_saved(conn):
@@ -100,11 +121,13 @@ class DescriptionStore:
             row = conn.execute("SELECT cooldown_until FROM description_queue_state WHERE id=1").fetchone()
             if row[0] and row[0] > utc_now_iso():
                 raise ValueError("LinkedIn retrieval is cooling down. Resume after the displayed time.")
+            self._skip_archived(conn)
             conn.execute("UPDATE description_queue_state SET paused=0, reason=NULL, cooldown_until=NULL WHERE id=1")
 
     def claim(self) -> dict | None:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._skip_archived(conn)
             self._reuse_saved(conn)
             state = conn.execute("SELECT * FROM description_queue_state WHERE id=1").fetchone()
             if state["paused"] or (state["cooldown_until"] and state["cooldown_until"] > utc_now_iso()):
@@ -116,6 +139,22 @@ class DescriptionStore:
                 return None
             conn.execute("UPDATE description_fetches SET status='fetching', started_at=? WHERE fetch_id=?", (utc_now_iso(), row["fetch_id"]))
             return dict(row)
+
+    def can_fetch(self, fetch_id: int) -> bool:
+        """Recheck immediately before HTTP; archiving can happen after claim."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("""SELECT j.archived_at FROM description_fetches f
+                JOIN jobs j ON j.job_id=f.job_id WHERE f.fetch_id=? AND f.status='fetching'""",
+                (fetch_id,)).fetchone()
+            if row is None:
+                return False
+            if row["archived_at"] is None:
+                return True
+            conn.execute("""UPDATE description_fetches SET status='interrupted', finished_at=?,
+                error_kind='archived', error_message=? WHERE fetch_id=?""",
+                (utc_now_iso(), ARCHIVED_MESSAGE, fetch_id))
+            return False
 
     def latest_source(self, job_id, *, group=False) -> dict | None:
         with self.connect() as conn:
@@ -196,9 +235,14 @@ class DescriptionStore:
     def queue_status(self) -> dict:
         with self.connect() as conn:
             state = dict(conn.execute("SELECT paused, reason, cooldown_until FROM description_queue_state WHERE id=1").fetchone())
-            counts = dict(conn.execute("SELECT status, COUNT(*) FROM description_fetches GROUP BY status").fetchall())
+            counts = dict(conn.execute("""SELECT f.status, COUNT(*) FROM description_fetches f
+                JOIN jobs j ON j.job_id=f.job_id
+                WHERE f.status='fetching' OR (f.status='queued' AND j.archived_at IS NULL)
+                GROUP BY f.status""").fetchall())
             saved = conn.execute("SELECT COUNT(DISTINCT job_id) FROM saved_job_descriptions").fetchone()[0]
-            failed = conn.execute("""SELECT COUNT(*) FROM description_fetches f WHERE status IN ('failed','interrupted')
+            failed = conn.execute("""SELECT COUNT(*) FROM description_fetches f
+                JOIN jobs j ON j.job_id=f.job_id
+                WHERE j.archived_at IS NULL AND LOWER(j.source)='linkedin' AND f.status IN ('failed','interrupted')
                 AND NOT EXISTS (SELECT 1 FROM description_fetches newer WHERE newer.job_id=f.job_id AND newer.fetch_id>f.fetch_id)
                 AND (f.refresh=1 OR NOT EXISTS (SELECT 1 FROM saved_job_descriptions s WHERE s.job_id=f.job_id))""").fetchone()[0]
         return {**state, "paused": bool(state["paused"]), "queued": counts.get("queued", 0),

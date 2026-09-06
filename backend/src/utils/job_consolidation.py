@@ -126,6 +126,7 @@ def rebuild_consolidation(conn):
     existing = dict(conn.execute("SELECT job_id, canonical_job_id FROM job_consolidations"))
     roots = set(existing.values())
     links = []
+    changed_groups = {}
     for identity_groups in roles.values():
         members = [job_id for _, group in identity_groups for job_id in group]
         if len(members) < 2:
@@ -135,12 +136,63 @@ def rebuild_consolidation(conn):
             key not in modern, not bool(re.fullmatch(r"linkedin:\d+", key)),
             jobs[key]["first_seen_at"] or "", key))
         canonical_identity = next(identity for identity, group in identity_groups if canonical in group)
+        if any(existing.get(member, member) != canonical for member in members):
+            changed_groups[canonical] = members
         for identity, group in identity_groups:
             links.extend((key, canonical, "posting_id" if identity == canonical_identity else "description")
                          for key in group if key != canonical)
     conn.execute("DELETE FROM job_consolidations")
     conn.executemany("INSERT INTO job_consolidations VALUES (?, ?, ?)", links)
+    _inherit_manual_decisions(conn, changed_groups)
     return {"groups": len({link[1] for link in links}), "consolidated_postings": len(links)}
+
+
+def _inherit_manual_decisions(conn, changed_groups):
+    """A proven repost inherits the latest explicit choice for the same role.
+
+    Only newly joined groups need synchronization. Ordinary automatic archives
+    do not spread, and missing/different descriptions never establish a match.
+    Inherited decisions retain the original time, so a later restore still wins.
+    Caller owns the same transaction that established the duplicate evidence.
+    """
+    if not changed_groups:
+        return
+    membership = {member: root for root, members in changed_groups.items() for member in members}
+    member_choices = {}
+    group_choices = {}
+    for row in conn.execute("""SELECT decision_id, job_id, decision_action, reason, decided_at
+        FROM filter_decisions WHERE decision_source='manual'
+            AND decision_action IN ('archive', 'keep', 'restore')
+        ORDER BY julianday(decided_at), decision_id"""):
+        decision_id, job_id, action, reason, decided_at = row
+        if job_id not in membership:
+            continue
+        action = 'archive' if action == 'archive' else 'keep'
+        member_choices[job_id] = action
+        group_choices[membership[job_id]] = (decision_id, job_id, action, reason, decided_at)
+
+    for root, choice in group_choices.items():
+        decision_id, source_job_id, action, reason, decided_at = choice
+        for member in changed_groups[root]:
+            if member_choices.get(member) != action:
+                conn.execute("""INSERT INTO filter_decisions
+                    (job_id, decision_source, decision_action, filter_name, reason, details_json, decided_at)
+                    VALUES (?, 'manual', ?, 'inherited_manual_decision', ?, ?, ?)""",
+                    (member, action, reason, json.dumps({
+                        'inherited_from_job_id': source_job_id,
+                        'inherited_from_decision_id': decision_id,
+                        'canonical_job_id': root,
+                    }), decided_at))
+            if action == 'archive':
+                conn.execute("""UPDATE jobs SET archived_at=COALESCE(archived_at, ?),
+                    archived_reason=?, relevance_outcome='manual_archive', role_family=NULL,
+                    relevance_reason=?, relevance_evaluated_at=? WHERE job_id=?""",
+                    (decided_at, reason, reason, decided_at, member))
+            else:
+                conn.execute("""UPDATE jobs SET archived_at=NULL, archived_reason=NULL,
+                    relevance_outcome='manual_keep', role_family=NULL,
+                    relevance_reason=?, relevance_evaluated_at=? WHERE job_id=?""",
+                    (reason, decided_at, member))
 
 
 def canonical_job_id(conn, job_id):

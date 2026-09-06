@@ -177,12 +177,18 @@ class TestAIStore(unittest.TestCase):
         self.assertEqual(self.store.enqueue("linkedin:1000"), 1)
         self.assertEqual(self.store.status()["counts"], {"queued": 2})
 
-    def test_bulk_skips_archives_and_explicit_extraction_preserves_manual_archive(self):
+    def test_bulk_and_explicit_extraction_reject_archived_favorites_and_filtered_jobs(self):
         self.db.archive_jobs_with_filter_decisions([{"job_id": "linkedin:1000", "decision_source": "manual",
             "decision_action": "archive", "filter_name": "manual_archive", "reason": "Not a fit"}])
-        self.assertEqual(self.store.enqueue(), 11)
+        with self.store.connect() as conn:
+            conn.execute("UPDATE jobs SET is_favorite=1 WHERE job_id='linkedin:1000'")
+            # Excluded outcomes must also fail closed if an old row lacks its archive timestamp.
+            conn.execute("UPDATE jobs SET relevance_outcome='excluded' WHERE job_id='linkedin:1001'")
+        self.assertEqual(self.store.enqueue(), 10)
         self.assertIsNone(self.store.job_result("linkedin:1000")["status"])
-        self.assertEqual(self.store.enqueue("linkedin:1000"), 1)
+        for job_id in ("linkedin:1000", "linkedin:1001"):
+            with self.subTest(job_id=job_id), self.assertRaisesRegex(ValueError, "Only active jobs"):
+                self.store.enqueue(job_id)
         for work in self.store.claim(100):
             self.store.finish(work, payload=fixture())
         self.assertEqual(self.db.get_manual_overrides()["linkedin:1000"], "archive")
@@ -190,6 +196,65 @@ class TestAIStore(unittest.TestCase):
             archived_at, outcome = conn.execute("SELECT archived_at,relevance_outcome FROM jobs WHERE job_id='linkedin:1000'").fetchone()
         self.assertIsNotNone(archived_at)
         self.assertEqual(outcome, "manual_archive")
+
+    def test_retry_and_status_exclude_inactive_jobs_but_preserve_history_and_usage(self):
+        self.store.enqueue()
+        work = self.store.claim(4)
+        for item in work[:3]:
+            self.store.finish(item, error_kind="output", message="Rejected output")
+        self.store.finish(work[3], payload=fixture(), metadata={"usage": {"output_tokens": 200}, "estimated_cost_usd": 0.01})
+        self.db.archive_jobs([work[0]["job_id"], work[3]["job_id"]], archived_reason="Not a fit")
+        with self.store.connect() as conn:
+            conn.execute("UPDATE jobs SET is_favorite=1 WHERE job_id=?", (work[0]["job_id"],))
+            conn.execute("UPDATE jobs SET relevance_outcome='unrelated' WHERE job_id=?", (work[1]["job_id"],))
+        status = self.store.status()
+        self.assertEqual(status["counts"], {"failed": 1, "queued": 8})
+        self.assertEqual(status["usage"]["output_tokens"], 200)
+        self.assertEqual(status["estimated_cost_usd"], 0.01)
+        self.assertTrue({item["job_id"] for item in work[:2]+work[3:4]}.isdisjoint(job["job_id"] for job in status["jobs"]))
+        self.assertIsNotNone(self.store.job_result(work[3]["job_id"])["saved"])
+        self.assertEqual(self.store.retry_failed(), 1)
+        self.assertEqual(self.store.retry_failed(), 0)
+        self.assertEqual(self.store.job_result(work[0]["job_id"])["status"], "failed")
+        self.db.restore_job(work[0]["job_id"])
+        self.assertEqual(self.store.enqueue(work[0]["job_id"]), 1)
+
+    def test_queued_and_backoff_work_archived_later_is_skipped_on_recovery_resume_and_claim(self):
+        for index, boundary in enumerate(("recover", "resume", "claim")):
+            with self.subTest(boundary=boundary):
+                job_id = f"linkedin:{1000+index}"
+                self.store.enqueue(job_id)
+                with self.store.connect() as conn:
+                    conn.execute("UPDATE ai_work SET status='retry_wait',next_attempt_at=9999999999 WHERE job_id=?", (job_id,))
+                self.db.archive_jobs([job_id], archived_reason="Filtered after queueing")
+                if boundary == "claim":
+                    self.assertEqual(self.store.claim(100), [])
+                else:
+                    getattr(self.store, boundary)()
+                with self.store.connect() as conn:
+                    state = conn.execute("SELECT status,error_kind,next_attempt_at FROM ai_work WHERE job_id=?", (job_id,)).fetchone()
+                self.assertEqual(tuple(state), ("interrupted", "inactive", 0))
+                self.assertEqual(self.store.status()["counts"], {})
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM ai_attempts").fetchone()[0], 0)
+        # The same gate catches ordinary queued work without spending an attempt.
+        self.store.enqueue("linkedin:1011")
+        self.db.archive_jobs(["linkedin:1011"], archived_reason="Archived after queueing")
+        self.assertEqual(self.store.claim(100), [])
+        self.assertEqual(self.store.job_result("linkedin:1011")["status"], "interrupted")
+
+    def test_consolidated_active_role_remains_eligible_and_archived_group_is_blocked(self):
+        self.db.archive_jobs(["linkedin:1000"], archived_reason="Old posting")
+        with self.store.connect() as conn:
+            conn.execute("INSERT INTO job_consolidations VALUES ('linkedin:1011', 'linkedin:1000', 'description')")
+        # Canonical identity can point at an old posting; the review role is active.
+        self.assertEqual(self.store.enqueue("linkedin:1011"), 1)
+        self.assertEqual(self.store.claim(1)[0]["job_id"], "linkedin:1000")
+        self.db.archive_jobs(["linkedin:1011"], archived_reason="Whole role archived")
+        for job_id in ("linkedin:1000", "linkedin:1011"):
+            with self.assertRaisesRegex(ValueError, "Only active jobs"):
+                self.store.enqueue(job_id)
+        self.assertEqual(self.store.status()["counts"], {})
 
     def test_single_job_retry_leaves_other_failures_and_completed_results_alone(self):
         self.store.enqueue("linkedin:1000")
@@ -347,6 +412,63 @@ class TestAIService(unittest.IsolatedAsyncioTestCase):
         await self.service.task
         self.assertEqual((await self.service.status())["counts"], {"succeeded": 1})
         self.assertEqual((await self.service.status())["usage"]["output_tokens"], 200)
+
+    async def test_single_job_endpoint_rejects_archived_favorite_without_starting_worker(self):
+        with self.service.store.connect() as conn:
+            conn.execute("UPDATE jobs SET archived_at='2026-09-06',is_favorite=1 WHERE job_id='linkedin:1000'")
+        with patch.object(api, "ai_service", self.service):
+            with self.assertRaises(api.HTTPException) as caught:
+                await api.request_extraction("linkedin:1000", _=True)
+            self.assertEqual(caught.exception.status_code, 400)
+            self.assertIn("Only active jobs", caught.exception.detail)
+            self.assertIsNone((await api.get_extraction("linkedin:1000", _=True))["saved"])
+        self.assertIsNone(self.service.task)
+        self.assertEqual(self.service.store.status()["counts"], {})
+
+    async def test_archive_after_claim_prevents_request_and_late_completion(self):
+        calls = []
+        async def requested(work):
+            calls.append(work["job_id"])
+            return response()
+        self.service.requester = requested
+        self.service.store.enqueue("linkedin:1000")
+        work = self.service.store.claim(1)[0]
+        with self.service.store.connect() as conn:
+            conn.execute("UPDATE jobs SET archived_at='2026-09-06' WHERE job_id=?", (work["job_id"],))
+        await self.service.process(work)
+        self.assertEqual(calls, [])
+        self.service.store.finish(work, payload=fixture())
+        result = self.service.store.job_result(work["job_id"])
+        self.assertEqual(result["status"], "interrupted")
+        self.assertIsNone(result["saved"])
+        with self.service.store.connect() as conn:
+            attempt = conn.execute("SELECT status,error_kind FROM ai_attempts").fetchone()
+        self.assertEqual(tuple(attempt), ("interrupted", "inactive"))
+
+    async def test_archive_during_request_retains_usage_without_publishing_or_retrying(self):
+        async def archived_during_request(work):
+            with self.service.store.connect() as conn:
+                conn.execute("UPDATE jobs SET archived_at='2026-09-06' WHERE job_id=?", (work["job_id"],))
+            return response()
+        self.service.requester = archived_during_request
+        self.service.store.enqueue("linkedin:1000")
+        work = self.service.store.claim(1)[0]
+        await self.service.process(work)
+        self.assertIsNone(self.service.store.job_result(work["job_id"])["saved"])
+        self.assertEqual(self.service.store.status()["counts"], {})
+        self.assertEqual(self.service.store.status()["usage"]["output_tokens"], 200)
+        self.assertEqual(self.service.store.retry_failed(), 0)
+        with self.service.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM description_extractions WHERE extractor='openai_job'").fetchone()[0], 0)
+            self.assertEqual(tuple(conn.execute("SELECT status,error_kind FROM ai_work").fetchone()), ("interrupted", "inactive"))
+        # A transient failure arriving after an archive also must not schedule a retry.
+        self.service.store.enqueue("linkedin:1001")
+        work = self.service.store.claim(1)[0]
+        with self.service.store.connect() as conn:
+            conn.execute("UPDATE jobs SET relevance_outcome='excluded' WHERE job_id=?", (work["job_id"],))
+        self.service.store.finish(work, error_kind="rate_limit", retry_delay=60, global_backoff=True)
+        self.assertEqual(self.service.store.job_result(work["job_id"])["status"], "interrupted")
+        self.assertEqual(self.service.store.status()["cooldown_until"], 0)
 
     async def test_capacity_retry_is_durable_and_applies_global_backoff(self):
         req = httpx.Request("POST", "https://api.openai.com/v1/responses")

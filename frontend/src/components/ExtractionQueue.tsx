@@ -69,7 +69,7 @@ const ExtractionQueue: React.FC<{ onChanged: () => void; onActivityChange?: (mes
     {error && <p role="alert" className="description-error">{error} <button type="button" className="ghost sm" onClick={() => setReload((value) => value+1)}>Reload AI status</button></p>}
     <details className="processing-details">
       <summary>Results & options</summary>
-      {state && <p>Each click queues up to {state.batch_size} active or favorited jobs with saved descriptions. Current results and queued jobs are skipped; click again for the next batch. Archive decisions stay unchanged.</p>}
+      {state && <p>Each click queues up to {state.batch_size} active jobs with saved descriptions, with active favorites first. Filtered and archived jobs are excluded from extraction and retries. Current results and queued jobs are skipped; click again for the next batch.</p>}
       <div className="processing-options">
         {primaryAction !== "start" && <button className="ghost sm" type="button" disabled={busy || !state?.configured} onClick={() => void act("start")}>{startLabel}</button>}
         {failed > 0 && <button className="ghost sm" type="button" disabled={busy || !state?.configured} onClick={() => void act("retry")}>Retry next {state?.batch_size} failed</button>}

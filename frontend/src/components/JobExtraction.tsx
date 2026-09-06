@@ -32,13 +32,14 @@ function Alternatives({ item, claims }: { item: AIClaim; claims: AIClaim[] }) {
 
 function Evidence({ items, sources }: { items: AIEvidence[]; sources: Record<string, string> }) {
   return <details className="extraction-evidence"><summary>Show evidence</summary>{items.map((item, i) => {
-    const source = sources[item.source_ref] || item.quote;
+    // Python evidence offsets count Unicode code points, including emoji as one.
+    const source = Array.from(sources[item.source_ref] || item.quote);
     return <blockquote key={`${item.source_ref}-${i}`}><span className="muted tiny">{label(item.source_ref)}</span>
-      <p>{source.slice(0, item.start)}<mark>{source.slice(item.start, item.end)}</mark>{source.slice(item.end)}</p></blockquote>;
+      <p>{source.slice(0, item.start).join("")}<mark>{source.slice(item.start, item.end).join("")}</mark>{source.slice(item.end).join("")}</p></blockquote>;
   })}</details>;
 }
 
-const JobExtraction: React.FC<{ jobId: string; refreshToken?: number }> = ({ jobId, refreshToken = 0 }) => {
+const JobExtraction: React.FC<{ jobId: string; inactive?: boolean; refreshToken?: number }> = ({ jobId, inactive = false, refreshToken = 0 }) => {
   const [result, setResult] = useState<AIJobResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
@@ -52,14 +53,14 @@ const JobExtraction: React.FC<{ jobId: string; refreshToken?: number }> = ({ job
         if (cancelled) return;
         setResult(next);
         setError(null);
-        if (next.status === "running" || (!next.queue.paused && ["queued", "retry_wait"].includes(next.status || ""))) timer = window.setTimeout(load, 2000);
+        if (!inactive && (next.status === "running" || (!next.queue.paused && ["queued", "retry_wait"].includes(next.status || "")))) timer = window.setTimeout(load, 2000);
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load extracted information.");
       }
     };
     void load();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [jobId, refreshToken, reload]);
+  }, [jobId, inactive, refreshToken, reload]);
   const saved = result?.saved;
   const fields = saved?.fields;
   const sources = result?.input?.sources || {};
@@ -73,11 +74,12 @@ const JobExtraction: React.FC<{ jobId: string; refreshToken?: number }> = ({ job
     <div className="description-heading"><h3>Extracted information</h3>{fields && <span className="pill small language-code" title="Languages used in the description, dominant first">{fields.description_language}</span>}</div>
     {result?.legacy_review && <p className="description-notice">Saved review: {label(result.legacy_review.status)} · {label(result.legacy_review.priority)} priority</p>}
     {error && <p role="alert" className="description-error">{error} <button type="button" className="ghost sm" onClick={() => setReload((value) => value+1)}>Reload extracted information</button></p>}
-    {result?.status && result.status !== "succeeded" && <p className="muted small">AI extraction: {label(result.status)}{result.queue.paused ? " · paused" : ""}</p>}
+    {inactive && <p className="description-notice">AI extraction is available only for active jobs. Restore this job to extract again.</p>}
+    {!inactive && result?.status && result.status !== "succeeded" && <p className="muted small">AI extraction: {label(result.status)}{result.queue.paused ? " · paused" : ""}</p>}
     {result?.error && <p className="description-notice">{result.error}</p>}
     {Boolean(result?.rejected) && <details className="extraction-group"><summary>Output needing review · Not accepted</summary><pre className="extraction-draft">{JSON.stringify(result!.rejected, null, 2)}</pre></details>}
     {result?.stale && <p className="description-notice">This result uses an earlier source or extraction version. Its original evidence remains available.</p>}
-    {result && !saved && <p className="muted small">No new AI result yet. Use Extract AI above to analyze this job’s saved description.</p>}
+    {result && !saved && <p className="muted small">{inactive ? "No saved AI result." : "No new AI result yet. Use Extract AI above to analyze this job’s saved description."}</p>}
     {saved && fields && <>
       <p className="muted small">Structure and source quotes checked · Not yet reviewed for accuracy</p>
       {!fields.education && <p className="muted small">This earlier extraction has no dedicated education field.</p>}
